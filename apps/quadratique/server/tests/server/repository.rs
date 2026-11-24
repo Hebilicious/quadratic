@@ -7,6 +7,7 @@ use std::time::Duration;
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 
+use quadratique_server::git::environment;
 use quadratique_server::server::{self, Paths};
 use serde_json::json;
 use tempfile::TempDir;
@@ -21,6 +22,7 @@ pub struct Repository {
 
 impl Repository {
     pub fn new() -> Repository {
+        environment::read_no_user_configuration();
         let directory = tempfile::Builder::new()
             .prefix("quadratique-repository-")
             .tempdir()
