@@ -1,9 +1,9 @@
 use super::engine::{Cells, query, query_one};
 use super::error::StoreError;
 use super::types::{
-    AsOf, Claim, ClaimFilter, Direction, FindingLink, Graph, IssueFilter, IssueRecord, KeyedIssue,
-    Link, NoteRecord, Page, Project, RelationRecord, SourceRecord, WaitNode, Workflow,
-    WorkflowStatus,
+    AsOf, Claim, ClaimFilter, Direction, FindingLink, Graph, HolderSession, IssueFilter,
+    IssueRecord, KeyedIssue, Link, NoteRecord, Page, Project, RelationRecord, SourceRecord,
+    WaitNode, Workflow, WorkflowStatus,
 };
 use doltlite::{Connection, Row, Value};
 
@@ -196,10 +196,22 @@ impl<'c> View<'c> {
             params.push(parent.as_str().into());
         }
         match &filter.claim {
-            Some(ClaimFilter::HeldBy(key)) => {
-                conditions.push("i.claim_key = ?".into());
-                params.push(key.as_str().into());
-            }
+            Some(ClaimFilter::Mine { key, session }) => match session {
+                None => {
+                    conditions.push("i.claim_key = ?".into());
+                    params.push(key.as_str().into());
+                }
+                Some(HolderSession { harness, session }) => {
+                    conditions.push(
+                        "(i.claim_key = ? OR (json_extract(i.claim_holder, '$.session') = ? \
+                         AND json_extract(i.claim_holder, '$.harness') = ?))"
+                            .into(),
+                    );
+                    params.push(key.as_str().into());
+                    params.push(session.as_str().into());
+                    params.push(harness.as_str().into());
+                }
+            },
             Some(ClaimFilter::Any) => conditions.push("i.claim_holder IS NOT NULL".into()),
             Some(ClaimFilter::Unclaimed) => conditions.push("i.claim_holder IS NULL".into()),
             None => {}

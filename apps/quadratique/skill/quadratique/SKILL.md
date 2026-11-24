@@ -12,7 +12,7 @@ Quadratique holds every task of this repository as an issue: what to do, who hol
 The session's work has an issue before any file changes.
 
 1. The issue the human names comes first.
-2. Otherwise `quadratique issue list --claim mine`: an issue you hold (`mine` in its `notReady`). Read its notes, a reviewer may have sent it back.
+2. Otherwise `quadratique issue list --claim mine`: your session's claims; act from each one's worktree. Read its notes, a reviewer may have sent it back.
 3. Otherwise the first of `quadratique ready` that fits the task. When none fits, create one with `quadratique create --title "<the outcome>" --description "<what, why>" --acceptance "<checkable criteria, one per line>"` and tell the human its id.
 
 ## From a plan or a PRD to issues
