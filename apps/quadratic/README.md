@@ -479,6 +479,22 @@ private key from the secret `RELEASE_APP_PRIVATE_KEY`. A pull request that chang
 workflow, its configuration or `install/` builds the archives too, as workflow artifacts, and
 releases nothing.
 
+### The crates
+
+The crates `quadratic-server` and `quadratic` are not published (`publish = false`), but each one
+can be packaged as crates.io would take it. Each crate carries the files it reads at build time:
+the catalog JSON, the skill and the license are links in the crate to the files of the
+repository, and `cargo package` copies their content. The server's crate also carries a copy of
+the built web app in `server/web-dist` (ignored by git), which `moon run quadratic-server:stage-web`
+writes. A build of the packaged crate with the feature `embedded-web` embeds that copy, as there is
+no `web/dist` beside it; a build in the repository embeds `web/dist` as before.
+
+```sh
+moon run quadratic-server:stage-web
+cd apps/quadratic
+cargo package -p quadratic-server --allow-dirty   # --allow-dirty: web-dist is not in git
+```
+
 ## License
 
 Quadratic is released under the MIT License. See [`LICENSE`](../../LICENSE).
