@@ -290,9 +290,125 @@ fn a_skill_file_a_person_changed_after_an_older_build_wrote_it_is_kept_and_repor
             said["files"].get(QUADRATIC_PLANNING_PATH).is_none(),
             "{said}"
         );
+        let warnings: Vec<&str> = said["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .map(|warning| warning.as_str().expect("a text"))
+            .collect();
+        assert_eq!(warnings.len(), 2, "{said}");
+        assert!(
+            warnings[0].starts_with(&format!("{SKILL_PATH} was kept"))
+                && warnings[0].ends_with("quadratique init --print SKILL.md"),
+            "{said}"
+        );
+        assert!(
+            warnings[1].starts_with(&format!("{QUADRATIC_SKILL_PATH} was kept"))
+                && warnings[1].contains("quadratique init --print SKILL.md"),
+            "{said}"
+        );
+        assert_eq!(
+            said.as_object().unwrap().keys().next().map(String::as_str),
+            Some("warnings"),
+            "the warnings come first: {said}"
+        );
     }
     assert_eq!(read(root, SKILL_PATH), changed);
     assert_eq!(read(root, QUADRATIC_SKILL_PATH), quadratic_changed);
     assert!(answer.get("commit").is_none(), "{answer}");
     assert_eq!(git_stdout(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn init_print_writes_the_build_text_of_each_file_as_it_is_and_refuses_an_unknown_name() {
+    let home = Home::new();
+    let elsewhere = crate::support::outside();
+
+    for (name, text) in [
+        ("SKILL.md", SKILL.to_owned()),
+        ("planning.md", PLANNING.to_owned()),
+        ("AGENTS.md", format!("{LINE}\n")),
+    ] {
+        let printed = home
+            .quadratique(elsewhere.path())
+            .args(["init", "--print", name])
+            .run();
+        assert_eq!(printed.code, 0, "{printed:?}");
+        assert_eq!(printed.stdout, text, "{name}");
+    }
+
+    let refused = home
+        .quadratique(elsewhere.path())
+        .args(["init", "--print", "README.md"])
+        .run();
+    assert_ne!(refused.code, 0, "{refused:?}");
+    assert!(refused.stdout.is_empty(), "{refused:?}");
+    assert!(
+        refused.stderr.contains("SKILL.md, planning.md, AGENTS.md")
+            && refused.stderr.contains("README.md"),
+        "{refused:?}"
+    );
+    assert!(home.servers().is_empty());
+    assert!(!home.runtime_path().exists());
+}
+
+#[test]
+fn a_repository_with_no_changed_file_gets_no_warnings() {
+    let home = Home::new();
+    let repository = Repository::new();
+
+    let answer = home
+        .quadratique(&repository.root)
+        .args(["init", "--key", "NEW"])
+        .run()
+        .ok();
+
+    assert!(answer.get("warnings").is_none(), "{answer}");
+}
+
+#[test]
+fn in_quadratic_s_folder_a_link_and_a_person_s_own_file_are_never_removed() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let root = &repository.root;
+    let (_, quadratic_skill, quadratic_planning) = earlier_versions("quadratic").remove(0);
+    write(root, "docs/skill.md", &quadratic_skill);
+    write(root, QUADRATIC_PLANNING_PATH, &quadratic_planning);
+    write(root, ".agents/skills/quadratic/notes.md", "our notes\n");
+    std::os::unix::fs::symlink("../../../docs/skill.md", root.join(QUADRATIC_SKILL_PATH)).unwrap();
+    commit_all(root);
+
+    let answer = home
+        .quadratique(root)
+        .args(["init", "--key", "LNK"])
+        .run()
+        .ok();
+
+    assert_eq!(
+        answer["files"][QUADRATIC_SKILL_PATH], "a link: kept",
+        "{answer}"
+    );
+    assert_eq!(
+        answer["files"][QUADRATIC_PLANNING_PATH],
+        "removed: Quadratic's text, now in .agents/skills/quadratique/",
+        "{answer}"
+    );
+    assert!(
+        answer["warnings"][0]
+            .as_str()
+            .is_some_and(|warning| warning.starts_with(&format!("{QUADRATIC_SKILL_PATH} was kept"))),
+        "{answer}"
+    );
+    assert!(
+        std::fs::symlink_metadata(root.join(QUADRATIC_SKILL_PATH))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(read(root, "docs/skill.md"), quadratic_skill);
+    assert_eq!(
+        read(root, ".agents/skills/quadratic/notes.md"),
+        "our notes\n"
+    );
+    assert!(!root.join(QUADRATIC_PLANNING_PATH).exists());
 }

@@ -125,6 +125,23 @@ in `AGENTS.md` becomes Quadratique's. The `commit` field records these changes.
 `unchanged` (it holds this build's text), `would update: it holds an earlier Quadratique text`, or
 `different: yours is kept` (a person changed it).
 
+A kept file is also a warning. The answer then starts with a `warnings` list that names each
+kept file and the command that prints this build's text of it, for example:
+
+```json
+{"warnings":[".agents/skills/quadratique/SKILL.md was kept: a person changed it, so it lacks this build's text. Merge that text into it: quadratique init --print SKILL.md"],"files":{...}}
+```
+
+`quadratique init --print SKILL.md` writes this build's `SKILL.md` to standard output as it is, not
+wrapped in JSON, so that you or an agent can compare it with the kept file and merge the two.
+`--print planning.md` gives the other skill file and `--print AGENTS.md` the line. `--print` needs
+no repository and no server and writes nothing, so it works in a sandbox that cannot reach the
+server. Any other name is refused with the list of names it knows.
+
+`init` removes a file of `.agents/skills/quadratic/` only when it is a regular file that holds
+exactly a text Quadratic wrote. It keeps a link, a changed file and any other file there, and keeps
+the folder when it is not empty.
+
 ## Who can talk to the server
 
 The server listens on `127.0.0.1`, and on Linux it answers only processes of the account that

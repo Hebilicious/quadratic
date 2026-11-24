@@ -12,7 +12,7 @@ use crate::caller;
 use crate::commands::{print_json, report};
 use crate::shipped;
 
-pub const USAGE: &str = "init [--key <KEY>] [--name <name>] [--default-branch <branch>] [--dry-run]: set up Quadratique in this git repository, or bring its setup to this build's text after an upgrade. Writes the skill to .agents/skills/quadratique/ (SKILL.md and planning.md), adds the Quadratique line to AGENTS.md, and creates the project bound to the repository (key from --key, else from the folder's name; default branch from --default-branch, else the remote's HEAD, else the branch checked out in the main worktree, else main; a project that has the repository already is left alone). A skill file that holds the text of an earlier build is replaced with this build's; a skill file that holds any other text, which a person wrote, is left as it is. The skill files and the AGENTS.md line of Quadratic, the earlier name, move to Quadratique's. The answer says per file what was done. --dry-run changes nothing and answers what init would do. Its files stay inside the repository; the project is in the server's store. Writes no agent configuration and makes no commit: when it wrote a setup file, or one of its own is not committed yet, it prints the commit to run.";
+pub const USAGE: &str = "init [--key <KEY>] [--name <name>] [--default-branch <branch>] [--dry-run] | init --print <SKILL.md|planning.md|AGENTS.md>: set up Quadratique in this git repository, or bring its setup to this build's text after an upgrade. Writes the skill to .agents/skills/quadratique/ (SKILL.md and planning.md), adds the Quadratique line to AGENTS.md, and creates the project bound to the repository (key from --key, else from the folder's name; default branch from --default-branch, else the remote's HEAD, else the branch checked out in the main worktree, else main; a project that has the repository already is left alone). A skill file that holds the text of an earlier build is replaced with this build's; a skill file that holds any other text, which a person wrote, is left as it is. The skill files and the AGENTS.md line of Quadratic, the earlier name, move to Quadratique's. The answer says per file what was done, and its warnings name each kept file with the command that prints this build's text of it. --dry-run changes nothing and answers what init would do. --print writes this build's text of one file (AGENTS.md: its line) to standard output as it is, to merge into a kept file; it needs no repository and no server. Its files stay inside the repository; the project is in the server's store. Writes no agent configuration and makes no commit: when it wrote a setup file, or one of its own is not committed yet, it prints the commit to run.";
 
 struct SkillFile {
     path: &'static str,
@@ -42,6 +42,73 @@ struct Request {
     name: Option<String>,
     default_branch: Option<String>,
     dry_run: bool,
+}
+
+/// The texts `init --print` gives, by the name an agent passes.
+fn printable() -> [(&'static str, String); 3] {
+    [
+        ("SKILL.md", SKILL_FILES[0].text.to_owned()),
+        ("planning.md", SKILL_FILES[1].text.to_owned()),
+        (AGENTS_PATH, format!("{AGENTS_LINE}\n")),
+    ]
+}
+
+/// Writes the build's text raw, so that an agent can merge it with a file a person changed. It
+/// needs no repository and no server, and writes nothing.
+fn print_text(name: &str, io: &mut CliIo) -> i32 {
+    use std::io::Write;
+    let texts = printable();
+    let Some((_, text)) = texts.iter().find(|(known, _)| *known == name) else {
+        let known: Vec<&str> = texts.iter().map(|(known, _)| *known).collect();
+        return report(
+            io,
+            Kind::InvalidInput,
+            format!("init --print knows {}, not {name:?}.", known.join(", ")),
+        );
+    };
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => exit::VALUE,
+        Err(error) => report(
+            io,
+            Kind::Internal,
+            format!("Writing the text failed: {error}"),
+        ),
+    }
+}
+
+/// The warning for a skill file kept because a person changed it: it names the file and the
+/// command that prints the build's text to merge into it.
+fn kept_warning(shown: &str) -> String {
+    let name = Path::new(shown)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shown);
+    format!(
+        "{shown} was kept: a person changed it, so it lacks this build's text. Merge that text into it: quadratique init --print {name}"
+    )
+}
+
+fn warnings(plan: &Plan) -> Vec<String> {
+    let skills = plan
+        .skills
+        .iter()
+        .filter(|(file, _)| matches!(file.content, Content::Different(_)))
+        .map(|(file, _)| kept_warning(file.shown));
+    let retired = plan.retired.iter().filter_map(|retired| match retired {
+        Retired::Keep(shown, word) if *word == KEPT => Some(format!(
+            "{} Quadratique reads .agents/skills/quadratique/, not this folder.",
+            kept_warning(shown)
+        )),
+        Retired::Keep(shown, _) => Some(format!(
+            "{shown} was kept: it is a link, which init does not follow to remove. Quadratique reads .agents/skills/quadratique/; remove it by hand when nothing needs it."
+        )),
+        Retired::Remove(_) => None,
+    });
+    skills.chain(retired).collect()
 }
 
 fn request(words: &[&str]) -> Option<Request> {
@@ -350,6 +417,9 @@ struct Plan {
 }
 
 pub async fn init(words: &[&str], io: &mut CliIo) -> i32 {
+    if let ["--print", name] = words {
+        return print_text(name, io);
+    }
     match check(words, io).await {
         Ok(plan) => apply(plan, io).await,
         Err(code) => code,
@@ -575,7 +645,12 @@ async fn apply(plan: Plan, io: &mut CliIo) -> i32 {
         .map(|(path, word)| (path.to_owned(), json!(word)))
         .collect();
     files.insert(AGENTS_PATH.into(), json!(agents_word));
-    let mut answer = json!({ "files": files, "project": project });
+    let warnings = warnings(&plan);
+    let mut answer = if warnings.is_empty() {
+        json!({ "files": files, "project": project })
+    } else {
+        json!({ "warnings": warnings, "files": files, "project": project })
+    };
     if plan.dry_run {
         answer["dryRun"] = json!(true);
     }
