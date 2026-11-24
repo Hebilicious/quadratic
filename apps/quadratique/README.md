@@ -497,40 +497,61 @@ runs on every push to `main`:
    together, and adds the changes to `CHANGELOG.md`.
 2. When that pull request is merged, release-please creates the tag `v<version>` on the merge
    commit and a draft GitHub release.
-3. One job per platform checks out that commit by its SHA, builds the web app and the release
-   binary with it inside on the oldest hosted Ubuntu (22.04), and keeps the archive and its
-   SHA-256 file as workflow artifacts. `install/package.sh` makes the archive. The job prints the
-   libraries and the newest glibc that the binary needs. It holds no token.
-4. A last job, which checks out nothing and runs no project code, checks that the four files are
-   there and that each archive matches its SHA-256 file. It attaches them to the draft, replacing
-   any older copy and removing any other file, checks the digest of each attached file, and only
-   then publishes the release.
+3. A job that checks out nothing names the release to finish: the release whose tag is `v` and
+   the version that `.release-please-manifest.json` says at the pushed commit, found by its exact
+   tag, even when release-please failed after it made the draft. It builds a draft only when the
+   tag points at the commit that was released. A published release with its four files needs
+   nothing; a published release without them fails this job and is not changed.
+4. One job per platform checks out that commit by its SHA, checks that the tag points at it,
+   builds the web app and the release binary with it inside on the oldest hosted Ubuntu (22.04),
+   and keeps the archive and its SHA-256 file as workflow artifacts. `install/package.sh` makes
+   the archive. The job prints the libraries and the newest glibc that the binary needs. It holds
+   no token.
+5. A last job, which checks out nothing and runs no project code, checks that the four files are
+   there and that each archive matches its SHA-256 file. It works on the release by its ID and
+   changes files only while the release is a draft: it removes any file whose name or digest is
+   not one of the four, uploads the missing ones, checks the four digests, checks the tag again,
+   and only then publishes the release. On a release that is already public it changes nothing:
+   it succeeds when the four digests match and fails otherwise.
 
 The workflow writes with tokens of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
 workflow for a tag that `GITHUB_TOKEN` pushes, and holds the checks of a pull request that it
 opens. Each token is for this repository only: release-please's can write contents and pull
-requests, the last job's only contents. The workflow reads the App's client ID from the repository
-variable `RELEASE_APP_CLIENT_ID` and its private key from the secret `RELEASE_APP_PRIVATE_KEY`. A
-pull request that changes the release workflow, its configuration or `install/` builds the
-archives too, as workflow artifacts, and releases nothing.
+requests; the two other jobs' tokens can write contents only (a token needs write access to see a
+draft release). The workflow reads the App's client ID from the repository variable
+`RELEASE_APP_CLIENT_ID` and its private key from the secret `RELEASE_APP_PRIVATE_KEY`.
+
+A pull request that changes the release workflow, its configuration, `.github/release-tests/` or
+`install/` builds the archives too, as workflow artifacts, and releases nothing. It also runs
+`node .github/release-tests/release-please.cjs`, which runs release-please as the pinned action
+bundles it on this configuration and checks that it opens `chore(release): release <version>` and
+that the merged pull request yields the draft release `v<version>`, and
+`bash .github/release-tests/steps.sh`, which runs the jobs' scripts against a fake `gh`. Both run
+locally too, with no token.
 
 #### When a release stops half-way
 
 The release stays a draft until the last job has attached and checked the four files, so a
 failure never leaves a public release without its archives.
 
-- **A build or the last job failed** (a flaky runner, a network error): in the workflow run, use
-  "Re-run failed jobs". It builds the same commit again and the last job replaces whatever it had
-  attached.
-- **The run is too old to re-run, or you re-ran all its jobs:** push any commit to `main` (a
-  `docs:` or `chore:` one releases nothing). When release-please creates no release, the workflow
-  looks for a draft release whose tag starts with `v`, and builds and finishes the newest one.
-- **By hand**, if the workflow cannot run: on each platform, check out `refs/tags/v<version>`,
-  run `moon run quadratique-web:build`, build with
-  `sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target` and
-  `sh apps/quadratique/install/package.sh <binary> <version> <target triple> <folder>`, then
-  `gh release upload v<version> <the four files> --clobber` and
-  `gh release edit v<version> --draft=false`.
+- **A job failed** (a flaky runner, a network error, release-please after it made the draft): in
+  the workflow run, use "Re-run failed jobs". The builds run again on the same commit, replace
+  their artifacts, and the last job replaces only the files that are wrong.
+- **The run is too old to re-run:** push any commit to `main` (a `docs:` or `chore:` one releases
+  nothing). The workflow finds the draft of the manifest's version and finishes it.
+- **By hand**, if the workflow cannot run, in this order:
+  1. On each platform: `git checkout refs/tags/v<version>`, `moon run quadratique-web:build`,
+     then `sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target`
+     and `sh apps/quadratique/install/package.sh <binary> <version> <target triple> <folder>`.
+  2. Put the four files in one folder and check them there: `sha256sum --check --strict *.sha256`.
+  3. Check that the release is still a draft:
+     `gh release view v<version> --json isDraft --jq .isDraft` must print `true`. If it prints
+     `false`, stop: do not change a public release's files.
+  4. `gh release upload v<version> <the four files> --clobber`.
+  5. Check the attached digests against the local files:
+     `gh release view v<version> --json assets --jq '.assets[] | "\(.name) \(.digest)"'` must
+     list exactly the four files, each with `sha256:` and the hash that `sha256sum` prints for it.
+  6. Only then: `gh release edit v<version> --draft=false`.
 
 ### The crates
 

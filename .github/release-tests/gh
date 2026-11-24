@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""A fake `gh` for the release workflow's steps. It answers the REST calls those steps make from a repository kept
+in $FAKE_GH/state.json, with the asset files in $FAKE_GH/assets/, and logs every call to $FAKE_GH/calls."""
+import base64, hashlib, json, os, subprocess, sys
+
+root = os.environ["FAKE_GH"]
+state_file = os.path.join(root, "state.json")
+store = os.path.join(root, "assets")
+state = json.load(open(state_file))
+args = sys.argv[1:]
+open(os.path.join(root, "calls"), "a").write(" ".join(args) + "\n")
+
+
+def save():
+    json.dump(state, open(state_file, "w"))
+
+
+def option(name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+def missing(what):
+    print(f"gh: Not Found (HTTP 404): {what}", file=sys.stderr)
+    sys.exit(1)
+
+
+def release_view(release):
+    view = {key: value for key, value in release.items() if key != "assets"}
+    view["upload_url"] = f"https://uploads.github.com/repos/{state['repo']}/releases/{release['id']}/assets{{?name,label}}"
+    view["assets"] = [{"id": asset["id"], "name": asset["name"], "digest": "sha256:" + hashlib.sha256(
+        open(os.path.join(store, str(asset["id"])), "rb").read()).hexdigest()} for asset in release["assets"]]
+    return view
+
+
+def release_by_id(number):
+    return next((r for r in state["releases"] if r["id"] == int(number)), None)
+
+
+assert args[0] == "api", args
+method = option("-X") or "GET"
+endpoint = next(a for a in args[1:] if not a.startswith("-") and a not in
+                {option("-X"), option("--jq"), option("-H"), option("--input"), option("-F")})
+prefix = f"repos/{state['repo']}/"
+path = endpoint.split("://", 1)[-1].split("/", 1)[1] if "://" in endpoint else endpoint
+path, _, query = path.partition("?")
+assert path.startswith(prefix), path
+path = path[len(prefix):]
+answer = None
+raw = None
+
+if method == "GET" and path == "contents/.release-please-manifest.json":
+    ref = query.split("ref=")[1]
+    if ref not in state["manifests"]:
+        missing(path)
+    answer = {"content": base64.b64encode(json.dumps({".": state["manifests"][ref]}).encode()).decode()}
+elif method == "GET" and path == "releases":
+    answer = [release_view(r) for r in state["releases"]]
+elif method == "GET" and path.startswith("releases/assets/"):
+    raw = open(os.path.join(store, path.rsplit("/", 1)[1]), "rb").read()
+elif method == "DELETE" and path.startswith("releases/assets/"):
+    number = int(path.rsplit("/", 1)[1])
+    for release in state["releases"]:
+        release["assets"] = [a for a in release["assets"] if a["id"] != number]
+    os.remove(os.path.join(store, str(number)))
+    save()
+    sys.exit(0)
+elif method == "POST" and path.endswith("/assets"):
+    release = release_by_id(path.split("/")[1])
+    name = query.split("name=")[1]
+    if state.get("fail_upload_of") == name:
+        state.pop("fail_upload_of")
+        save()
+        print("gh: upload failed: connection reset", file=sys.stderr)
+        sys.exit(1)
+    if any(a["name"] == name for a in release["assets"]):
+        print("gh: Validation Failed (HTTP 422): already_exists", file=sys.stderr)
+        sys.exit(1)
+    state["next_asset"] = state.get("next_asset", 100) + 1
+    number = state["next_asset"]
+    data = open(option("--input"), "rb").read()
+    if state.get("corrupt_upload_of") == name:
+        data += b"corrupted in transit"
+    open(os.path.join(store, str(number)), "wb").write(data)
+    release["assets"].append({"id": number, "name": name})
+    save()
+    answer = {"id": number, "name": name}
+elif path.startswith("releases/") and path.count("/") == 1:
+    release = release_by_id(path.split("/")[1])
+    if release is None:
+        missing(path)
+    if method == "PATCH":
+        assert option("-F") == "draft=false", args
+        release["draft"] = False
+        save()
+    answer = release_view(release)
+elif method == "GET" and path.startswith("commits/refs/tags/"):
+    tag = path[len("commits/refs/tags/"):]
+    if tag not in state["tags"]:
+        missing(path)
+    answer = {"sha": state["tags"][tag]}
+elif method == "GET" and path.startswith("compare/"):
+    answer = {"status": state["compare"].get(path[len("compare/"):], "diverged")}
+else:
+    sys.exit(f"fake gh: no answer for {method} {endpoint}")
+
+if raw is not None:
+    sys.stdout.buffer.write(raw)
+elif option("--jq"):
+    sys.stdout.write(subprocess.run(["jq", "-r", option("--jq")], input=json.dumps(answer), text=True,
+                                    capture_output=True, check=True).stdout)
+else:
+    print(json.dumps(answer))
