@@ -4,7 +4,9 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 workflow=${WORKFLOW:-$here/../workflows/release.yml}
-work=$(mktemp -d)
+# Inside the repository, so that the tools pinned in .prototools resolve in every case's folder.
+mkdir -p "$here/../../.tmp"
+work=$(mktemp -d "$here/../../.tmp/release-tests.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 step() { uv run --quiet --with pyyaml==6.0.3 python -I "$here/run_step.py" "$workflow" "$@"; }
 export PATH="$here:$PATH" GITHUB_REPOSITORY=Hebilicious/quadratique STEP_GH_TOKEN=fake
