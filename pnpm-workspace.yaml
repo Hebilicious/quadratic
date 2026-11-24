@@ -1,5 +1,5 @@
 packages:
-  - "apps/quadratic/*"
+  - "apps/quadratique/*"
 
 # Every dependency is pinned exactly, once, here. Workspace packages use `catalog:`, never a version.
 catalog:

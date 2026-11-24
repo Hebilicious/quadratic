@@ -11,7 +11,7 @@ on:
       - ".github/workflows/release.yml"
       - "release-please-config.json"
       - ".release-please-manifest.json"
-      - "apps/quadratic/install/**"
+      - "apps/quadratique/install/**"
 
 permissions:
   contents: read
@@ -88,14 +88,14 @@ jobs:
         run: |
           host=$(rustc -vV | sed -n 's/^host: //p')
           test "$host" = "${{ matrix.target }}"
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/quadratic/Cargo.toml)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/quadratique/Cargo.toml)
           if [ -n "$RELEASED" ]; then test "$version" = "$RELEASED"; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Build the web app and the release binary with it inside
         run: |
-          moon run quadratic-web:build
-          binary=$(sh apps/quadratic/install/build.sh apps/quadratic/web/dist apps/quadratic/target)
+          moon run quadratique-web:build
+          binary=$(sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target)
           echo "BINARY=$binary" >> "$GITHUB_ENV"
 
       - name: Show the newest glibc the binary needs
@@ -105,17 +105,17 @@ jobs:
 
       - name: Check that the binary runs
         run: |
-          export QUADRATIC_HOME="$RUNNER_TEMP/quadratic-home"
+          export QUADRATIQUE_HOME="$RUNNER_TEMP/quadratique-home"
           "$BINARY" --version
 
       - name: Package the archive and its SHA-256 file
         run: |
-          archive=$(sh apps/quadratic/install/package.sh "$BINARY" "${{ steps.build.outputs.version }}" "${{ matrix.target }}" "$RUNNER_TEMP/release")
+          archive=$(sh apps/quadratique/install/package.sh "$BINARY" "${{ steps.build.outputs.version }}" "${{ matrix.target }}" "$RUNNER_TEMP/release")
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: quadratic-${{ matrix.target }}
+          name: quadratique-${{ matrix.target }}
           path: |
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.sha256

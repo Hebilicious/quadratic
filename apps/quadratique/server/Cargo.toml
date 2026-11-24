@@ -1,0 +1,47 @@
+[package]
+name = "quadratique-server"
+description = "The Quadratique server: the issue lifecycle, the doltlite store and the AcidCat application."
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include = ["/src/**/*", "/build.rs", "/web-dist/**/*", "/LICENSE"]
+
+[lints]
+workspace = true
+
+[features]
+embedded-web = []
+
+[dependencies]
+acid-cat-core.workspace = true
+base64.workspace = true
+bytes.workspace = true
+doltlite.workspace = true
+futures.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+jiff.workspace = true
+jsonschema.workspace = true
+rustix = { workspace = true, features = ["net", "rand"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rustix = { workspace = true, features = ["event", "fs"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-util.workspace = true

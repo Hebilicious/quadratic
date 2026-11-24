@@ -1,0 +1,44 @@
+id: "quadratique-catalog"
+language: "javascript"
+layer: "library"
+tags: ["quadratique"]
+
+project:
+  title: "Quadratique catalog"
+  description: "The AcidCat catalog of Quadratique, shared by the Rust server and the TypeScript core of the web app."
+
+fileGroups:
+  source: ["**/*.pkl", "PklProject", "PklProject.deps.json"]
+
+tasks:
+  write:
+    description: "Render quadratique.pkl to quadratique.acidcat.json, in canonical form."
+    script: |
+      set -eu
+      mkdir -p "$workspaceRoot/.tmp"
+      run=$(mktemp -d "$workspaceRoot/.tmp/quadratique-catalog.XXXXXX")
+      trap 'rm -rf "$run"' EXIT
+      pkl eval quadratique.pkl --output-path "$run/quadratique.acidcat.json"
+      acid-cat format --write "$run/quadratique.acidcat.json"
+      mv "$run/quadratique.acidcat.json" quadratique.acidcat.json
+    inputs: ["@group(source)", "package.json", "/.prototools"]
+    outputs: ["quadratique.acidcat.json"]
+    toolchains: ["system", "node"]
+
+  check:
+    description: "Fail when quadratique.acidcat.json is not what quadratique.pkl renders, or when acid-cat check --strict refuses it."
+    script: |
+      set -eu
+      mkdir -p "$workspaceRoot/.tmp"
+      run=$(mktemp -d "$workspaceRoot/.tmp/quadratique-catalog.XXXXXX")
+      trap 'rm -rf "$run"' EXIT
+      pkl eval quadratique.pkl --output-path "$run/rendered.acidcat.json"
+      acid-cat format --write "$run/rendered.acidcat.json"
+      if ! diff -u quadratique.acidcat.json "$run/rendered.acidcat.json"; then
+        echo "quadratique.acidcat.json is stale: run moon run quadratique-catalog:write" >&2
+        exit 1
+      fi
+      acid-cat check --strict quadratique.acidcat.json
+    inputs: ["@group(source)", "quadratique.acidcat.json", "package.json", "/.prototools"]
+    toolchains: ["system", "node"]
+    tags: ["candidate"]
