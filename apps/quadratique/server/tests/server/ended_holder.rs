@@ -121,3 +121,64 @@ async fn the_human_releases_a_claim_whose_holder_ended() {
     assert_eq!(released["issue"]["status"], "todo");
     assert!(released["issue"].get("claim").is_none(), "{released}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_holds_an_issue_assigned_to_the_human_gets_human_only_for_a_move() {
+    let board = start().await;
+    let holder = board.agent("audit");
+    let issue = left_in_review(&board, &holder).await;
+    board
+        .ok(
+            &board.human(),
+            "issue.update",
+            json!({
+                "issue": issue,
+                "revision": revision(&board, &issue).await,
+                "assignee": { "kind": "human" },
+            }),
+        )
+        .await;
+
+    let released = board
+        .failure(&holder, "issue.release", json!({ "issue": issue }))
+        .await;
+    let moved = board
+        .failure(
+            &holder,
+            "issue.update",
+            json!({
+                "issue": issue,
+                "revision": revision(&board, &issue).await,
+                "status": "in-progress",
+            }),
+        )
+        .await;
+
+    assert_eq!(released["_tag"], "HumanOnly", "{released}");
+    assert_eq!(moved["_tag"], "HumanOnly", "{moved}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_human_closing_a_stacked_issue_before_its_base_merges_gets_base_not_merged() {
+    let board = start().await;
+    board.project("DEM").await;
+    let base = board.issue("Base").await;
+    let stacked = board.issue("Stacked").await;
+    board
+        .ok(
+            &board.human(),
+            "issue.link",
+            json!({ "issue": stacked, "kind": "stacked-on", "target": base }),
+        )
+        .await;
+
+    let closed = board
+        .failure(
+            &board.human(),
+            "issue.close",
+            json!({ "issue": stacked, "evidence": "checked" }),
+        )
+        .await;
+
+    assert_eq!(closed["_tag"], "BaseNotMerged", "{closed}");
+}

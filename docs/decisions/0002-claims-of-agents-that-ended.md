@@ -16,22 +16,42 @@ The server knows of an agent only what the agent's actor says (`server/src/domai
 - `session` comes from the harness: `CLAUDE_CODE_SESSION_ID` for Claude Code,
   `CODEX_THREAD_ID` for Codex.
 - `host` and `hostThread` come from the host: `T3CODE_THREAD_ID` for T3 Code.
-- `parent` comes only from `QUADRATIQUE_ACTOR_FIELDS`. No harness or host sets it.
+- `parent` comes only from `QUADRATIQUE_ACTOR_FIELDS`, the supported override of actor fields.
+  No harness or host sets it.
 
 An agent that a T3 Code thread delegates to has its own session id. Its `hostThread` is an
-opaque id of the delegated task, which does not contain the lead's thread or session. So
-nothing the server receives links that agent to the lead that started it. The server also
-cannot tell whether a holder has ended: a claim records no liveness.
+opaque id of the delegated task, which does not contain the lead's thread or session. The
+server can receive a declared `parent` through the override, but it has no parent link that
+it can trust: the agent declares the value itself. It also has no signal that a holder is
+still alive: a claim records no liveness.
 
 ## Decision
 
 1. **Notes.** Any actor may add a note to any issue, claimed or not, in any status:
    `issue.update` with `notes` and the issue's current `revision`. A review note reaches an
    issue in review this way, from a human or from any agent. Fields without a status
-   (`description`, `acceptance`, `priority`, `notes`) are open to every actor.
-2. **Moves.** Only the holder or the human may change the status of a claimed issue, release
-   it or close it. Any other agent gets `Held`, which names the holder. This includes the
-   holder's own session when it works in another worktree.
+   (`description`, `acceptance`, `priority`, `notes`) are open to every actor; an agent
+   cannot change the assignee of an issue assigned to the human (`HumanOnly`).
+2. **Manual moves by agents.** This rule is about the moves an actor asks for: a change of
+   status (`issue.update` with `status`), `issue.release` and `issue.close`. Of the actors
+   that do not hold a claim, only the human may make these moves on the claimed issue. The
+   rules refuse in this order, and the first refusal that applies is the answer:
+   - `issue.update` with `status`: `Stale` for an old `revision`; `UnknownStatus`; then
+     `HumanOnly` for an agent on an issue assigned to the human, whether or not it holds the
+     claim; then `Held`, which names the holder, for an agent that does not hold it.
+   - `issue.release`: an unclaimed issue does not change; then `HumanOnly` as above; then
+     `Held`.
+   - `issue.close`: `Resolved` for a canceled issue; success with no change for a completed
+     issue or one in the workflow's `merge` status; then `HumanOnly` as above; then `Held`
+     for an agent that does not hold the claim, or `NotClaimed` when nobody holds it.
+   - Then, for every caller, the human too: a move that would end at the workflow's `merge`
+     status or later fails with `BaseNotMerged` while an issue it is stacked on is not
+     merged (decision 0001, rule 14). The human closing a stacked issue before its base
+     merges gets `BaseNotMerged`, because the human's close moves the issue to the `merge`
+     status.
+
+   The holder's own session working in another worktree is not the holder, and gets
+   `Held`.
 3. **A claim whose holder ended.** The lead adds what it knows as a note and asks the human
    to release the claim or to move the issue. The skill says so in one line.
 
@@ -54,5 +74,8 @@ The tests take their names from these rules: `server/tests/server/ended_holder.r
   the variable, and `parent` is self-declared like every other actor field.
 - **Any agent may release a claim in review.** The server cannot tell an ended holder from a
   live one, so any agent could take a claim that another agent is still working on.
+- **The holder hands its claim over before it exits.** An explicit hand-off call names the
+  actor, or the human, that takes the claim. It covers an agent that ends in order, and
+  leaves a crash to the current rule.
 - **Release a claim after a time without activity.** It needs a liveness signal that no
   harness sends, and it would free claims of agents that wait for a long review.
