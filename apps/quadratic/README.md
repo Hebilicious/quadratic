@@ -80,8 +80,9 @@ The port changes each time the server starts. `quadratic ui` prints the current 
 ## Install from a release
 
 Each [GitHub release](https://github.com/Hebilicious/quadratic/releases) has a prebuilt binary,
-with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.35 or newer
-(Ubuntu 22.04, Debian 12, Fedora 36 or later) and no other tool: no Rust, Node.js or proto.
+with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.34 or newer
+(Ubuntu 22.04, Debian 12, RHEL 9, Fedora 35 or later) and no other tool: no Rust, Node.js or
+proto.
 
 Each platform has one archive, named for the version and the target, and its SHA-256 file:
 
@@ -468,8 +469,8 @@ runs on every push to `main`:
 2. When that pull request is merged, release-please creates the tag `v<version>` and the GitHub
    release.
 3. Then one job per platform builds the web app and the release binary with it inside, on the
-   oldest hosted Ubuntu (22.04, glibc 2.35), and attaches the archive and its SHA-256 file to the
-   release. `install/package.sh` makes the archive.
+   oldest hosted Ubuntu (22.04), and attaches the archive and its SHA-256 file to the release.
+   The job prints the newest glibc version that the binary needs (2.34). `install/package.sh` makes the archive.
 
 The workflow writes with a token of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
 workflow for a tag that `GITHUB_TOKEN` pushes, and holds the checks of a pull request that it

@@ -49,7 +49,7 @@ jobs:
         github.event_name == 'pull_request' ||
         needs.release-please.outputs.release_created == 'true'
       )
-    # The oldest hosted images, so that the binary needs glibc 2.35 at most.
+    # The oldest hosted images (glibc 2.35), so that the binary runs on older distributions too.
     strategy:
       fail-fast: false
       matrix:
