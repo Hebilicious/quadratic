@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { changeLines, type ChangeLine } from "./present.ts";
+import { changeLines, relationLabel, type ChangeLine } from "./present.ts";
 
 const statusName = (key: string) => key;
 const shown = (line: ChangeLine) => `${line.before ?? ""} → ${line.after ?? ""}`;
@@ -61,4 +61,9 @@ describe("a change of the history, in plain words", () => {
     );
     expect([line?.before, line?.after]).toEqual(['"review"', '"checking"']);
   });
+});
+
+test("a stacked-on relation reads from both of its issues", () => {
+  expect(relationLabel({ kind: "stacked-on", direction: "outgoing" })).toBe("Stacked on");
+  expect(relationLabel({ kind: "stacked-on", direction: "incoming" })).toBe("Base of");
 });

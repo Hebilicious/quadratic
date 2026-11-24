@@ -83,6 +83,8 @@ const NOT_READY: Readonly<Record<NotReadyReason, string>> = {
   category: "Its status is not one where work starts.",
   blocked: "It waits on an unresolved blocker, of its own or of a parent.",
   children: "It waits on unresolved children.",
+  stacked:
+    "An issue it is stacked on is not in review, or your branch does not start from that issue's branch.",
   assigned: "It is assigned to an agent role, not to you.",
   claimed: "Someone holds it.",
   mine: "You hold it.",
@@ -97,6 +99,7 @@ const RELATION_OUT: Readonly<Record<RelationKind, string>> = {
   related: "Related to",
   duplicate: "Duplicate of",
   "discovered-from": "Discovered from",
+  "stacked-on": "Stacked on",
 };
 
 const RELATION_IN: Readonly<Record<RelationKind, string>> = {
@@ -104,6 +107,7 @@ const RELATION_IN: Readonly<Record<RelationKind, string>> = {
   related: "Related to",
   duplicate: "Duplicated by",
   "discovered-from": "Led to",
+  "stacked-on": "Base of",
 };
 
 export function relationLabel(relation: Pick<Relation, "kind" | "direction">): string {
@@ -117,6 +121,7 @@ export const RELATION_KINDS: readonly RelationKind[] = [
   "related",
   "duplicate",
   "discovered-from",
+  "stacked-on",
 ];
 
 export function relationKindLabel(kind: RelationKind): string {
