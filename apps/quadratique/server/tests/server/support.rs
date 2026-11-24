@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use acid_cat_core::Outcome;
 use acid_cat_core::http::HttpClient;
-use quadratique_server::git::watcher;
+use quadratique_server::git::{environment, watcher};
 use quadratique_server::server::{self, Paths, Server, Waits};
 use quadratique_server::web::WebApp;
 use serde_json::{Value, json};
@@ -28,6 +28,7 @@ pub async fn start() -> Running {
 }
 
 pub async fn start_looking_every(every: Duration) -> Running {
+    environment::read_no_user_configuration();
     let home = tempfile::tempdir().expect("a temporary home");
     let server = within(
         "the server's start",

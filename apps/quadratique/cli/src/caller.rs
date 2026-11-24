@@ -7,6 +7,7 @@ use quadratique_server::app::{
     ACTOR_HEADER, BRANCH_HEADER, REPOSITORY_HEADER, WORKTREE_HEADER, encode_header,
 };
 use quadratique_server::domain::{Actor, ActorError, Binding, Caller, WorkingCopy};
+use quadratique_server::git::environment;
 
 pub fn detect(binding: Binding) -> Result<Caller, ActorError> {
     match std::env::current_dir() {
@@ -94,7 +95,7 @@ pub fn branch_in(directory: &Path) -> Option<String> {
 }
 
 fn git_in(directory: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let output = environment::without_trace(&mut Command::new("git"))
         .args(args)
         .current_dir(directory)
         .stdin(Stdio::null())

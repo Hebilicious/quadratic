@@ -17,6 +17,7 @@ import { paths } from "../route.ts";
 import { useSnapshot } from "../use-actor.ts";
 import { useWorkspace } from "../workspace.ts";
 import HistoryList from "./history-list.vue";
+import LinkedText from "./linked-text.vue";
 import {
   actorDetails,
   ago,
@@ -24,6 +25,7 @@ import {
   notReadyText,
   priorityLabel,
   PRIORITY_CHOICES,
+  shortCommit,
   when,
 } from "./present.ts";
 
@@ -210,7 +212,7 @@ function follow(event: MouseEvent): void {
       <NotesField :notes="issue.notes" :editor="editor" />
       <section class="field">
         <h3 class="field-label">Evidence</h3>
-        <p v-if="issue.evidence !== undefined" class="field-value" data-multiline="true">{{ issue.evidence }}</p>
+        <p v-if="issue.evidence !== undefined" class="field-value" data-multiline="true"><LinkedText :text="issue.evidence" /></p>
         <p v-else class="field-value field-empty">No evidence yet: it comes with the close.</p>
       </section>
       <CloseForm v-if="closeChanges(issue, project)" :editor="editor" :focus="closing" />
@@ -276,6 +278,43 @@ function follow(event: MouseEvent): void {
           <ReleaseButton :editor="editor" :holder="issue.claim.holder.name" />
         </template>
         <p v-else class="field-empty">Nobody holds it.</p>
+      </section>
+
+      <section v-if="issue.work !== undefined" class="side-section" aria-label="Work in git">
+        <h3 class="field-label">Work in git</h3>
+        <dl class="claim-card">
+          <template v-if="issue.work.branch !== undefined">
+            <dt>Branch</dt>
+            <dd><code class="wrap">{{ issue.work.branch }}</code></dd>
+          </template>
+          <template v-if="issue.work.pullRequest !== undefined">
+            <dt>Pull request</dt>
+            <dd>
+              <a
+                class="text-link"
+                :href="issue.work.pullRequest"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Open on GitHub</a>
+            </dd>
+          </template>
+          <template v-if="issue.work.commits.length > 0">
+            <dt>Landed</dt>
+            <dd>
+              <template v-for="landed in issue.work.commits" :key="landed.commit">
+                <a
+                  v-if="landed.url !== undefined"
+                  class="issue-link"
+                  :href="landed.url"
+                  :title="landed.commit"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >{{ shortCommit(landed.commit) }}</a>
+                <code v-else :title="landed.commit">{{ shortCommit(landed.commit) }}</code>
+              </template>
+            </dd>
+          </template>
+        </dl>
       </section>
 
       <RelationsField :issue="issue" :others="others" :editor="editor" :status-name="statusName" />

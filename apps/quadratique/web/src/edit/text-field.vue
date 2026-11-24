@@ -1,6 +1,7 @@
 <script setup lang="ts" vapor>
 import { computed, nextTick, ref } from "vue";
 
+import LinkedText from "../views/linked-text.vue";
 import { failureText } from "../views/present.ts";
 import type { IssuePatch } from "../core/quadratique.ts";
 import { useWorkspace } from "../workspace.ts";
@@ -141,7 +142,7 @@ function onKey(event: KeyboardEvent): void {
       class="field-value"
       :data-multiline="multiline"
       @dblclick="start"
-    >{{ value }}</p>
+    ><LinkedText :text="value" /></p>
     <p v-else class="field-value field-empty" @dblclick="start">{{ empty }}</p>
   </section>
 </template>
