@@ -215,7 +215,7 @@ archive=$(sh "$here/package.sh" "$scratch/quadratic-new" 9.8.7 "$target" "$scrat
 [ "$archive" = "$scratch/release/quadratic-9.8.7-$target.tar.gz" ] || fail "package.sh names its archive $archive"
 (cd "$scratch/release" && sha256sum -c --quiet "quadratic-9.8.7-$target.tar.gz.sha256") \
   || fail "the archive does not match its SHA-256 file"
-[ "$(tar -tzf "$archive" | sort | tr '\n' ' ')" = "quadratic-9.8.7-$target/ quadratic-9.8.7-$target/LICENSE quadratic-9.8.7-$target/README.md quadratic-9.8.7-$target/install.sh quadratic-9.8.7-$target/quadratic quadratic-9.8.7-$target/uninstall.sh " ] \
+[ "$(tar -tzf "$archive" | LC_ALL=C sort | tr '\n' ' ')" = "quadratic-9.8.7-$target/ quadratic-9.8.7-$target/LICENSE quadratic-9.8.7-$target/README.md quadratic-9.8.7-$target/install.sh quadratic-9.8.7-$target/quadratic quadratic-9.8.7-$target/uninstall.sh " ] \
   || fail "the archive holds $(tar -tzf "$archive" | tr '\n' ' ')"
 mkdir "$scratch/download"
 tar -xzf "$archive" -C "$scratch/download"
