@@ -116,14 +116,32 @@ test("the issue page links the pull request, the landed commit and the addresses
       "--description",
       "Follow https://example.com/style-guide. <b>Bold</b> stays text.",
       "--acceptance",
-      "It is done.",
+      "It passes https://example.com/checklist.",
+    );
+    workspace.quadratique(
+      "human",
+      repository,
+      "issue",
+      "update",
+      "--issue",
+      "DEM-1",
+      "--revision",
+      workspace.revision("DEM-1"),
+      "--notes",
+      "Compare with <https://example.com/old-guide>.",
     );
     await page.goto(workspace.url("/issues/DEM-1"));
     await expect(issue).toContainText("Write the guide");
     await expect(work).toHaveCount(0);
   });
 
-  await test.step("an address in the description is a link, and markup in it is shown as text", async () => {
+  await test.step("addresses in the description, the acceptance and a note are links, and markup is shown as text", async () => {
+    for (const address of ["https://example.com/checklist", "https://example.com/old-guide"]) {
+      await expect(issue.getByRole("link", { name: address })).toHaveAttribute("href", address);
+    }
+    await expect(issue.getByRole("region", { name: "Notes" })).toContainText(
+      "Compare with <https://example.com/old-guide>.",
+    );
     await expect(
       issue.getByRole("link", { name: "https://example.com/style-guide" }),
     ).toHaveAttribute("href", "https://example.com/style-guide");

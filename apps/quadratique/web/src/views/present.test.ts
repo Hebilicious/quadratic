@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { changeLines, relationLabel, textParts, type ChangeLine } from "./present.ts";
+import { changeLines, relationLabel, textParts, type ChangeLine, type Meter } from "./present.ts";
 
 const statusName = (key: string) => key;
 const shown = (line: ChangeLine) => `${line.before ?? ""} → ${line.after ?? ""}`;
@@ -71,13 +71,25 @@ test("a stacked-on relation reads from both of its issues", () => {
 describe("web addresses in an issue's text", () => {
   test("an address becomes a link part and the text around it stays text, punctuation after it included", () => {
     expect(
-      textParts("PR https://github.com/Owner/repo/pull/105. Then (see https://example.com/a_(b))."),
+      textParts(
+        "PR https://github.com/Owner/repo/pull/105. Then (see https://example.com/a_(b))).",
+      ),
     ).toEqual([
       { kind: "text", text: "PR " },
       { kind: "link", text: "https://github.com/Owner/repo/pull/105" },
       { kind: "text", text: ". Then (see " },
       { kind: "link", text: "https://example.com/a_(b)" },
-      { kind: "text", text: ")." },
+      { kind: "text", text: "))." },
+    ]);
+  });
+
+  test("an address in angle brackets is taken whole, its brackets stay text", () => {
+    expect(textParts("See <https://example.com/a!>, then http://a.")).toEqual([
+      { kind: "text", text: "See <" },
+      { kind: "link", text: "https://example.com/a!" },
+      { kind: "text", text: ">, then " },
+      { kind: "link", text: "http://a" },
+      { kind: "text", text: "." },
     ]);
   });
 
@@ -96,5 +108,20 @@ describe("web addresses in an issue's text", () => {
       { kind: "text", text: "No address here: javascript:alert(1)" },
     ]);
     expect(textParts("")).toEqual([]);
+  });
+
+  test.each([
+    [
+      "an address ending in unmatched closing brackets",
+      `https://example.com/${"a".repeat(20_000)}${")".repeat(20_000)}`,
+    ],
+    ["an address ending in punctuation", `https://example.com/${".".repeat(40_000)}`],
+    ["angle brackets that never close", "<https://example.com/a ".repeat(2_000)],
+    ["schemes back to back", "https://".repeat(5_000)],
+  ])("%s is read in work that grows with its length", (_name, text) => {
+    const meter: Meter = { steps: 0 };
+    const parts = textParts(text, meter);
+    expect(parts.map((part) => part.text).join("")).toBe(text);
+    expect(meter.steps).toBeLessThanOrEqual(4 * text.length);
   });
 });
