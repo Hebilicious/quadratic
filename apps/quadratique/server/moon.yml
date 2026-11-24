@@ -1,0 +1,36 @@
+id: "quadratique-server"
+language: "rust"
+layer: "library"
+tags: ["quadratique"]
+
+fileGroups:
+  sources:
+    - "src/**/*"
+    - "Cargo.toml"
+    - "build.rs"
+    - "/apps/quadratique/catalog/quadratique.acidcat.json"
+  workspace:
+    - "/apps/quadratique/Cargo.toml"
+    - "/apps/quadratique/Cargo.lock"
+    - "/apps/quadratique/rust-toolchain.toml"
+
+tasks:
+  build:
+    command: "cargo build -p quadratique-server"
+    inputs: ["@group(sources)", "@group(workspace)"]
+  test:
+    command: "cargo test -p quadratique-server"
+    inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]
+    tags: ["candidate"]
+  test-as-nobody:
+    description: "Needs `sudo -n -u nobody` to work without a password: runs the ignored test in which the account nobody calls a server of this account with curl and must get the owner-only 403. Not part of `test`."
+    command: "cargo test -p quadratique-server --test server -- --ignored --exact process::a_process_of_another_account_is_refused --nocapture"
+    inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]
+    options:
+      cache: false
+  lint:
+    command: "cargo clippy -p quadratique-server --all-targets -- -D warnings"
+    inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]
+  fmt-check:
+    command: "cargo fmt -p quadratique-server --check"
+    inputs: ["@group(sources)", "tests/**/*"]

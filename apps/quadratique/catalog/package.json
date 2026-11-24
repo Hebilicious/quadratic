@@ -1,0 +1,10 @@
+{
+  "name": "quadratique-catalog",
+  "private": true,
+  "type": "module",
+  "description": "The AcidCat catalog of Quadratique: the Pkl source and the JSON that every implementation reads.",
+  "license": "MIT",
+  "devDependencies": {
+    "@acid-cat/cli": "catalog:"
+  }
+}
