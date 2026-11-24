@@ -32,7 +32,7 @@ Read [`planning.md`](planning.md) before you turn a plan or a PRD into issues.
 
 - Changes requested: first `quadratique issue update --issue ABC-12 --revision <revision> --status in-progress`, so the board shows you at work. Then change, commit, `close` with the new evidence, and ask again.
 - Accepted: merge as `AGENTS.md` says; after a merge on GitHub, `git fetch`. Quadratique sees the merge and moves the issue to `merged`, which gives it a new `revision`. `quadratique show --issue ABC-12` waits up to 2 seconds for the repository: while it still says review, run it again; if it stays there, it waits for an issue it is stacked on to merge (nothing to do), or the commit on the default branch lacks `Refs: ABC-12` or landed before the `close`: tell the human. When the default branch's checks pass, or at once when it has none: `quadratique issue update --issue ABC-12 --revision <revision from that show> --status done`.
-- A claim left by an agent that ended: add a note (any agent may), and ask the human to release it or move the issue.
+- A claim left by an agent that ended: add a note; in review, `quadratique release --issue ABC-12 --reason "..."` (any agent may); before review, ask the human.
 
 ## Blocked
 

@@ -459,7 +459,7 @@ mod issue_release {
     }
 
     #[test]
-    fn row_3_neither_the_holder_nor_the_human_is_held() {
+    fn row_3_neither_the_holder_nor_the_human_before_review_is_held() {
         for board in boards() {
             let issue = claimed(board.issue(board.in_progress), claim_of(&other_agent()));
             assert_eq!(
@@ -475,7 +475,24 @@ mod issue_release {
     }
 
     #[test]
-    fn row_4_otherwise_moves_to_the_release_status_and_ends_the_claim() {
+    fn row_4_another_agent_on_an_issue_in_review_frees_the_claim_and_keeps_the_status() {
+        for board in boards() {
+            let issue = claimed(board.issue(board.in_review), claim_of(&other_agent()));
+            assert_eq!(
+                decide(&Event::Release, &issue, &agent(), &board.project),
+                moved(
+                    board.in_review,
+                    ClaimAfter::Freed(Box::new(claim_of(&other_agent()))),
+                    false
+                ),
+                "{}",
+                board.label
+            );
+        }
+    }
+
+    #[test]
+    fn row_5_otherwise_moves_to_the_release_status_and_ends_the_claim() {
         for board in boards() {
             let issue = claimed(board.issue(board.in_progress), claim_of(&agent()));
             for caller in [agent(), human()] {

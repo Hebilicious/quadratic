@@ -1,7 +1,7 @@
 use super::failure::Failure;
 use super::issue::{Caller, Claim, Issue, Project};
 use super::readiness::{Readiness, Wait, readiness};
-use super::stack::may_reach;
+use super::stack::{Stage, may_reach};
 use super::workflow::{Category, Status, Workflow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +55,9 @@ pub enum ClaimAfter {
     Kept,
     Started(Box<Claim>),
     Ended,
+    /// The claim ends at the call of an agent that did not hold it: the issue records a note
+    /// that names that agent and the former holder.
+    Freed(Box<Claim>),
 }
 
 pub fn decide(
@@ -125,6 +128,11 @@ impl Rules<'_> {
 
     fn in_merge_status(&self) -> bool {
         self.issue.status == self.project.workflow.moves.merge
+    }
+
+    fn in_review_stage(&self) -> bool {
+        let workflow = &self.project.workflow;
+        Stage::of(workflow, &self.issue.status, Some(self.issue.category)) == Stage::InReview
     }
 
     fn agent_on_human_issue(&self) -> bool {
@@ -252,14 +260,21 @@ impl Rules<'_> {
         if self.agent_on_human_issue() {
             return Err(Failure::HumanOnly);
         }
-        if !self.caller.holds(claim) && !self.caller.is_human() {
-            return Err(self.held(claim));
+        if self.caller.holds(claim) || self.caller.is_human() {
+            return Ok(self.moves_to(
+                &self.project.workflow.moves.release,
+                ClaimAfter::Ended,
+                false,
+            ));
         }
-        Ok(self.moves_to(
-            &self.project.workflow.moves.release,
-            ClaimAfter::Ended,
-            false,
-        ))
+        if self.in_review_stage() {
+            return Ok(self.moves_to(
+                &self.issue.status,
+                ClaimAfter::Freed(Box::new(claim.clone())),
+                false,
+            ));
+        }
+        Err(self.held(claim))
     }
 
     fn close(&self) -> Result<Outcome, Failure> {

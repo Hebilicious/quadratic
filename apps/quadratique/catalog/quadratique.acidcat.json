@@ -2181,7 +2181,7 @@
       "readOnly": true
     },
     "issue.release": {
-      "description": "Give a claim back: the issue moves to the workflow's `release` status with no claim, and keeps its assignee. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`). Only the holder or the human (`Held`). Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "Give a claim back: the issue moves to the workflow's `release` status with no claim, and keeps its assignee. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`). Otherwise only the holder or the human (`Held`), except in review (the workflow's `review` status or a later one before `merge`): there any agent may release another's claim, the issue keeps its status and evidence, and gains a note naming that agent and the former holder. Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
       "audience": [
         "cli",
         "mcp",
