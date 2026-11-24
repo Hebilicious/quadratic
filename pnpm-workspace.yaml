@@ -15,7 +15,7 @@ catalog:
   oxfmt: 0.71.0
   oxlint: 1.86.0
   typescript: 6.0.3
-  vite: 8.3.2
+  vite: 8.3.3
   vitest: 5.0.3
   vize: 0.429.2
   vue: 3.6.0-rc.10
