@@ -16,7 +16,7 @@ Issues
 - `quadratic show --issue ABC-12`: one issue with its notes and relations. `quadratic history query --issue ABC-12`: its changes.
 - `quadratic create --title \"...\" --description \"...\" --acceptance \"...\" --priority 2`; `--acceptance` is required; `--origin ABC-12` links work found on that issue; `--assignee '{\"kind\":\"human\"}'` assigns it to the human.
 - `quadratic issue link --issue A --kind blocks --target B`.
-- `quadratic issue link --issue B --kind stacked-on --target A`: B's branch starts from A's. B is ready once A is in review, from A's branch or one on top of it, and reaches merged only after A (`BaseNotMerged`). `stacked` (an issue it is stacked on holds it back, named in `blockedBy`): `show` that issue; before review, wait for it, and a claim you hold stays yours; canceled, remove the link; in review, work from a branch that contains its branch.
+- `quadratic issue link --issue B --kind stacked-on --target A`: B's branch starts from A's. B is ready once A is in review, from A's branch or one on top of it, and reaches merged only after A (`BaseNotMerged`). `stacked` (an issue it is stacked on holds it back, named in `blockedBy`): `show` that issue; before review, wait for it, and a claim you hold stays yours; canceled, remove the link; in review, work from a branch of the same repository that contains its branch.
 
 Work
 - `quadratic claim --issue ABC-12`: atomic; prints the whole issue. `Held` (exit code 1): someone else holds it. `NotReady`: what it waits on.

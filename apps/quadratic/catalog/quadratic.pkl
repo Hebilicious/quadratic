@@ -539,7 +539,7 @@ types {
   }, new Listing { "path" })
   ["BaseNotMerged"] = failure("BaseNotMerged", new Dynamic {
     issue = module.ref("IssueId")
-    bases = array(module.ref("IssueId"), null, "The issues it is stacked on that are not in the workflow's `merge` status or after it.")
+    bases = array(module.ref("IssueId"), null, "The issues it is stacked on that are not merged: not in the workflow's `merge` status or a later status, or in a status of the canceled category. A move into a canceled status is never refused.")
   }, new Listing { "issue"; "bases" })
   ["MergedBeforeBase"] = failure("MergedBeforeBase", new Dynamic {
     issues = array(module.ref("IssueId"), null, "The issues that would be at the `merge` status or later while an issue they are stacked on is not merged.")
@@ -887,7 +887,7 @@ capabilities {
   }
 
   ["issue.close"] {
-    description = "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (the same actor name in the same worktree), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence, or fails with `BaseNotMerged` while an issue it is stacked on is not merged." + committed
+    description = "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (the same actor name in the same worktree), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence. In either case, when the status the move ends in is the workflow's `merge` status or a later status that is not canceled, it fails with `BaseNotMerged` while an issue it is stacked on is not merged." + committed
     audience { "cli"; "mcp"; "web" }
     input {
       type = "object"
@@ -916,7 +916,7 @@ capabilities {
   }
 
   ["issue.link"] {
-    description = "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` or a `stacked-on` fails with `Cycle` when issues would wait on each other through blockers, children, ancestors and the issues they are stacked on. A `stacked-on` fails with `BaseNotMerged` when `issue` is at the workflow's `merge` status or later and `target` is not merged. An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open." + committed
+    description = "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` or a `stacked-on` fails with `Cycle` when issues would wait on each other through blockers, children, ancestors and the issues they are stacked on. A new `stacked-on` fails with `BaseNotMerged` when `issue` is at the workflow's `merge` status or a later status that is not canceled, and `target` is not merged (a canceled `target` is not merged). An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open." + committed
     audience = interactiveClients
     input {
       type = "object"
@@ -949,7 +949,7 @@ capabilities {
   }
 
   ["findings.import"] {
-    description = "Record one run of a tool for one project: each finding becomes an issue with the source `tool` and the finding's `key`, and (project, tool, key) names at most one issue. By key: no issue yet, create one in the workflow's first unstarted status; an open issue, change the title, description, links, labels, assignee and priority that the finding gives where they differ, and nothing else; an issue of the completed category, the finding came back: it returns to the first unstarted status, and loses the evidence that the import wrote when it finished it (evidence that anyone wrote since stays); an issue of the canceled category: leave it, a person overruled the finding. When `complete`, each open issue of the tool and project whose key the run lacks moves to the workflow's first status of the completed category, with evidence that names the run, and its claim ends (`NoCompletedStatus` when the workflow has none), unless an issue it is stacked on is not merged: such an issue stays as it is and is in `left`, and an issue that the run finishes releases the held landings stacked on it; a run that is not complete finishes nothing. Each open `decision` blocks the other open issues of the tool and project that are no decision and share a link of kind `fact` with it, and no other kind of link blocks; the import adds and removes the `blocks` relations that it made so, and never one made by hand, nor one that would make issues wait on each other. `TooManyBlocks` when the run implies more than `limit` such relations, and nothing changes. `DuplicateKey` when two findings have one key. The same run imported again changes nothing." + committed
+    description = "Record one run of a tool for one project: each finding becomes an issue with the source `tool` and the finding's `key`, and (project, tool, key) names at most one issue. By key: no issue yet, create one in the workflow's first unstarted status; an open issue, change the title, description, links, labels, assignee and priority that the finding gives where they differ, and nothing else; an issue of the completed category, the finding came back: it returns to the first unstarted status, and loses the evidence that the import wrote when it finished it (evidence that anyone wrote since stays); an issue of the canceled category: leave it, a person overruled the finding. When `complete`, each open issue of the tool and project whose key the run lacks moves to the workflow's first status of the completed category, with evidence that names the run, and its claim ends (`NoCompletedStatus` when the workflow has none), unless that status is the workflow's `merge` status or after it and an issue it is stacked on is not merged: such an issue stays as it is and is in `left`, and an issue that the run finishes releases the held landings stacked on it; a run that is not complete finishes nothing. Each open `decision` blocks the other open issues of the tool and project that are no decision and share a link of kind `fact` with it, and no other kind of link blocks; the import adds and removes the `blocks` relations that it made so, and never one made by hand, nor one that would make issues wait on each other. `TooManyBlocks` when the run implies more than `limit` such relations, and nothing changes. `DuplicateKey` when two findings have one key. The same run imported again changes nothing." + committed
     audience { "cli"; "web" }
     input {
       type = "object"
@@ -977,7 +977,7 @@ capabilities {
         finished = module.ref("IssueIds")
         left {
           ["$ref"] = "#/$defs/IssueIds"
-          description = "The issues that the import did not change: of findings in the run, unchanged or canceled; of findings the complete run lacks, those it could not finish because an issue they are stacked on is not merged."
+          description = "The issues of the tool's findings that the import itself did not change: of findings in the run, unchanged or canceled; of findings the complete run lacks, those it could not finish because an issue they are stacked on is not merged. A move that a released held landing makes in the same write does not take an issue out of this list."
         }
       }
       required { "created"; "updated"; "reopened"; "finished"; "left" }

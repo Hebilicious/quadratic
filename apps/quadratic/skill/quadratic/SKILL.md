@@ -31,7 +31,7 @@ Read [`planning.md`](planning.md) before you turn a plan or a PRD into issues.
 ## After the review
 
 - Changes requested: first `quadratic issue update --issue ABC-12 --revision <revision> --status in-progress`, so the board shows you at work. Then change, commit, `close` with the new evidence, and ask again.
-- Accepted: merge as `AGENTS.md` says; after a merge on GitHub, `git fetch`. Quadratic sees the merge and moves the issue to `merged`, which gives it a new `revision`. `quadratic show --issue ABC-12` waits up to 2 seconds for the repository: while it still says review, run it again; if it stays there, the commit on the default branch lacks `Refs: ABC-12` or landed before the `close`: tell the human. When the default branch's checks pass, or at once when it has none: `quadratic issue update --issue ABC-12 --revision <revision from that show> --status done`.
+- Accepted: merge as `AGENTS.md` says; after a merge on GitHub, `git fetch`. Quadratic sees the merge and moves the issue to `merged`, which gives it a new `revision`. `quadratic show --issue ABC-12` waits up to 2 seconds for the repository: while it still says review, run it again; if it stays there, it waits for an issue it is stacked on to merge (nothing to do), or the commit on the default branch lacks `Refs: ABC-12` or landed before the `close`: tell the human. When the default branch's checks pass, or at once when it has none: `quadratic issue update --issue ABC-12 --revision <revision from that show> --status done`.
 
 ## Blocked
 
