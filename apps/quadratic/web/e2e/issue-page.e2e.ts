@@ -191,8 +191,9 @@ test("an issue stacked on another names it both ways, and its page shows why whi
     await expect(relations).toContainText("Stacked on");
     await expect(relations.getByRole("link", { name: "DEM-1" })).toBeVisible();
     const why = issue.getByRole("region", { name: "Why it is not ready" });
-    await expect(why).toContainText("An issue it is stacked on is not in review");
-    await expect(why).not.toContainText("You hold it.");
+    await expect(why.getByRole("listitem")).toHaveText([
+      "An issue it is stacked on is not in review, or your branch does not start from that issue's branch.",
+    ]);
     await expect(why.getByRole("link", { name: "DEM-1" })).toBeVisible();
   });
 
