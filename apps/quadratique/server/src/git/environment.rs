@@ -24,6 +24,17 @@ pub enum Configuration {
     Global(PathBuf),
 }
 
+/// Switch off git's Trace2 for `command`. Trace2 is switched on from global or system
+/// configuration as well as from the environment, and for every command its `def_param` events
+/// print configuration values, such as a remote's URL with the credential it holds. The older
+/// GIT_TRACE* variables have no configuration, and print no configuration value.
+pub fn without_trace(command: &mut Command) -> &mut Command {
+    for name in ["GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"] {
+        command.env(name, "0");
+    }
+    command
+}
+
 /// Prepare `command` to run git: no variable of the server's own environment reaches git, and git
 /// writes no trace.
 pub fn prepare(command: &mut Command, configuration: &Configuration) {
@@ -32,13 +43,7 @@ pub fn prepare(command: &mut Command, configuration: &Configuration) {
             command.env_remove(name);
         }
     }
-    // Trace2 is switched on from global or system configuration as well as from the environment,
-    // and its `def_param` events print configuration values, such as a remote's URL with the
-    // credential it holds. The older GIT_TRACE* variables have no configuration and are removed
-    // above with the rest of the environment.
-    for name in ["GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"] {
-        command.env(name, "0");
-    }
+    without_trace(command);
     command.env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
     let global: Option<OsString> = match configuration {
         Configuration::Global(path) => Some(path.clone().into_os_string()),

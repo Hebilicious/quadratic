@@ -21,6 +21,8 @@ mod other_build;
 mod server_life;
 #[path = "cli/tokens.rs"]
 mod tokens;
+#[path = "cli/traces.rs"]
+mod traces;
 #[path = "cli/ui.rs"]
 mod ui;
 #[path = "cli/unreachable.rs"]
