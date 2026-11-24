@@ -119,6 +119,9 @@ It was measured under these conditions:
 - lific v2.11.1 and Beads v1.3.4, the releases that the harness pins.
 - Quadratique built from this source as it was when the table was saved. A later change to the
   skill or to the catalog changes the token rows of a new run.
+- The run predates the rename of Quadratic to Quadratique: the command was `quadratic`, and the
+  longer name adds a few tokens per call. Counted again after the rename, the whole MCP tool list
+  is 6,737 tokens (3 more) and the skill's `SKILL.md` 946 (1 more).
 - Every session ran Claude Opus 5.5 at medium effort, with the prompt above.
 - Every row comes from one run: three sessions for each tracker, and the scripted measures at
   50 rounds × 3 repeats. `report --run` wrote the table; each cell lists each session's or each
