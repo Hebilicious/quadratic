@@ -34,5 +34,5 @@ tempfile.workspace = true
 # Lets `cargo binstall` download the archive of a GitHub release instead of building.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/quadratique-{ version }-{ target }{ archive-suffix }"
-bin-dir = "quadratique-{ version }-{ target }/{ bin }{ binary-ext }"
+bin-dir = "quadratique-{ version }-{ target }/bin/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
