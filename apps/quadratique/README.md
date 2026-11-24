@@ -80,9 +80,10 @@ The port changes each time the server starts. `quadratique ui` prints the curren
 ## Install from a release
 
 Each [GitHub release](https://github.com/Hebilicious/quadratique/releases) has a prebuilt binary,
-with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.34 or newer
-(Ubuntu 22.04, Debian 12, RHEL 9, Fedora 35 or later) and no other tool: no Rust, Node.js or
-proto.
+with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.34 or newer and
+`libgcc_s.so.1` (Ubuntu 22.04, Debian 12, RHEL 9, Fedora 35 or later have both), and no other
+tool: no Rust, Node.js or proto. The service that `install.sh` sets up needs a running systemd
+user manager (`systemctl --user status` answers), as for an install from source.
 
 Each platform has one archive, named for the version and the target, and its SHA-256 file:
 
@@ -91,20 +92,20 @@ Each platform has one archive, named for the version and the target, and its SHA
 | Linux x86-64 | `quadratique-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux arm64 | `quadratique-<version>-aarch64-unknown-linux-gnu.tar.gz` |
 
-The archive has one folder, `quadratique-<version>-<target>/`, with the binary `quadratique`, the
-scripts `install.sh` and `uninstall.sh`, this file and the license. `install.sh` is the script
+The archive has one folder, `quadratique-<version>-<target>/`, with the binary in `bin/quadratique`,
+the scripts `install.sh` and `uninstall.sh`, this file and the license. `install.sh` is the script
 that `moon run quadratique-install:install` runs, and does the steps 2 to 4 of "Install" with the
-binary you give it. Download, check and install a release (here 0.2.0 for x86-64; use
-`aarch64` for arm64):
+binary you give it. Download, check and install a release (here 0.1.0 for x86-64; use `aarch64`
+for arm64):
 
 ```sh
-version=0.2.0
+version=0.1.0
 archive=quadratique-$version-x86_64-unknown-linux-gnu
 curl -fLO "https://github.com/Hebilicious/quadratique/releases/download/v$version/$archive.tar.gz"
 curl -fLO "https://github.com/Hebilicious/quadratique/releases/download/v$version/$archive.tar.gz.sha256"
 sha256sum -c "$archive.tar.gz.sha256"
 tar -xzf "$archive.tar.gz"
-sh "$archive/install.sh" "$archive/quadratique"
+sh "$archive/install.sh" "$archive/bin/quadratique"
 ```
 
 To upgrade, do the same with the new release. To uninstall, run `sh "$archive/uninstall.sh"`
@@ -113,8 +114,9 @@ from any release: it removes the binary and the unit that the unit names.
 ### With mise
 
 [mise](https://mise.jdx.dev) installs the binary from the GitHub releases. It picks the archive
-for your platform from its name, checks it against the SHA-256 file, and puts `quadratique` on your
-`PATH`:
+for your platform from its name, checks it against the SHA-256 file, and unpacks the archive's
+folder. It puts that folder's `bin/` on your `PATH`, so `quadratique` is the only command it adds;
+`install.sh` and `uninstall.sh` stay in the folder:
 
 ```sh
 mise use -g github:Hebilicious/quadratique
@@ -130,7 +132,7 @@ sh "$(mise where github:Hebilicious/quadratique)/install.sh" "$(mise which quadr
 The install copies the binary to `~/.local/bin/quadratique`, so the service keeps the version you
 installed until you run `install.sh` again after `mise upgrade`. By default mise does not install a
 release published less than 24 hours ago (its setting `minimum_release_age`); name the version to
-install it earlier (`mise use -g github:Hebilicious/quadratique@0.2.0`).
+install it earlier (`mise use -g github:Hebilicious/quadratique@0.1.0`).
 
 ## Set up a repository
 
@@ -467,8 +469,9 @@ its data folder and reads a relative path from there, so the page would answer 5
 
 A pull request is squash-merged, and its title, which becomes the commit on `main`, is a
 [Conventional Commit](https://www.conventionalcommits.org). Only `feat:` (a minor release) and
-`fix:` (a patch release) make a release; `chore:`, `docs:`, `ci:`, `test:`, `refactor:` and
-`build:` do not. Before 1.0.0, a breaking change (`!`) makes a minor release, not a major one.
+`fix:` (a patch release) make a release; `perf:`, `revert:`, `refactor:`, `chore:`, `docs:`,
+`style:`, `ci:`, `test:` and `build:` do not. A breaking change (`!` after the type, or a
+`BREAKING CHANGE:` footer) makes a release under any of these types: before 1.0.0, a minor one.
 
 [release-please](https://github.com/googleapis/release-please) makes the releases from those
 commits. The workflow [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
@@ -477,19 +480,55 @@ runs on every push to `main`:
 1. release-please opens or updates the release pull request. It sets the new version in
    `Cargo.toml`, `Cargo.lock`, the three `package.json` files, `pyproject.toml` and `uv.lock`
    together, and adds the changes to `CHANGELOG.md`.
-2. When that pull request is merged, release-please creates the tag `v<version>` and the GitHub
-   release.
-3. Then one job per platform builds the web app and the release binary with it inside, on the
-   oldest hosted Ubuntu (22.04), and attaches the archive and its SHA-256 file to the release.
-   The job prints the newest glibc version that the binary needs (2.34). `install/package.sh`
-   makes the archive.
+2. When that pull request is merged, release-please creates the tag `v<version>` on the merge
+   commit and a draft GitHub release.
+3. One job per platform checks out that commit by its SHA, builds the web app and the release
+   binary with it inside on the oldest hosted Ubuntu (22.04), and keeps the archive and its
+   SHA-256 file as workflow artifacts. `install/package.sh` makes the archive. The job prints the
+   libraries and the newest glibc that the binary needs. It holds no token.
+4. A last job, which checks out nothing and runs no project code, checks that the four files are
+   there and that each archive matches its SHA-256 file. It attaches them to the draft, replacing
+   any older copy and removing any other file, checks the digest of each attached file, and only
+   then publishes the release.
 
-The workflow writes with a token of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
+The workflow writes with tokens of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
 workflow for a tag that `GITHUB_TOKEN` pushes, and holds the checks of a pull request that it
-opens. It reads the App's client ID from the repository variable `RELEASE_APP_CLIENT_ID` and its
-private key from the secret `RELEASE_APP_PRIVATE_KEY`. A pull request that changes the release
-workflow, its configuration or `install/` builds the archives too, as workflow artifacts, and
-releases nothing.
+opens. Each token is for this repository only: release-please's can write contents and pull
+requests, the last job's only contents. The workflow reads the App's client ID from the repository
+variable `RELEASE_APP_CLIENT_ID` and its private key from the secret `RELEASE_APP_PRIVATE_KEY`. A
+pull request that changes the release workflow, its configuration or `install/` builds the
+archives too, as workflow artifacts, and releases nothing.
+
+#### When a release stops half-way
+
+The release stays a draft until the last job has attached and checked the four files, so a
+failure never leaves a public release without its archives.
+
+- **A build or the last job failed** (a flaky runner, a network error): in the workflow run, use
+  "Re-run failed jobs". It builds the same commit again and the last job replaces whatever it had
+  attached.
+- **The run is too old to re-run, or you re-ran all its jobs:** push any commit to `main` (a
+  `docs:` or `chore:` one releases nothing). When release-please creates no release, the workflow
+  looks for a draft release whose tag starts with `v`, and builds and finishes the newest one.
+- **By hand**, if the workflow cannot run: on each platform, check out `refs/tags/v<version>`,
+  run `moon run quadratique-web:build`, build with
+  `sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target` and
+  `sh apps/quadratique/install/package.sh <binary> <version> <target triple> <folder>`, then
+  `gh release upload v<version> <the four files> --clobber` and
+  `gh release edit v<version> --draft=false`.
+
+## Releasing
+
+What a maintainer does for a release, and what happens on its own:
+
+1. Merge pull requests into `main` with Conventional Commit titles (see "Releases"). When one of
+   them releases, release-please opens or updates the release pull request on its own.
+2. Review and merge the release pull request. The tag, the draft release, the archives and the
+   publication of the release follow on their own; check that the run of the workflow
+   `Release` is green and that the release lists four files.
+3. After the first release (0.1.0) only: delete the line `"release-as": "0.1.0",` from
+   `release-please-config.json`, in a `chore:` pull request. While it is there, every later
+   release pull request proposes 0.1.0 again.
 
 ### The crates
 

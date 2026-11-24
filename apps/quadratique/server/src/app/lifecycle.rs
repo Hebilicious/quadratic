@@ -1,6 +1,6 @@
 use acid_cat_core::CapabilityDefinition;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use super::ancestry::{Scope, verified};
 use super::board::{self, Board};
@@ -12,7 +12,7 @@ use crate::domain::{
     Actor, Caller, Change, ClaimAfter, Event, Failure, Landing, Outcome, WorkingCopy, decide,
 };
 use crate::git::repository::{GIT_LIMIT, Repository};
-use crate::store::{ClaimStart, IssueFields, Tx};
+use crate::store::{AsOf, ClaimStart, IssueFields, Tx};
 
 pub(super) fn apply(
     tx: &mut Tx<'_>,
@@ -301,4 +301,81 @@ pub(super) fn close() -> CapabilityDefinition<Context, CloseInput, IssueAnswer<I
             .await,
         )
     })
+}
+
+#[derive(Deserialize)]
+pub(super) struct CloseSeveralInput {
+    issue: Vec<String>,
+    evidence: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct ClosedSeveral {
+    items: Vec<IssueSummary>,
+}
+
+pub(super) fn close_several()
+-> CapabilityDefinition<Context, CloseSeveralInput, ClosedSeveral, Value> {
+    capability::<CloseSeveralInput, ClosedSeveral>("issues.close").run(|input, call| async move {
+        finish(close_issues(call.context(), input.issue, input.evidence).await)
+    })
+}
+
+/// Closes each issue in order inside one write, so that a refusal of any of them changes
+/// nothing.
+async fn close_issues(
+    context: &Context,
+    ids: Vec<String>,
+    evidence: String,
+) -> Result<ClosedSeveral, Refused> {
+    let caller = context.caller.clone();
+    let written = context
+        .write("issue.close", None, {
+            let ids = ids.clone();
+            move |tx| {
+                for id in &ids {
+                    close_in(tx, id, &caller, &evidence)
+                        .map_err(|refused| not_closed(id, refused))?;
+                }
+                ids.iter()
+                    .map(|id| board::summary(tx, id, &caller))
+                    .collect::<Result<Vec<_>, _>>()
+            }
+        })
+        .await?;
+    let Some(commit) = written.commit else {
+        return Ok(ClosedSeveral {
+            items: written.value,
+        });
+    };
+    let caller = context.caller.clone();
+    let items = context
+        .read(AsOf::Commit(commit.hash), move |view| {
+            ids.iter()
+                .map(|id| board::summary(view, id, &caller))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await?;
+    Ok(ClosedSeveral { items })
+}
+
+fn close_in(tx: &mut Tx<'_>, id: &str, caller: &Caller, evidence: &str) -> Result<(), Refused> {
+    let record = board::issue(tx, id)?;
+    let project = model::domain_project(&board::project(tx, &record.project)?)?;
+    let issue = Board::load(tx)?.issue(&record)?;
+    if let Outcome::Changed(change) = decide(&Event::Close, &issue, caller, &project)? {
+        apply(tx, id, &change, Some(evidence))?;
+    }
+    Ok(())
+}
+
+fn not_closed(id: &str, refused: Refused) -> Refused {
+    match refused {
+        Refused::Failure(failure) => Refused::Failure(json!({
+            "_tag": "NotClosed",
+            "issue": id,
+            "failure": failure,
+        })),
+        other => other,
+    }
 }

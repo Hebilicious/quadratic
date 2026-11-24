@@ -187,6 +187,7 @@ pub fn application() -> Result<Arc<Application<Context>>, Vec<String>> {
         .capability(lifecycle::claim())
         .capability(lifecycle::release())
         .capability(lifecycle::close())
+        .capability(lifecycle::close_several())
         .capability(links::link())
         .capability(findings::import())
         .capability(advance::advance())

@@ -217,6 +217,9 @@ async fn a_server_that_stops_never_removes_the_runtime_file_of_its_replacement()
     replacement.shutdown().await;
 }
 
+/// Once the server's listener is closed, any socket of the machine may bind its port, so a connection to the port
+/// cannot tell whether the server still listens: the test looks for the server's own socket in the kernel's table.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_dropped_without_a_shutdown_frees_its_home_and_its_port() {
     let home = tempfile::tempdir().expect("a temporary home");
@@ -225,6 +228,7 @@ async fn a_server_dropped_without_a_shutdown_frees_its_home_and_its_port() {
         .await
         .expect("the server starts");
     let address = running.address();
+    let listener = kernel_sockets::listening_on(address).expect("the server's listening socket");
     let lock = std::fs::OpenOptions::new()
         .write(true)
         .open(paths.lock())
@@ -239,11 +243,62 @@ async fn a_server_dropped_without_a_shutdown_frees_its_home_and_its_port() {
     )
     .await
     .expect("the waiting thread");
-    let refused = tokio::net::TcpStream::connect(address).await;
     assert!(
-        refused.is_err(),
-        "the dropped server still answers on {address}"
+        !kernel_sockets::exists(listener),
+        "the dropped server still listens on {address}"
     );
+}
+
+/// The IPv4 TCP sockets of this network namespace, as `/proc/net/tcp` lists them.
+#[cfg(target_os = "linux")]
+mod kernel_sockets {
+    use std::net::SocketAddr;
+
+    const LISTEN: &str = "0A";
+
+    struct Row {
+        local: String,
+        state: String,
+        inode: u64,
+    }
+
+    fn rows() -> Vec<Row> {
+        let table = std::fs::read_to_string("/proc/net/tcp").expect("the kernel's TCP table");
+        table
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                Some(Row {
+                    local: (*fields.get(1)?).to_owned(),
+                    state: (*fields.get(3)?).to_owned(),
+                    inode: fields.get(9)?.parse().ok()?,
+                })
+            })
+            .collect()
+    }
+
+    /// The table writes an IPv4 address as its 32 bits in the host's byte order, in hexadecimal.
+    fn as_listed(address: SocketAddr) -> String {
+        let SocketAddr::V4(address) = address else {
+            panic!("{address} is not an IPv4 address");
+        };
+        let ip = u32::from_ne_bytes(address.ip().octets());
+        format!("{ip:08X}:{:04X}", address.port())
+    }
+
+    /// The inode of the socket that listens on `address`.
+    pub fn listening_on(address: SocketAddr) -> Option<u64> {
+        let local = as_listed(address);
+        rows()
+            .into_iter()
+            .find(|row| row.local == local && row.state == LISTEN)
+            .map(|row| row.inode)
+    }
+
+    pub fn exists(inode: u64) -> bool {
+        rows().iter().any(|row| row.inode == inode)
+    }
 }
 
 #[tokio::test]
@@ -302,10 +357,22 @@ async fn a_process_of_another_account_is_refused() {
     );
 }
 
+const OWNER_CONNECTIONS: usize = 1000;
+const CHURNING_THREADS: usize = 4;
+const PROBES_PER_CHURN: usize = 100;
+const OPENED_PER_CHURN: usize = 25;
+
+/// The churn follows the probes: each time they pass another `PROBES_PER_CHURN`, each churning thread opens and
+/// closes `OPENED_PER_CHURN` connections to another listener, so sockets open and close while the owner's connections
+/// are looked up. A run opens 2000 loopback connections: each stays in the kernel's connection-tracking table for
+/// minutes, and a full table drops new SYNs of every program. The test asks the admission of each connection directly,
+/// so a slow handshake is not taken for a refusal.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use quadratique_server::serve::Connection;
 
     let home = tempfile::tempdir().expect("a temporary home");
     let paths = Paths::in_home(home.path()).expect("an absolute home");
@@ -314,6 +381,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
         .expect("the server starts");
     let other = std::net::TcpListener::bind("127.0.0.1:0").expect("another listener");
     let other_address = other.local_addr().expect("its address");
+    let probed = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let accepting = std::thread::spawn(move || {
         for stream in other.incoming() {
@@ -322,12 +390,18 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
             }
         }
     });
-    let churning: Vec<_> = (0..4)
+    let churning: Vec<_> = (0..CHURNING_THREADS)
         .map(|_| {
-            let stop = stop.clone();
+            let (probed, stop) = (probed.clone(), stop.clone());
             std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    let opened: Vec<_> = (0..50)
+                for churn in 0..OWNER_CONNECTIONS / PROBES_PER_CHURN {
+                    while probed.load(Ordering::Relaxed) < churn * PROBES_PER_CHURN {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::yield_now();
+                    }
+                    let opened: Vec<_> = (0..OPENED_PER_CHURN)
                         .filter_map(|_| std::net::TcpStream::connect(other_address).ok())
                         .collect();
                     drop(opened);
@@ -336,12 +410,27 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
         })
         .collect();
 
-    let mut refused = Vec::new();
-    for probe in 0..2000 {
-        if let Err(why) = server::identity(running.address()).await {
-            refused.push((probe, why));
-        }
-    }
+    let refused = within(
+        "the owner's connections, each one admitted or refused",
+        async {
+            let mut refused = Vec::new();
+            for probe in 0..OWNER_CONNECTIONS {
+                let client = tokio::net::TcpStream::connect(running.address())
+                    .await
+                    .expect("a connection to the server");
+                let own = Connection {
+                    local: running.address(),
+                    peer: client.local_addr().expect("the client's address"),
+                };
+                if !running.admits(own) {
+                    refused.push(probe);
+                }
+                probed.store(probe + 1, Ordering::Relaxed);
+            }
+            refused
+        },
+    )
+    .await;
 
     stop.store(true, Ordering::Relaxed);
     for thread in churning {
@@ -351,7 +440,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
     running.shutdown().await;
     assert!(
         refused.is_empty(),
-        "{} of 2000 probes failed: {:?}",
+        "{} of {OWNER_CONNECTIONS} connections of the owner were refused: {:?}",
         refused.len(),
         &refused[..refused.len().min(5)]
     );

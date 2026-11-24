@@ -120,6 +120,10 @@ fn message_of(refused: &Run) -> String {
         .to_owned()
 }
 
+const SEVERAL_ISSUES: &str = "Nothing was started. To act on these issues together, all or none, run this command \
+     outside the sandbox, or ask the human to. If separate writes are acceptable, call the Quadratique MCP tool \
+     `issue.close` once for each issue, with the same other inputs.";
+
 const COMMAND_LINE_ONLY: &str = "Nothing was started. This command works only on the command line: \
      run it outside the sandbox, or ask the human to.";
 
@@ -136,10 +140,14 @@ fn in_a_sandbox_a_command_names_its_mcp_tool_or_says_it_works_only_on_the_comman
     let home = Home::new();
     let repository = Repository::new();
     let _sandboxed = ReadOnly::make(home.path());
-    let with_a_tool: [(&[&str], &str); 8] = [
+    let with_a_tool: [(&[&str], &str); 9] = [
         (&[], "issue.ready"),
         (&["--json"], "issue.ready"),
         (&["claim", "--issue", "DEM-1"], "issue.claim"),
+        (
+            &["close", "--issue", "DEM-1", "--evidence", "x"],
+            "issue.close",
+        ),
         (&["show", "--issue", "DEM-1"], "issue.get"),
         (&["instructions"], "workspace.instructions"),
         (&["issue", "list"], "issue.list"),
@@ -184,6 +192,27 @@ fn in_a_sandbox_a_command_names_its_mcp_tool_or_says_it_works_only_on_the_comman
         assert!(
             message.starts_with("Cannot reach the Quadratique server from here: ")
                 && message.ends_with(&guidance(tool)),
+            "{args:?}: {message}"
+        );
+    }
+    for args in [
+        &[
+            "close",
+            "--issue",
+            "DEM-1",
+            "--issue",
+            "DEM-2",
+            "--evidence",
+            "x",
+        ][..],
+        &["close", "--issue=DEM-1", "--issue=DEM-2", "--evidence", "x"],
+    ] {
+        let refused = home.quadratique(&repository.root).args(args).run();
+        assert_eq!(refused.code, UNAVAILABLE, "{args:?}: {refused:?}");
+        let message = message_of(&refused);
+        assert!(
+            message.starts_with("Cannot reach the Quadratique server from here: ")
+                && message.ends_with(SEVERAL_ISSUES),
             "{args:?}: {message}"
         );
     }

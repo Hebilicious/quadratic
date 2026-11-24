@@ -16,7 +16,7 @@ targets {
           create { capability = "issue.create" }
           claim { capability = "issue.claim" }
           release { capability = "issue.release" }
-          close { capability = "issue.close" }
+          close { capability = "issues.close" }
         }
         ["default"] = "ready"
       }
@@ -337,7 +337,7 @@ types {
   }
   ["Claim"] {
     type = "object"
-    description = "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time."
+    description = "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time. Its session is the holder's `harness` and `session`, not `hostThread`; a holder without both has none."
     properties {
       holder = module.ref("Actor")
       branch = text("The git branch of the holder.")
@@ -706,7 +706,7 @@ capabilities {
         claim {
           type = "string"
           enum { "mine"; "any"; "none" }
-          description = "`mine`: held by the caller, the same actor name in the same worktree. `any`: claimed by anyone. `none`: unclaimed."
+          description = "`mine`: held by the caller's session, or by its name in its worktree. `any`: claimed by anyone. `none`: unclaimed."
         }
         ready { type = "boolean" }
         parent = module.ref("IssueId")
@@ -912,6 +912,46 @@ capabilities {
           description = "The status of the canceled category that the issue is in."
         }
       }, new Listing { "issue"; "status" })
+    }
+  }
+
+  ["issues.close"] {
+    description = "`issue.close` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.close`. All or nothing: when `issue.close` would fail on one issue, nothing changes and the call fails with `NotClosed`, naming that issue and giving its failure." + committed
+    audience { "cli" }
+    input {
+      type = "object"
+      title = "IssuesCloseInput"
+      additionalProperties = false
+      properties {
+        issue {
+          type = "array"
+          items = module.ref("IssueId")
+          minItems = 1
+          maxItems = 50
+          description = "The issues to close: give the flag once per issue."
+        }
+        evidence = bodyField("What was checked, and how: commands, results, links.")
+      }
+      required { "issue"; "evidence" }
+    }
+    output {
+      type = "object"
+      title = "IssuesCloseAnswer"
+      properties {
+        items = array(module.ref("IssueSummary"), 50, "The issues as the call left them, in the order given.")
+      }
+      required { "items" }
+    }
+    failures {
+      ["NotClosed"] = failure("NotClosed", new Dynamic {
+        issue = module.ref("IssueId")
+        failure {
+          type = "object"
+          description = "The failure of `issue.close` on that issue."
+          properties { ["_tag"] { type = "string" } }
+          required { "_tag" }
+        }
+      }, new Listing { "issue"; "failure" })
     }
   }
 

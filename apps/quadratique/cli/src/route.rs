@@ -17,6 +17,8 @@ pub struct Words {
 
 pub enum McpTool {
     Offered(String),
+    /// A command-line call over several issues, whose MCP tool takes one issue.
+    OnePerIssue(String),
     Absent,
     NotACommand,
 }
@@ -96,10 +98,32 @@ impl Words {
         };
         match capability {
             Some(id) if self.mcp_tools.contains(&id) => McpTool::Offered(id),
+            Some(id) if self.mcp_tools.contains(&one_issue(&id)) => {
+                if issue_flags(args) > 1 {
+                    McpTool::OnePerIssue(one_issue(&id))
+                } else {
+                    McpTool::Offered(one_issue(&id))
+                }
+            }
             Some(id) if self.commands.contains(&id) => McpTool::Absent,
             _ => McpTool::NotACommand,
         }
     }
+}
+
+/// A command-line capability over several issues, such as `issues.close`, has an MCP tool for
+/// one issue in its place, such as `issue.close`.
+fn one_issue(id: &str) -> String {
+    match id.strip_prefix("issues.") {
+        Some(verb) => format!("issue.{verb}"),
+        None => id.to_owned(),
+    }
+}
+
+fn issue_flags(args: &[String]) -> usize {
+    args.iter()
+        .filter(|arg| *arg == "--issue" || arg.starts_with("--issue="))
+        .count()
 }
 
 fn command_words(args: &[String]) -> Vec<&str> {

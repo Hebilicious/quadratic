@@ -11,7 +11,7 @@ const REFERENCE: &str = "\
 The skill `quadratique` gives the workflow. This is the command reference. Every command prints JSON; `quadratique <command> --help` lists its flags. Issue ids look like ABC-12. An answer about one issue has it under `issue`; a list has its entries under `items`.
 
 Issues
-- `quadratique issue list` filters by `--claim mine`, `--status`, `--category`, `--assignee`, `--labels`, `--text`, `--asOf`. `notReady` says why an issue is not ready: `category` (backlog, started or finished: only an unstarted issue is ready), `blocked` (an open issue blocks it or a parent, named in `blockedBy`), `children` (it has open children), `assigned` (to someone else), `claimed` (someone else holds it), `mine` (you hold it). An issue you hold shows `category` and `mine`: it is yours, not blocked; it also shows `stacked` while an issue it is stacked on is back before review.
+- `quadratique issue list` filters by `--claim mine`, `--status`, `--category`, `--assignee`, `--labels`, `--text`, `--asOf`. `--claim mine`: your session's claims from every worktree (one from another shows `claimed`; act on it only from its `claim.worktree`); without a session id, your name's in this worktree. `notReady` says why an issue is not ready: `category` (backlog, started or finished: only an unstarted issue is ready), `blocked` (an open issue blocks it or a parent, named in `blockedBy`), `children` (open children), `assigned` (to someone else), `claimed` (someone else holds it), `mine` (you hold it). An issue you hold shows `category` and `mine`; it also shows `stacked` while an issue it is stacked on is back before review.
 - `quadratique ready`: the issues you can start now, those for your role first, then by priority (1 urgent to 4 low, 0 none last). A snapshot.
 - `quadratique show --issue ABC-12`: one issue with its notes and relations. `quadratique history query --issue ABC-12`: its changes.
 - `quadratique create --title \"...\" --description \"...\" --acceptance \"...\" --priority 2`; `--acceptance` is required; `--origin ABC-12` links work found on that issue; `--assignee '{\"kind\":\"human\"}'` assigns it to the human.
@@ -21,7 +21,7 @@ Issues
 Work
 - `quadratique claim --issue ABC-12`: atomic; prints the whole issue. `Held` (exit code 1): someone else holds it. `NotReady`: what it waits on.
 - `quadratique issue update --issue ABC-12 --revision <revision>` with `--notes` (added after the earlier notes), `--description` or `--acceptance` (replaced), `--status`, `--priority`. On `Stale`, `show` and write again.
-- `quadratique close --issue ABC-12 --evidence \"...\"`: on a feature branch the issue moves to review and stays yours until the merge. Commits end with `Refs: ABC-12`; Quadratique then sees the merge, even a squash, and moves the issue on.
+- `quadratique close --issue ABC-12 --evidence \"...\"`: on a feature branch the issue moves to review and stays yours until the merge. Repeat `--issue` to close several, all or none. It answers `items`, one summary per issue; a refusal is `NotClosed`, with the original under `failure`. `quadratique issue close` takes one issue and answers it whole. Commits end with `Refs: ABC-12`; Quadratique then sees the merge, even a squash, and moves the issue on.
 - `quadratique release --issue ABC-12 --reason \"...\"` gives a claim back.
 - An issue with a `source` is a finding of a tool: the tool's next complete run finishes it when the finding is gone, and reopens it when the finding comes back.
 
