@@ -280,3 +280,55 @@ fn close_with_the_issue_flag_twice_closes_both_issues_with_the_same_evidence() {
         assert_eq!(shown["issue"]["evidence"], "cargo test: 12 passed");
     }
 }
+
+#[test]
+fn claim_mine_lists_the_claims_of_the_callers_session_in_every_worktree() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let lead = repository.worktree("lead");
+    let audit = repository.worktree("audit");
+    let other = repository.worktree("other");
+    home.quadratique(&repository.root)
+        .args(["project", "create", "--key", "SES", "--name", "Sessions"])
+        .run()
+        .ok();
+    for title in ["Here", "There", "Theirs"] {
+        home.quadratique(&repository.root)
+            .args(["create", "--title", title, "--acceptance", "It is done."])
+            .run()
+            .ok();
+    }
+    let claim = |worktree: &std::path::Path, session: &str, issue: &str| {
+        home.quadratique(worktree)
+            .env("CLAUDECODE", "1")
+            .env("CLAUDE_CODE_SESSION_ID", session)
+            .args(["claim", "--issue", issue])
+            .run()
+            .ok();
+    };
+    claim(&lead, "session-1", "SES-1");
+    claim(&audit, "session-1", "SES-2");
+    claim(&other, "session-2", "SES-3");
+
+    let mine = home
+        .quadratique(&lead)
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "session-1")
+        .args(["issue", "list", "--claim", "mine"])
+        .run()
+        .ok();
+
+    let listed: Vec<_> = mine["items"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|item| (item["id"].clone(), item["claim"]["worktree"].clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("SES-1".into(), lead.display().to_string().into()),
+            ("SES-2".into(), audit.display().to_string().into()),
+        ]
+    );
+}

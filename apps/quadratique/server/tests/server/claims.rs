@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use tokio::task::JoinSet;
 
-use crate::support::{call, ids, reasons, start};
+use crate::support::{Who, call, ids, reasons, start};
 
 const CONTENDERS: usize = 8;
 
@@ -69,6 +69,191 @@ async fn claim_mine_lists_what_the_caller_holds_in_its_own_worktree() {
         .ok(&elsewhere, "issue.list", json!({ "claim": "mine" }))
         .await;
     assert_eq!(none["items"], json!([]));
+}
+
+fn in_session(mut who: Who, harness: &str, session: &str) -> Who {
+    let actor = who.actor.as_mut().expect("an actor");
+    actor["harness"] = json!(harness);
+    actor["session"] = json!(session);
+    who
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claim_mine_lists_the_claims_of_the_callers_session_in_every_worktree() {
+    let board = start().await;
+    board.project("DEM").await;
+    let here = board.issue("Here").await;
+    let there = board.issue("There").await;
+    let theirs = board.issue("Theirs").await;
+    let lead = in_session(board.agent("lead"), "claude-code", "session-1");
+    let lead_elsewhere = in_session(board.agent("audit"), "claude-code", "session-1");
+    let other = in_session(board.agent("other"), "claude-code", "session-2");
+    board
+        .ok(&lead, "issue.claim", json!({ "issue": here }))
+        .await;
+    board
+        .ok(&lead_elsewhere, "issue.claim", json!({ "issue": there }))
+        .await;
+    board
+        .ok(&other, "issue.claim", json!({ "issue": theirs }))
+        .await;
+
+    let mine = board
+        .ok(&lead, "issue.list", json!({ "claim": "mine" }))
+        .await;
+
+    assert_eq!(ids(&mine["items"]), vec![here.clone(), there.clone()]);
+    let worktrees: Vec<_> = mine["items"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|item| {
+            item["claim"]["worktree"]
+                .as_str()
+                .expect("a worktree")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(worktrees, vec![lead.worktree(), lead_elsewhere.worktree()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claim_mine_without_a_session_is_the_same_name_in_the_same_worktree() {
+    let board = start().await;
+    board.project("DEM").await;
+    let here = board.issue("Here").await;
+    let there = board.issue("There").await;
+    let earlier = in_session(board.agent("lead"), "claude-code", "session-1");
+    let elsewhere = in_session(board.agent("audit"), "claude-code", "session-1");
+    board
+        .ok(&earlier, "issue.claim", json!({ "issue": here }))
+        .await;
+    board
+        .ok(&elsewhere, "issue.claim", json!({ "issue": there }))
+        .await;
+
+    let mine = board
+        .ok(
+            &board.agent("lead"),
+            "issue.list",
+            json!({ "claim": "mine" }),
+        )
+        .await;
+
+    assert_eq!(ids(&mine["items"]), vec![here]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claim_mine_keeps_the_claims_of_the_same_name_in_the_same_worktree_from_another_session() {
+    let board = start().await;
+    board.project("DEM").await;
+    let earlier = board.issue("Earlier").await;
+    board
+        .ok(
+            &in_session(board.agent("lead"), "claude-code", "session-1"),
+            "issue.claim",
+            json!({ "issue": earlier }),
+        )
+        .await;
+
+    let mine = board
+        .ok(
+            &in_session(board.agent("lead"), "claude-code", "session-2"),
+            "issue.list",
+            json!({ "claim": "mine" }),
+        )
+        .await;
+
+    assert_eq!(ids(&mine["items"]), vec![earlier]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_sessions_with_the_same_actor_name_in_two_worktrees_do_not_see_each_others_claims() {
+    let board = start().await;
+    board.project("DEM").await;
+    let first = board.issue("First").await;
+    let second = board.issue("Second").await;
+    let one = in_session(board.agent("lead"), "claude-code", "session-1");
+    let mut two = in_session(board.agent("lead"), "claude-code", "session-2");
+    two.worktree = Some(format!("{}/copy/lead", board.agent("x").worktree()));
+    assert_eq!(one.name(), two.name());
+    board
+        .ok(&one, "issue.claim", json!({ "issue": first }))
+        .await;
+    board
+        .ok(&two, "issue.claim", json!({ "issue": second }))
+        .await;
+
+    let seen_by_one = board
+        .ok(&one, "issue.list", json!({ "claim": "mine" }))
+        .await;
+    let seen_by_two = board
+        .ok(&two, "issue.list", json!({ "claim": "mine" }))
+        .await;
+
+    assert_eq!(ids(&seen_by_one["items"]), vec![first]);
+    assert_eq!(ids(&seen_by_two["items"]), vec![second]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_session_id_from_another_harness_is_another_session() {
+    let board = start().await;
+    board.project("DEM").await;
+    let theirs = board.issue("Theirs").await;
+    board
+        .ok(
+            &in_session(board.agent("audit"), "codex", "shared-id"),
+            "issue.claim",
+            json!({ "issue": theirs }),
+        )
+        .await;
+
+    let mine = board
+        .ok(
+            &in_session(board.agent("lead"), "claude-code", "shared-id"),
+            "issue.list",
+            json!({ "claim": "mine" }),
+        )
+        .await;
+
+    assert_eq!(mine["items"], json!([]));
+}
+
+fn without_harness(mut who: Who, session: &str) -> Who {
+    let actor = who
+        .actor
+        .as_mut()
+        .expect("an actor")
+        .as_object_mut()
+        .expect("an object");
+    actor.remove("harness");
+    actor.insert("session".into(), json!(session));
+    who
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_id_without_a_harness_is_no_session() {
+    let board = start().await;
+    board.project("DEM").await;
+    let here = board.issue("Here").await;
+    let there = board.issue("There").await;
+    let lead = without_harness(board.agent("lead"), "session-1");
+    board
+        .ok(&lead, "issue.claim", json!({ "issue": here }))
+        .await;
+    board
+        .ok(
+            &without_harness(board.agent("audit"), "session-1"),
+            "issue.claim",
+            json!({ "issue": there }),
+        )
+        .await;
+
+    let mine = board
+        .ok(&lead, "issue.list", json!({ "claim": "mine" }))
+        .await;
+
+    assert_eq!(ids(&mine["items"]), vec![here]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
