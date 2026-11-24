@@ -58,6 +58,7 @@ impl Board {
             revision: 3,
             claim: None,
             assignee: None,
+            bases: Vec::new(),
         }
     }
 }
@@ -145,6 +146,7 @@ pub fn agent_in(worktree: &str, branch: &str) -> Caller {
             repository: Some("/home/sam/code/demo/.git".into()),
             worktree: Some(worktree.into()),
             branch: Some(branch.into()),
+            contains: None,
         },
     }
 }

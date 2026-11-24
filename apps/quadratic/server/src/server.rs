@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::app::{Context, application, caller_of, interface};
+use crate::app::{Context, application, caller_of, interface, with_branches};
 use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
 use crate::git::repository::GIT_LIMIT;
 use crate::git::watcher::{self, Watcher};
@@ -253,11 +253,13 @@ pub async fn start_with(
     let binding = HttpBinding::with_request_context(
         app,
         move |parts: &http::request::Parts| {
-            let context = caller_of(&parts.headers).map(|caller| {
-                Context::watching(store.clone(), caller, looks.clone())
-                    .with_credentials(command_line_credentials.clone())
-            });
-            std::future::ready(context)
+            let caller = caller_of(&parts.headers);
+            let (store, looks) = (store.clone(), looks.clone());
+            let credentials = command_line_credentials.clone();
+            async move {
+                let caller = with_branches(caller?).await;
+                Ok(Context::watching(store, caller, looks).with_credentials(credentials))
+            }
         },
         HttpOptions {
             target: TARGET.into(),

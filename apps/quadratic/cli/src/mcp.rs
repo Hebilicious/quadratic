@@ -250,6 +250,7 @@ mod tests {
                 repository: Some("/demo/.git".into()),
                 worktree: Some(worktree.into()),
                 branch: Some(worktree.into()),
+                contains: None,
             },
         }
     }

@@ -167,6 +167,7 @@ mod in_process {
                 repository: text(code.join(".git")),
                 worktree: text(code.join(worktree)),
                 branch: Some(worktree.into()),
+                contains: None,
             },
         }
     }

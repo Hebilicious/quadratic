@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
+use super::board::Board;
 use super::lifecycle::apply;
 use super::{Context, Refused, board, model};
-use crate::domain::{Actor, Caller, Event, Landing, Outcome, WorkingCopy, decide};
+use crate::domain::{Actor, Caller, Event, Failure, Landing, Outcome, WorkingCopy, decide};
 use crate::git::ids;
 use crate::git::watch::Landed;
 use crate::store::{AsOf, ClaimedWork, GitLanding, GitWatch, Store, View};
@@ -204,7 +205,7 @@ async fn settle_issue(
             }
             let record = board::issue(tx, &issue)?;
             let domain_project = model::domain_project(&board::project(tx, &record.project)?)?;
-            let domain_issue = model::domain_issue(&record)?;
+            let domain_issue = Board::load(tx)?.issue(&record)?;
             for landing in &fresh {
                 let event = Event::Merge {
                     landing: match &landing.signal {
@@ -220,11 +221,17 @@ async fn settle_issue(
                         Signal::Trailer => Landing::Trailer,
                     },
                 };
-                if let Outcome::Changed(change) =
-                    decide(&event, &domain_issue, &caller, &domain_project)?
-                {
-                    apply(tx, &issue, &change, None)?;
-                    break;
+                match decide(&event, &domain_issue, &caller, &domain_project) {
+                    Ok(Outcome::Changed(change)) => {
+                        apply(tx, &issue, &change, None)?;
+                        break;
+                    }
+                    Ok(Outcome::Unchanged) => {}
+                    Err(Failure::BaseNotMerged { .. }) => {
+                        tx.hold_merge(&issue)?;
+                        break;
+                    }
+                    Err(failure) => return Err(failure.into()),
                 }
             }
             for landing in &fresh {

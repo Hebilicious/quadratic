@@ -29,7 +29,7 @@ use model::IssueSummary;
 pub use board::board_loads_on_this_thread;
 pub use caller::{
     ACTOR_HEADER, BRANCH_HEADER, REPOSITORY_HEADER, WORKTREE_HEADER, caller_of, decode_header,
-    encode_header,
+    encode_header, with_branches,
 };
 pub use catalog::{CATALOG_JSON, input_refusal, interface};
 

@@ -271,6 +271,8 @@ pub struct WaitNode {
     pub parent: Option<String>,
     pub status: String,
     pub category: Option<String>,
+    pub project: String,
+    pub claim_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,9 +4,10 @@ use serde_json::Value;
 
 use super::board::{Board, require_issue};
 use super::catalog::capability;
+use super::lifecycle::release_held;
 use super::model::{IssueSummary, Relation};
 use super::{Context, Refused, finish};
-use crate::domain::RelationChange;
+use crate::domain::{RelationChange, STACKED_ON};
 
 #[derive(Deserialize)]
 pub(super) struct LinkInput {
@@ -38,6 +39,9 @@ async fn link_issues(context: &Context, input: LinkInput) -> Result<Relations, R
             require_issue(tx, &input.target)?;
             if input.remove {
                 tx.remove_relation(&input.issue, &input.kind, &input.target)?;
+                if input.kind == STACKED_ON {
+                    release_held(tx, vec![input.issue.clone()])?;
+                }
             } else {
                 if let Some(change) = RelationChange::link(&input.issue, &input.kind, &input.target)
                 {

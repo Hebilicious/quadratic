@@ -443,7 +443,7 @@ impl<'c> View<'c> {
 
     pub fn graph(&self) -> Result<Graph, StoreError> {
         let sql = format!(
-            "SELECT i.id, i.parent, i.status, s.category FROM {} ORDER BY i.id",
+            "SELECT i.id, i.parent, i.status, s.category, i.project, i.claim_branch FROM {} ORDER BY i.id",
             self.issue_source()
         );
         let issues = self
@@ -456,6 +456,8 @@ impl<'c> View<'c> {
                     parent: cells.opt_text(1),
                     status: cells.text(2),
                     category: cells.opt_text(3),
+                    project: cells.text(4),
+                    claim_branch: cells.opt_text(5),
                 }
             })
             .collect();

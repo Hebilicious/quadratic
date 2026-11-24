@@ -88,6 +88,7 @@ pub(crate) fn domain_issue(record: &IssueRecord) -> Result<domain::Issue, Refuse
             .as_deref()
             .map(|text| parse("assignee", text))
             .transpose()?,
+        bases: Vec::new(),
     })
 }
 

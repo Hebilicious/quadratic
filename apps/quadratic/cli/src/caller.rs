@@ -91,5 +91,6 @@ fn working_copy(directory: &Path) -> WorkingCopy {
         repository: git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]),
         worktree: git(&["rev-parse", "--path-format=absolute", "--show-toplevel"]),
         branch,
+        contains: None,
     }
 }

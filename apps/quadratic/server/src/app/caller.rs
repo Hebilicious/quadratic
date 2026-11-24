@@ -5,6 +5,7 @@ use http::HeaderMap;
 use serde_json::{Value, json};
 
 use crate::domain::{Actor, Caller, WorkingCopy};
+use crate::git::repository::{GIT_LIMIT, Repository};
 
 pub const ACTOR_HEADER: &str = "quadratic-actor";
 pub const REPOSITORY_HEADER: &str = "quadratic-repository";
@@ -27,8 +28,22 @@ pub fn caller_of(headers: &HeaderMap) -> Result<Caller, Refusal> {
             repository: header(headers, REPOSITORY_HEADER)?,
             worktree: header(headers, WORKTREE_HEADER)?,
             branch: header(headers, BRANCH_HEADER)?,
+            contains: None,
         },
     })
+}
+
+/// Reads which branches the caller's branch contains, for the `stacked-on` rule. A caller
+/// whose branches cannot be read keeps `contains` unknown, and so works from no base's branch.
+pub async fn with_branches(mut caller: Caller) -> Caller {
+    let copy = &caller.working_copy;
+    if let (Some(repository), Some(branch)) = (&copy.repository, &copy.branch) {
+        caller.working_copy.contains = Repository::at(repository, GIT_LIMIT)
+            .contained_in(branch)
+            .await
+            .ok();
+    }
+    caller
 }
 
 pub fn encode_header(text: &str) -> String {

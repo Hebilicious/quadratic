@@ -7,7 +7,9 @@ use super::catalog::capability;
 use super::issues::whole_issue;
 use super::model::{self, Issue, IssueAnswer, IssueSummary};
 use super::{Context, IssueReader, Refused, finish};
-use crate::domain::{Change, ClaimAfter, Event, Outcome, decide};
+use crate::domain::{
+    Actor, Caller, Change, ClaimAfter, Event, Failure, Landing, Outcome, WorkingCopy, decide,
+};
 use crate::git::repository::{GIT_LIMIT, Repository};
 use crate::store::{ClaimStart, IssueFields, Tx};
 
@@ -42,6 +44,48 @@ pub(super) fn apply(
             },
         )?;
     }
+    release_held_on(tx, id)
+}
+
+fn release_held_on(tx: &mut Tx<'_>, base: &str) -> Result<(), Refused> {
+    if tx.held_merges()?.is_empty() {
+        return Ok(());
+    }
+    let stacked = Board::load(tx)?.stacked_on(base);
+    release_held(tx, stacked)
+}
+
+/// An issue whose landing its bases held back moves to the workflow's `merge` status once
+/// nothing holds it back any more.
+pub(super) fn release_held(tx: &mut Tx<'_>, issues: Vec<String>) -> Result<(), Refused> {
+    let held = tx.held_merges()?;
+    let issues: Vec<String> = issues.into_iter().filter(|id| held.contains(id)).collect();
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let board = Board::load(tx)?;
+    let server = Caller {
+        actor: Actor::server(),
+        working_copy: WorkingCopy::default(),
+    };
+    let event = Event::Merge {
+        landing: Landing::Held,
+    };
+    for id in issues {
+        let record = board::issue(tx, &id)?;
+        let project = model::domain_project(&board::project(tx, &record.project)?)?;
+        match decide(&event, &board.issue(&record)?, &server, &project) {
+            Ok(Outcome::Changed(change)) => {
+                tx.end_held_merge(&id)?;
+                apply(tx, &id, &change, None)?;
+            }
+            Ok(Outcome::Unchanged) => {
+                tx.end_held_merge(&id)?;
+            }
+            Err(Failure::BaseNotMerged { .. }) => {}
+            Err(failure) => return Err(failure.into()),
+        }
+    }
     Ok(())
 }
 
@@ -60,16 +104,16 @@ impl Request {
         }
     }
 
-    fn event(&self, tx: &Tx<'_>, id: &str) -> Result<Event, Refused> {
-        Ok(match self {
+    fn event(&self, tx: &Tx<'_>, board: &Board, id: &str) -> Event {
+        match self {
             Request::Claim { worktree } => Event::Claim {
-                waits: Board::load(tx)?.waits(id),
+                waits: board.waits(id),
                 at: tx.now().to_owned(),
                 worktree: worktree.clone(),
             },
             Request::Release { .. } => Event::Release,
             Request::Close { .. } => Event::Close,
-        })
+        }
     }
 
     fn evidence(&self) -> Option<&str> {
@@ -98,8 +142,9 @@ async fn move_issue<R: Send + 'static>(
             move |tx| {
                 let record = board::issue(tx, &id)?;
                 let project = model::domain_project(&board::project(tx, &record.project)?)?;
-                let issue = model::domain_issue(&record)?;
-                let event = request.event(tx, &id)?;
+                let board = Board::load(tx)?;
+                let issue = board.issue(&record)?;
+                let event = request.event(tx, &board, &id);
                 let mut started = None;
                 if let Outcome::Changed(change) = decide(&event, &issue, &caller, &project)? {
                     apply(tx, &id, &change, request.evidence())?;

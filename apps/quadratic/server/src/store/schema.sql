@@ -72,7 +72,7 @@ CREATE INDEX IF NOT EXISTS labels_by_label ON labels (label);
 
 CREATE TABLE IF NOT EXISTS relations (
   source TEXT NOT NULL,
-  kind   TEXT NOT NULL CHECK (kind IN ('blocks', 'related', 'duplicate', 'discovered-from')),
+  kind   TEXT NOT NULL CHECK (kind IN ('blocks', 'related', 'duplicate', 'discovered-from', 'stacked-on')),
   target TEXT NOT NULL,
   PRIMARY KEY (source, kind, target)
 );
@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS git_landings (
   branch     TEXT,
   landed_in  TEXT NOT NULL,
   PRIMARY KEY (issue, git_commit)
+);
+
+CREATE TABLE IF NOT EXISTS held_merges (
+  issue TEXT PRIMARY KEY
 );
 
 CREATE TABLE IF NOT EXISTS git_watch (

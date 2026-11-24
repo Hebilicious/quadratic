@@ -149,10 +149,10 @@ local summaryProperties = new Dynamic {
   claim = module.ref("Claim")
   ready {
     type = "boolean"
-    description = "Computed, never stored. True when the category is unstarted, nobody holds a claim, every blocker and every child is resolved, no ancestor has an unresolved blocker, and the issue is assigned to nobody or to the caller: the human, or the caller's role. A blocker that cannot be read counts as unresolved."
+    description = "Computed, never stored. True when the category is unstarted, nobody holds a claim, every blocker and every child is resolved, no ancestor has an unresolved blocker, every issue it is stacked on is in review and the caller works from its branch, or is merged, and the issue is assigned to nobody or to the caller: the human, or the caller's role. A blocker that cannot be read counts as unresolved."
   }
-  blockedBy = array(module.ref("IssueId"), null, "The unresolved issues that keep this one from being ready: its blockers, its unresolved children, and the blockers of its ancestors.")
-  notReady = array(module.ref("NotReadyReason"), 6, "Why the issue is not ready; absent when it is.")
+  blockedBy = array(module.ref("IssueId"), null, "The unresolved issues that keep this one from being ready: its blockers, its unresolved children, the blockers of its ancestors, and the issues it is stacked on that give it the reason `stacked`.")
+  notReady = array(module.ref("NotReadyReason"), 7, "Why the issue is not ready; absent when it is.")
   order {
     type = "number"
     description = "The position of the issue in lists and boards. Lower comes first."
@@ -348,8 +348,8 @@ types {
   }
   ["NotReadyReason"] {
     type = "string"
-    enum { "category"; "blocked"; "children"; "assigned"; "claimed"; "mine" }
-    description = "`category`: the status is not of the unstarted category. `blocked`: a blocker of the issue or of an ancestor is unresolved. `children`: a child is unresolved. `assigned`: the issue is assigned, and not to the caller. `claimed`: someone else holds it. `mine`: the caller holds it, the same actor name in the same worktree."
+    enum { "category"; "blocked"; "children"; "stacked"; "assigned"; "claimed"; "mine" }
+    description = "`category`: the status is not of the unstarted category. `blocked`: a blocker of the issue or of an ancestor is unresolved. `children`: a child is unresolved. `stacked`: the unresolved issue is stacked on an issue that is before the workflow's `review` status or canceled, or, when nobody holds it, on an issue in review whose branch the caller's branch does not contain. `assigned`: the issue is assigned, and not to the caller. `claimed`: someone else holds it. `mine`: the caller holds it, the same actor name in the same worktree."
   }
   ["IssueSummary"] {
     type = "object"
@@ -437,8 +437,8 @@ types {
   }
   ["RelationKind"] {
     type = "string"
-    enum { "blocks"; "related"; "duplicate"; "discovered-from" }
-    description = "`A blocks B`: B is not ready while A is unresolved. `A duplicate B`: A tracks the same work as B. `A discovered-from B`: A was found while working on B. Only `blocks` affects readiness."
+    enum { "blocks"; "related"; "duplicate"; "discovered-from"; "stacked-on" }
+    description = "`A blocks B`: B is not ready while A is unresolved. `A duplicate B`: A tracks the same work as B. `A discovered-from B`: A was found while working on B. `A stacked-on B`: A's branch starts from B's branch; A is ready once B is in review, for a caller whose branch contains B's, or once B is merged, and A moves to the `merge` status only after B. Only `blocks` and `stacked-on` affect readiness."
   }
   ["Relation"] {
     type = "object"
@@ -537,6 +537,10 @@ types {
   ["Cycle"] = failure("Cycle", new Dynamic {
     path = array(module.ref("IssueId"), null, null)
   }, new Listing { "path" })
+  ["BaseNotMerged"] = failure("BaseNotMerged", new Dynamic {
+    issue = module.ref("IssueId")
+    bases = array(module.ref("IssueId"), null, "The issues it is stacked on that are not in the workflow's `merge` status or after it.")
+  }, new Listing { "issue"; "bases" })
   ["UnknownStatus"] = failure("UnknownStatus", new Dynamic {
     status = module.ref("Status")
     statuses = array(module.ref("Status"), 20, "The statuses of the project's workflow.")
@@ -791,7 +795,7 @@ capabilities {
   }
 
   ["issue.update"] {
-    description = "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence." + committed
+    description = "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A move into the `merge` status, or a later status that is not canceled, fails with `BaseNotMerged` while an issue it is stacked on is not merged. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence." + committed
     audience = interactiveClients
     input {
       type = "object"
@@ -826,7 +830,7 @@ capabilities {
     }
     output = module.ref("IssueSummaryAnswer")
     failures {
-      ...failures(new Listing { "NotFound"; "Held"; "HumanOnly"; "Cycle"; "UnknownStatus" })
+      ...failures(new Listing { "NotFound"; "Held"; "HumanOnly"; "Cycle"; "UnknownStatus"; "BaseNotMerged" })
       ["Stale"] = failure("Stale", new Dynamic {
         revision { type = "integer"; minimum = 1 }
       }, new Listing { "revision" })
@@ -855,8 +859,8 @@ capabilities {
         category = module.ref("Category")
         reasons = array(new Dynamic {
           type = "string"
-          enum { "category"; "blocked"; "children"; "assigned" }
-        }, 4, "`category`: the status is not of the unstarted category. `blocked`: an issue in `blockers` is unresolved. `children`: a child is unresolved. `assigned`: the issue is assigned, and not to the caller: the human, or the caller's role.")
+          enum { "category"; "blocked"; "children"; "stacked"; "assigned" }
+        }, 5, "`category`: the status is not of the unstarted category. `blocked`: an issue in `blockers` is unresolved. `children`: a child is unresolved. `stacked`: an issue in `blockers` that it is stacked on is before review or canceled, or the caller's branch does not contain its branch. `assigned`: the issue is assigned, and not to the caller: the human, or the caller's role.")
         blockers = array(module.ref("IssueId"), null, null)
       }, new Listing { "issue"; "status"; "category"; "reasons"; "blockers" })
     }
@@ -880,7 +884,7 @@ capabilities {
   }
 
   ["issue.close"] {
-    description = "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (the same actor name in the same worktree), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence." + committed
+    description = "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (the same actor name in the same worktree), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence, or fails with `BaseNotMerged` while an issue it is stacked on is not merged." + committed
     audience { "cli"; "mcp"; "web" }
     input {
       type = "object"
@@ -894,7 +898,7 @@ capabilities {
     }
     output = module.ref("IssueAnswer")
     failures {
-      ...failures(new Listing { "NotFound"; "Held"; "HumanOnly" })
+      ...failures(new Listing { "NotFound"; "Held"; "HumanOnly"; "BaseNotMerged" })
       ["NotClaimed"] = failure("NotClaimed", new Dynamic {
         issue = module.ref("IssueId")
       }, new Listing { "issue" })
@@ -909,7 +913,7 @@ capabilities {
   }
 
   ["issue.link"] {
-    description = "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` fails with `Cycle` when issues would wait on each other. An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open." + committed
+    description = "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` or a `stacked-on` fails with `Cycle` when issues would wait on each other through blockers, children, ancestors and the issues they are stacked on. An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open." + committed
     audience = interactiveClients
     input {
       type = "object"
@@ -984,7 +988,7 @@ capabilities {
   }
 
   ["issue.advance"] {
-    description = "For a deploy script on the machine that runs the server: move every issue that landed up to `commit` and waits after the merge to `status`. `status` comes after the workflow's `merge` status and is not of the canceled category, else `NotAfterMerge`. The call first runs one look at the project's git repository and waits for its outcome: `ScanFailed` when the look fails or its git times out, and nothing moves. `commit` must be the hash of a commit in the repository, not of a tag that points to one (`NotInRepository`; a project with no repository has none), and the default branch or its upstream, as the look read them, must reach it (`NotOnDefaultBranch`). An issue landed up to `commit` when the ref watcher recorded at least one landing of it in the project, and every one of them is `commit` or an ancestor of it. Each such issue that is unresolved and in the `merge` status, or after it and before `status`, moves to `status` when the rules of `issue.update` let the caller move it. An unresolved issue before `status` that has a landing and did not move is left: it is before the `merge` status, the caller may not move it, or it has a landing that `commit` lacks. Issues at or after `status`, and resolved issues, are in neither list. After a rewrite of the default branch, an issue whose old landing is no longer in the history is never moved: move it by hand. A landing the watcher never saw, such as one before its first look at the project or a branch deleted before its next look, is missed: move that issue by hand. `RepositoryChanged` when the project was bound to another repository or default branch during the call, and nothing moves. Reads the repository, never writes to it, and never fetches: fetch first. The same call again moves nothing." + committed
+    description = "For a deploy script on the machine that runs the server: move every issue that landed up to `commit` and waits after the merge to `status`. `status` comes after the workflow's `merge` status and is not of the canceled category, else `NotAfterMerge`. The call first runs one look at the project's git repository and waits for its outcome: `ScanFailed` when the look fails or its git times out, and nothing moves. `commit` must be the hash of a commit in the repository, not of a tag that points to one (`NotInRepository`; a project with no repository has none), and the default branch or its upstream, as the look read them, must reach it (`NotOnDefaultBranch`). An issue landed up to `commit` when the ref watcher recorded at least one landing of it in the project, and every one of them is `commit` or an ancestor of it. Each such issue that is unresolved and in the `merge` status, or after it and before `status`, moves to `status` when the rules of `issue.update` let the caller move it. An unresolved issue before `status` that has a landing and did not move is left: it is before the `merge` status, the caller may not move it, an issue it is stacked on is not merged, or it has a landing that `commit` lacks. Issues at or after `status`, and resolved issues, are in neither list. After a rewrite of the default branch, an issue whose old landing is no longer in the history is never moved: move it by hand. A landing the watcher never saw, such as one before its first look at the project or a branch deleted before its next look, is missed: move that issue by hand. `RepositoryChanged` when the project was bound to another repository or default branch during the call, and nothing moves. Reads the repository, never writes to it, and never fetches: fetch first. The same call again moves nothing." + committed
     audience { "cli" }
     input {
       type = "object"

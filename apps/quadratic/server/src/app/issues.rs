@@ -433,7 +433,7 @@ async fn update_issue(
         .write_issue("issue.update", reason, move |tx| {
             let record = board::issue(tx, &input.issue)?;
             let project = model::domain_project(&board::project(tx, &record.project)?)?;
-            let issue = model::domain_issue(&record)?;
+            let issue = Board::load(tx)?.issue(&record)?;
             let assignee = input.given_or_cleared("assignee", &input.assignee);
             let event = Event::Update {
                 revision: input.revision,

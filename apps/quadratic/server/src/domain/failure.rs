@@ -17,6 +17,7 @@ pub enum NotReadyReason {
     Category,
     Blocked,
     Children,
+    Stacked,
     Assigned,
     Claimed,
     Mine,
@@ -58,6 +59,10 @@ pub enum Failure {
     },
     Cycle {
         path: Vec<IssueId>,
+    },
+    BaseNotMerged {
+        issue: IssueId,
+        bases: Vec<IssueId>,
     },
     DuplicateStatus {
         status: Status,

@@ -220,6 +220,7 @@ fn initial_issue(
         revision: 3,
         claim,
         assignee,
+        bases: Vec::new(),
     }
 }
 

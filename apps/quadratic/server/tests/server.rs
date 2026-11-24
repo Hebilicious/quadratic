@@ -35,6 +35,8 @@ mod process;
 mod projects;
 #[path = "server/ready.rs"]
 mod ready;
+#[path = "server/stacked.rs"]
+mod stacked;
 #[path = "server/tokens.rs"]
 mod tokens;
 #[path = "server/updates.rs"]

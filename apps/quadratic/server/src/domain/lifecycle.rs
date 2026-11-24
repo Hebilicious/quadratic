@@ -1,6 +1,7 @@
 use super::failure::Failure;
 use super::issue::{Caller, Claim, Issue, Project};
 use super::readiness::{Readiness, Wait, readiness};
+use super::stack::may_reach;
 use super::workflow::{Category, Status, Workflow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,8 +28,13 @@ pub enum Event {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Landing {
-    Branch { branch: String, since_claim: bool },
+    Branch {
+        branch: String,
+        since_claim: bool,
+    },
     Trailer,
+    /// A landing that an earlier `Merge` confirmed and its bases held back.
+    Held,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +81,7 @@ pub fn decide(
             status,
             changes_assignee,
         } => rules.update(*revision, status.as_deref(), *changes_assignee),
-        Event::Merge { landing } => Ok(rules.merge(landing)),
+        Event::Merge { landing } => rules.merge(landing),
         Event::Advance { status } => rules.advance(status),
     }
 }
@@ -210,6 +216,7 @@ impl Rules<'_> {
         {
             return Err(self.held(claim));
         }
+        may_reach(self.issue, workflow, status)?;
         let status = status.to_string();
         let claim = if status == workflow.moves.merge || category != Category::Started {
             ClaimAfter::Ended
@@ -280,16 +287,19 @@ impl Rules<'_> {
             {
                 Ok(self.moves_to(&moves.review, ClaimAfter::Kept, true))
             }
-            _ => Ok(self.moves_to(&moves.merge, ClaimAfter::Ended, true)),
+            _ => {
+                may_reach(self.issue, &self.project.workflow, &moves.merge)?;
+                Ok(self.moves_to(&moves.merge, ClaimAfter::Ended, true))
+            }
         }
     }
 
-    fn merge(&self, landing: &Landing) -> Outcome {
+    fn merge(&self, landing: &Landing) -> Result<Outcome, Failure> {
         if self.issue.category.is_resolved() || self.in_merge_status() {
-            return Outcome::Unchanged;
+            return Ok(Outcome::Unchanged);
         }
         let lands = match (&self.issue.claim, landing) {
-            (None, _) => true,
+            (None, _) | (_, Landing::Held) => true,
             (
                 Some(claim),
                 Landing::Branch {
@@ -299,10 +309,11 @@ impl Rules<'_> {
             ) => *since_claim && claim.branch == *branch,
             (Some(_), Landing::Trailer) => self.issue.status == self.project.workflow.moves.review,
         };
-        if lands {
-            self.moves_to(&self.project.workflow.moves.merge, ClaimAfter::Ended, false)
-        } else {
-            Outcome::Unchanged
+        if !lands {
+            return Ok(Outcome::Unchanged);
         }
+        let merge = &self.project.workflow.moves.merge;
+        may_reach(self.issue, &self.project.workflow, merge)?;
+        Ok(self.moves_to(merge, ClaimAfter::Ended, false))
     }
 }

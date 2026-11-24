@@ -16,6 +16,7 @@ Issues
 - `quadratic show --issue ABC-12`: one issue with its notes and relations. `quadratic history query --issue ABC-12`: its changes.
 - `quadratic create --title \"...\" --description \"...\" --acceptance \"...\" --priority 2`; `--acceptance` is required; `--origin ABC-12` links work found on that issue; `--assignee '{\"kind\":\"human\"}'` assigns it to the human.
 - `quadratic issue link --issue A --kind blocks --target B`.
+- `quadratic issue link --issue B --kind stacked-on --target A`: B's branch starts from A's. B is ready once A is in review, from A's branch or one on top of it, and reaches merged only after A (`BaseNotMerged`); until then, and when A goes back, `notReady` has `stacked` (A, in `blockedBy`, is before review or canceled, or your branch lacks A's).
 
 Work
 - `quadratic claim --issue ABC-12`: atomic; prints the whole issue. `Held` (exit code 1): someone else holds it. `NotReady`: what it waits on.
@@ -90,11 +91,12 @@ mod tests {
         Actor, Caller, Category, Issue, NotReadyReason, Readiness, WorkingCopy, readiness,
     };
 
-    fn every_reason() -> [NotReadyReason; 6] {
+    fn every_reason() -> [NotReadyReason; 7] {
         let every = [
             NotReadyReason::Category,
             NotReadyReason::Blocked,
             NotReadyReason::Children,
+            NotReadyReason::Stacked,
             NotReadyReason::Assigned,
             NotReadyReason::Claimed,
             NotReadyReason::Mine,
@@ -104,6 +106,7 @@ mod tests {
                 NotReadyReason::Category
                 | NotReadyReason::Blocked
                 | NotReadyReason::Children
+                | NotReadyReason::Stacked
                 | NotReadyReason::Assigned
                 | NotReadyReason::Claimed
                 | NotReadyReason::Mine => {}
@@ -131,6 +134,7 @@ mod tests {
             revision: 1,
             claim: None,
             assignee: None,
+            bases: Vec::new(),
         };
         let caller = Caller {
             actor: Actor::without_header(),
