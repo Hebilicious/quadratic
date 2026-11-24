@@ -7,10 +7,15 @@ edition = "2024"
 rust-version = "1.99"
 version = "0.1.0"
 license = "MIT"
+repository = "https://github.com/Hebilicious/quadratic"
+homepage = "https://github.com/Hebilicious/quadratic"
+readme = "README.md"
+keywords = ["issue-tracker", "ai-agents", "mcp", "git", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [workspace.dependencies]
-quadratic-server = { path = "server" }
+quadratic-server = { path = "server", version = "=0.1.0" }
 acid-cat-core = "=0.6.0"
 base64 = "0.22"
 bytes = "1"

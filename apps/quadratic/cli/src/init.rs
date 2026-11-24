@@ -16,11 +16,11 @@ pub const USAGE: &str = "init [--key <KEY>] [--name <name>] [--default-branch <b
 const SKILL_FILES: [(&str, &str); 2] = [
     (
         ".agents/skills/quadratic/SKILL.md",
-        include_str!("../../skill/quadratic/SKILL.md"),
+        include_str!("skill/SKILL.md"),
     ),
     (
         ".agents/skills/quadratic/planning.md",
-        include_str!("../../skill/quadratic/planning.md"),
+        include_str!("skill/planning.md"),
     ),
 ];
 const AGENTS_PATH: &str = "AGENTS.md";

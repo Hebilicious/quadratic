@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::Context;
 use crate::domain::Workflow;
 
-pub const CATALOG_JSON: &str = include_str!("../../../catalog/quadratic.acidcat.json");
+pub const CATALOG_JSON: &str = include_str!("quadratic.acidcat.json");
 
 /// The interface of this build: the 64-bit FNV-1a hash of the catalog JSON it serves. Two builds with the same catalog
 /// have the same interface. FNV-1a is written out here because its value must never change with the Rust version.

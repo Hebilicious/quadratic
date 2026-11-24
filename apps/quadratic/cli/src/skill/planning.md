@@ -1,0 +1,1 @@
+../../../skill/quadratic/planning.md
