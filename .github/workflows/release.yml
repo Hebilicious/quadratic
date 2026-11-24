@@ -1,7 +1,8 @@
 name: Release
 
 # GitHub starts no workflows for tags that GITHUB_TOKEN makes, and holds the checks of pull requests that GITHUB_TOKEN
-# opens. So every step that writes to the repository uses a token of the release GitHub App.
+# opens. So every step that writes to the repository uses a token of the release GitHub App, minted with only the
+# permissions that step needs, in a job that runs no project code.
 on:
   push:
     branches: [main]
@@ -21,33 +22,65 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Opens or updates the release pull request; once it is merged, creates the tag and a draft release. Then names the
+  # release to finish: the one it just created, else a draft that an earlier run left, so that a new run resumes it.
   release-please:
     name: release-please
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.pending.outputs.tag }}
+      sha: ${{ steps.pending.outputs.sha }}
+      version: ${{ steps.pending.outputs.version }}
     steps:
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           token: ${{ steps.app.outputs.token }}
 
+      - name: Name the release to finish
+        id: pending
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          CREATED: ${{ steps.release.outputs.release_created }}
+          CREATED_TAG: ${{ steps.release.outputs.tag_name }}
+          CREATED_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$CREATED" = true ]; then
+            tag=$CREATED_TAG
+            sha=$CREATED_SHA
+          else
+            tag=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq '[.[] | select(.draft and (.tag_name | startswith("v")))] | first | .tag_name // ""')
+            [ -n "$tag" ] || exit 0
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag" --jq .sha)
+            echo "The draft release $tag is not finished: building it again."
+          fi
+          case $sha in *[!0-9a-f]* | '') echo "no commit for $tag: $sha" >&2; exit 1 ;; esac
+          {
+            echo "tag=$tag"
+            echo "sha=$sha"
+            echo "version=${tag#v}"
+          } >> "$GITHUB_OUTPUT"
+
+  # Builds and packages one binary per platform. Holds no token: a build dependency it runs cannot write anything.
   binaries:
     name: binary for ${{ matrix.target }}
     needs: release-please
     if: >-
       !cancelled() && (
         github.event_name == 'pull_request' ||
-        needs.release-please.outputs.release_created == 'true'
+        needs.release-please.outputs.tag != ''
       )
     # The oldest hosted images (glibc 2.35), so that the binary runs on older distributions too.
     strategy:
@@ -62,11 +95,13 @@ jobs:
     # Only stops a hang.
     timeout-minutes: 60
     steps:
+      # The release's commit, by its SHA: a tag name could also be a branch's.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Moon compares the checkout with `main`, so it needs the history.
         with:
-          ref: ${{ needs.release-please.outputs.tag_name || github.sha }}
+          ref: ${{ needs.release-please.outputs.sha || github.sha }}
+          # Moon compares the checkout with `main`, so it needs the history.
           fetch-depth: 0
+          persist-credentials: false
 
       # The store engine is compiled from C and links zlib.
       - name: Install the system packages
@@ -85,9 +120,10 @@ jobs:
         id: build
         env:
           RELEASED: ${{ needs.release-please.outputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
           host=$(rustc -vV | sed -n 's/^host: //p')
-          test "$host" = "${{ matrix.target }}"
+          test "$host" = "$TARGET"
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/quadratique/Cargo.toml)
           if [ -n "$RELEASED" ]; then test "$version" = "$RELEASED"; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -98,10 +134,13 @@ jobs:
           binary=$(sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target)
           echo "BINARY=$binary" >> "$GITHUB_ENV"
 
-      - name: Show the newest glibc the binary needs
+      - name: Show the libraries and the newest glibc the binary needs
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           glibc=$(objdump -T "$BINARY" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
-          echo "The binary for ${{ matrix.target }} needs ${glibc#GLIBC_} or newer." | tee -a "$GITHUB_STEP_SUMMARY"
+          libraries=$(objdump -p "$BINARY" | awk '/NEEDED/ { print $2 }' | tr '\n' ' ')
+          echo "The binary for $TARGET needs glibc ${glibc#GLIBC_} or newer, and these libraries: $libraries" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Check that the binary runs
         run: |
@@ -109,8 +148,11 @@ jobs:
           "$BINARY" --version
 
       - name: Package the archive and its SHA-256 file
+        env:
+          VERSION: ${{ steps.build.outputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
-          archive=$(sh apps/quadratique/install/package.sh "$BINARY" "${{ steps.build.outputs.version }}" "${{ matrix.target }}" "$RUNNER_TEMP/release")
+          archive=$(sh apps/quadratique/install/package.sh "$BINARY" "$VERSION" "$TARGET" "$RUNNER_TEMP/release")
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -121,16 +163,66 @@ jobs:
             ${{ env.ARCHIVE }}.sha256
           if-no-files-found: error
 
-      - if: needs.release-please.outputs.release_created == 'true'
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+  # Attaches the archives to the draft release and publishes it. Checks out nothing and runs no project code: it only
+  # reads the artifacts of this run, checks them, and holds the only token here that can write a release.
+  publish:
+    name: attach the archives and publish
+    needs: [release-please, binaries]
+    if: github.event_name == 'push' && needs.release-please.outputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: quadratique-*
+          path: assets
+          merge-multiple: true
+
+      - name: Check that the four files are there and that each archive matches its SHA-256 file
+        working-directory: assets
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -euo pipefail
+          wanted=$(for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            printf '%s\n' "quadratique-$VERSION-$target.tar.gz" "quadratique-$VERSION-$target.tar.gz.sha256"
+          done | LC_ALL=C sort | tr '\n' ' ')
+          present=$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | tr '\n' ' ')
+          if [ "$present" != "$wanted" ]; then
+            echo "the artifacts are: $present; the release needs: $wanted" >&2
+            exit 1
+          fi
+          for checksum in *.sha256; do
+            [ "$(awk '{ print $2 }' "$checksum")" = "${checksum%.sha256}" ] || { echo "$checksum names another file" >&2; exit 1; }
+            sha256sum --check --strict "$checksum"
+          done
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
 
-      - name: Attach the archive to the release
-        if: needs.release-please.outputs.release_created == 'true'
+      # Safe to run again: it replaces assets of the same name, removes any other, checks the digest of each file the
+      # release holds, and publishes last, so the release is public only once it holds the four checked files.
+      - name: Attach the files, check the release, and publish it
+        working-directory: assets
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --repo "$GITHUB_REPOSITORY"
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName > /dev/null
+          for stale in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'); do
+            [ -e "$stale" ] || gh release delete-asset "$TAG" "$stale" --repo "$GITHUB_REPOSITORY" --yes
+          done
+          gh release upload "$TAG" ./* --repo "$GITHUB_REPOSITORY" --clobber
+          attached=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.digest)"' | LC_ALL=C sort)
+          local=$(for file in *; do echo "$file sha256:$(sha256sum "$file" | cut -d ' ' -f 1)"; done | LC_ALL=C sort)
+          if [ "$attached" != "$local" ]; then
+            printf 'the release holds:\n%s\nit should hold:\n%s\n' "$attached" "$local" >&2
+            exit 1
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
