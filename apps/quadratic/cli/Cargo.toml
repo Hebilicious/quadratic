@@ -30,3 +30,9 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "
 [dev-dependencies]
 rustix = { workspace = true, features = ["event"] }
 tempfile.workspace = true
+
+# Lets `cargo binstall` download the archive of a GitHub release instead of building.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/quadratic-{ version }-{ target }{ archive-suffix }"
+bin-dir = "quadratic-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"

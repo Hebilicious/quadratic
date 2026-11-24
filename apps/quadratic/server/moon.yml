@@ -28,6 +28,16 @@ tasks:
     inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]
     options:
       cache: false
+  stage-web:
+    description: "Copy the built web app into web-dist, which cargo package takes into the crate, so that a build of the published crate with the embedded-web feature embeds it."
+    script: |
+      set -eu
+      rm -rf web-dist
+      cp -R ../web/dist web-dist
+    deps: ["quadratic-web:build"]
+    options:
+      cache: false
+      runInCI: false
   lint:
     command: "cargo clippy -p quadratic-server --all-targets -- -D warnings"
     inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]

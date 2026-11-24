@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [workspace.dependencies]
-quadratic-server = { path = "server", version = "=0.1.0" }
+quadratic-server = { path = "server", version = "0.1.0" }
 acid-cat-core = "=0.6.0"
 base64 = "0.22"
 bytes = "1"

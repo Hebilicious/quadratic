@@ -26,6 +26,7 @@
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         { "type": "toml", "path": "apps/quadratic/Cargo.toml", "jsonpath": "$.workspace.package.version" },
+        { "type": "toml", "path": "apps/quadratic/Cargo.toml", "jsonpath": "$.workspace.dependencies['quadratic-server'].version" },
         { "type": "toml", "path": "apps/quadratic/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='quadratic')].version" },
         { "type": "toml", "path": "apps/quadratic/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='quadratic-server')].version" },
         { "type": "json", "path": "package.json", "jsonpath": "$.version" },
