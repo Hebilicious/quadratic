@@ -1,0 +1,4 @@
+# Tasks inherited by every project. Projects add their own in moon.yml.
+fileGroups:
+  sources: ["src/**/*"]
+  tests: ["tests/**/*", "**/*.test.*"]

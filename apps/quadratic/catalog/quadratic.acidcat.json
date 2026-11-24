@@ -1,0 +1,2870 @@
+{
+  "acidcat": "0.1",
+  "title": "Quadratic",
+  "description": "An issue tracker for one person working with many AI agents: ready work, atomic claims, full history, and the statuses of the work after the merge.",
+  "targets": {
+    "cli": {
+      "bindings": [
+        "cli",
+        "http"
+      ],
+      "description": "The `quadratic` command line, for the human and for agents in their worktrees. It is a client of the server's HTTP binding of this target.",
+      "options": {
+        "cli": {
+          "aliases": {
+            "claim": {
+              "capability": "issue.claim"
+            },
+            "close": {
+              "capability": "issue.close"
+            },
+            "create": {
+              "capability": "issue.create"
+            },
+            "instructions": {
+              "capability": "workspace.instructions"
+            },
+            "ready": {
+              "capability": "issue.ready"
+            },
+            "release": {
+              "capability": "issue.release"
+            },
+            "show": {
+              "capability": "issue.get"
+            }
+          },
+          "default": "ready"
+        }
+      }
+    },
+    "mcp": {
+      "bindings": [
+        "mcp"
+      ],
+      "description": "Coding agents, through the MCP server that `quadratic mcp` starts: the agent interface, to find work, claim it, record it, finish it with evidence, and read the history."
+    },
+    "web": {
+      "bindings": [
+        "typescript",
+        "http"
+      ],
+      "description": "The web app of the human, through its TypeScript core."
+    },
+    "webmcp": {
+      "bindings": [
+        "webmcp",
+        "http"
+      ],
+      "description": "Agents in the browser, through WebMCP tools of the web app. They act for the human, as the agent `browser`."
+    }
+  },
+  "$defs": {
+    "Actor": {
+      "description": "Who made a change, as the caller's process detected it: the human, or an agent with how it runs.",
+      "properties": {
+        "harness": {
+          "description": "The coding agent, such as `claude-code` or `codex`.",
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "host": {
+          "description": "What runs the harness, such as `t3`.",
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "hostThread": {
+          "description": "The id of the host's thread or session that runs the agent.",
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "agent"
+          ],
+          "type": "string"
+        },
+        "model": {
+          "description": "The model of the agent.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/ActorName"
+        },
+        "parent": {
+          "$ref": "#/$defs/ActorName",
+          "description": "The actor that started this one: the agent whose subagent this is, or that delegated the work."
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "session": {
+          "description": "The id of the harness's own session.",
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ActorName": {
+      "description": "The name of an actor. An agent's is built from its members, `[<role>]<harness>(<host>)@<worktree directory name>`, each part absent when its member is and `agent` for an absent harness: `[security]claude-code(t3)@fix-login`, `claude-code@fix-login`; through `webmcp`, harness `browser` and no worktree: `browser`. The human's is the login name. The server's own changes are by the agent `quadratic`; a call with no actor is by the agent `agent`.",
+      "maxLength": 420,
+      "minLength": 1,
+      "type": "string"
+    },
+    "AsOf": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Time"
+        },
+        {
+          "$ref": "#/$defs/CommitHash"
+        }
+      ],
+      "description": "Read the state as of a moment: a `Time` (the last database commit at or before it; before the first, an empty board), or a `CommitHash` (`UnknownCommit` when no single commit has it). Default: now.",
+      "type": "string"
+    },
+    "Assignee": {
+      "description": "Who must act on the issue: the human, or every agent with one role. An issue assigned to someone is ready only for them; one assigned to nobody is ready for everyone. On an issue assigned to the human, an agent cannot claim it or change its status or its assignee.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "human",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "agent",
+              "type": "string"
+            },
+            "role": {
+              "$ref": "#/$defs/Role"
+            }
+          },
+          "required": [
+            "kind",
+            "role"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BadCursor": {
+      "properties": {
+        "_tag": {
+          "const": "BadCursor",
+          "type": "string"
+        }
+      },
+      "required": [
+        "_tag"
+      ],
+      "type": "object"
+    },
+    "Category": {
+      "description": "The kind of a status. An issue is resolved when its category is completed or canceled.",
+      "enum": [
+        "backlog",
+        "unstarted",
+        "started",
+        "completed",
+        "canceled"
+      ],
+      "type": "string"
+    },
+    "Change": {
+      "description": "One change to one issue, or to one project, in one database commit. A commit that changes several issues gives one change for each, with the same `commit`.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "author": {
+          "$ref": "#/$defs/Actor"
+        },
+        "branch": {
+          "description": "The git branch of the author's working directory.",
+          "type": "string"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitHash"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/FieldChange"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueId",
+          "description": "The issue changed. Absent for a change to the project itself."
+        },
+        "operation": {
+          "description": "Why the change was made: the capability, such as `issue.claim`, or the server's own work: `git.merged` when the ref watcher sees a merge.",
+          "maxLength": 128,
+          "type": "string"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectKey"
+        },
+        "reason": {
+          "description": "The free text of the input's `reason`.",
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "description": "The author's worktree.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "at",
+        "author",
+        "operation",
+        "project",
+        "fields"
+      ],
+      "type": "object"
+    },
+    "ChangedIssue": {
+      "properties": {
+        "fields": {
+          "description": "The names of the fields that changed.",
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueSummary"
+        }
+      },
+      "required": [
+        "issue",
+        "fields"
+      ],
+      "type": "object"
+    },
+    "Claim": {
+      "description": "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time.",
+      "properties": {
+        "branch": {
+          "description": "The git branch of the holder.",
+          "type": "string"
+        },
+        "holder": {
+          "$ref": "#/$defs/Actor"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "worktree": {
+          "description": "The absolute path of the holder's worktree.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "holder",
+        "branch",
+        "worktree",
+        "since"
+      ],
+      "type": "object"
+    },
+    "CommitHash": {
+      "description": "A database commit, by its hash: whole, or its first 7 or more hex digits.",
+      "pattern": "^[0-9a-f]{7,64}$",
+      "type": "string"
+    },
+    "Cycle": {
+      "properties": {
+        "_tag": {
+          "const": "Cycle",
+          "type": "string"
+        },
+        "path": {
+          "items": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "_tag",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Date": {
+      "description": "A day, such as `2030-01-15`.",
+      "pattern": "^([0-9]{4}-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29)$",
+      "type": "string"
+    },
+    "Extra": {
+      "additionalProperties": {
+        "maxLength": 300,
+        "minLength": 1,
+        "type": "string"
+      },
+      "description": "Free fields, string to string.",
+      "maxProperties": 16,
+      "propertyNames": {
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9]*([._-][a-z0-9]+)*$"
+      },
+      "type": "object"
+    },
+    "FieldChange": {
+      "description": "One field, before and after, each as JSON text; absent: no value. `field` is a member of the issue or of the project, such as `status` or `workflow`. An added note is `notes` with its text in `after` and no `before`.",
+      "properties": {
+        "after": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "field": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "type": "object"
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "description": "One finding of a tool's run. A member that the finding leaves out leaves that member of its issue as it is, except `decision`, which each run states anew.",
+      "properties": {
+        "assignee": {
+          "$ref": "#/$defs/Assignee"
+        },
+        "decision": {
+          "default": false,
+          "description": "A person must decide. While its issue is open, it blocks every other open issue of the same tool and project that is no decision and shares a link of kind `fact` with it; links of other kinds never block. Each run states it anew: a finding that leaves it out is no decision, and its blocks go.",
+          "type": "boolean"
+        },
+        "description": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/FindingKey"
+        },
+        "labels": {
+          "description": "Replaces every label of the issue.",
+          "items": {
+            "$ref": "#/$defs/Label"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "links": {
+          "description": "Replaces every link of the issue. Only links of kind `fact` make a decision block.",
+          "items": {
+            "$ref": "#/$defs/Link"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "priority": {
+          "$ref": "#/$defs/Priority"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "title",
+        "description"
+      ],
+      "type": "object"
+    },
+    "FindingKey": {
+      "description": "The finding's key in its tool, the same from run to run.",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "GitCommit": {
+      "description": "A git commit, by its whole hash: 40 lowercase hexadecimal digits, or 64 in a SHA-256 repository.",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Held": {
+      "properties": {
+        "_tag": {
+          "const": "Held",
+          "type": "string"
+        },
+        "claim": {
+          "$ref": "#/$defs/Claim"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueId"
+        }
+      },
+      "required": [
+        "_tag",
+        "issue",
+        "claim"
+      ],
+      "type": "object"
+    },
+    "HumanOnly": {
+      "properties": {
+        "_tag": {
+          "const": "HumanOnly",
+          "type": "string"
+        }
+      },
+      "required": [
+        "_tag"
+      ],
+      "type": "object"
+    },
+    "Issue": {
+      "properties": {
+        "acceptance": {
+          "description": "The acceptance criteria.",
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "assignee": {
+          "$ref": "#/$defs/Assignee"
+        },
+        "blockedBy": {
+          "description": "The unresolved issues that keep this one from being ready: its blockers, its unresolved children, and the blockers of its ancestors.",
+          "items": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "type": "array"
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "type": "array"
+        },
+        "claim": {
+          "$ref": "#/$defs/Claim"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "createdBy": {
+          "$ref": "#/$defs/Actor"
+        },
+        "description": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "due": {
+          "$ref": "#/$defs/Date"
+        },
+        "evidence": {
+          "description": "What was checked, from `issue.close`.",
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/IssueId"
+        },
+        "labels": {
+          "items": {
+            "$ref": "#/$defs/Label"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "links": {
+          "description": "What the finding is about. Empty for an issue made by hand.",
+          "items": {
+            "$ref": "#/$defs/Link"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "milestone": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "notReady": {
+          "description": "Why the issue is not ready; absent when it is.",
+          "items": {
+            "$ref": "#/$defs/NotReadyReason"
+          },
+          "maxItems": 6,
+          "type": "array"
+        },
+        "notes": {
+          "description": "The last 50 notes, oldest first. A note is never changed or removed; `history.query` with `issue` gives every note.",
+          "items": {
+            "$ref": "#/$defs/Note"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "order": {
+          "description": "The position of the issue in lists and boards. Lower comes first.",
+          "type": "number"
+        },
+        "parent": {
+          "$ref": "#/$defs/IssueId"
+        },
+        "priority": {
+          "$ref": "#/$defs/Priority"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectKey"
+        },
+        "ready": {
+          "description": "Computed, never stored. True when the category is unstarted, nobody holds a claim, every blocker and every child is resolved, no ancestor has an unresolved blocker, and the issue is assigned to nobody or to the caller: the human, or the caller's role. A blocker that cannot be read counts as unresolved.",
+          "type": "boolean"
+        },
+        "relations": {
+          "items": {
+            "$ref": "#/$defs/Relation"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "Grows by one with each change to the issue's own fields, claims and status moves included; relations leave it. `issue.update` takes it.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project",
+        "title",
+        "status",
+        "category",
+        "priority",
+        "labels",
+        "ready",
+        "blockedBy",
+        "order",
+        "revision",
+        "updatedAt",
+        "notes",
+        "relations",
+        "children",
+        "createdAt",
+        "createdBy",
+        "links"
+      ],
+      "type": "object"
+    },
+    "IssueAnswer": {
+      "description": "The answer about one issue: the issue, with its body, relations and children, under `issue`.",
+      "properties": {
+        "issue": {
+          "$ref": "#/$defs/Issue"
+        }
+      },
+      "required": [
+        "issue"
+      ],
+      "type": "object"
+    },
+    "IssueId": {
+      "description": "An issue, such as `ABC-12`. The server gives the id, and it never changes.",
+      "maxLength": 20,
+      "pattern": "^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,8}$",
+      "type": "string"
+    },
+    "IssueIds": {
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issues": {
+          "description": "The first 200, by id.",
+          "items": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "maxItems": 200,
+          "type": "array"
+        }
+      },
+      "required": [
+        "count",
+        "issues"
+      ],
+      "type": "object"
+    },
+    "IssueSummary": {
+      "properties": {
+        "assignee": {
+          "$ref": "#/$defs/Assignee"
+        },
+        "blockedBy": {
+          "description": "The unresolved issues that keep this one from being ready: its blockers, its unresolved children, and the blockers of its ancestors.",
+          "items": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "type": "array"
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "claim": {
+          "$ref": "#/$defs/Claim"
+        },
+        "id": {
+          "$ref": "#/$defs/IssueId"
+        },
+        "labels": {
+          "items": {
+            "$ref": "#/$defs/Label"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "notReady": {
+          "description": "Why the issue is not ready; absent when it is.",
+          "items": {
+            "$ref": "#/$defs/NotReadyReason"
+          },
+          "maxItems": 6,
+          "type": "array"
+        },
+        "order": {
+          "description": "The position of the issue in lists and boards. Lower comes first.",
+          "type": "number"
+        },
+        "parent": {
+          "$ref": "#/$defs/IssueId"
+        },
+        "priority": {
+          "$ref": "#/$defs/Priority"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectKey"
+        },
+        "ready": {
+          "description": "Computed, never stored. True when the category is unstarted, nobody holds a claim, every blocker and every child is resolved, no ancestor has an unresolved blocker, and the issue is assigned to nobody or to the caller: the human, or the caller's role. A blocker that cannot be read counts as unresolved.",
+          "type": "boolean"
+        },
+        "revision": {
+          "description": "Grows by one with each change to the issue's own fields, claims and status moves included; relations leave it. `issue.update` takes it.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project",
+        "title",
+        "status",
+        "category",
+        "priority",
+        "labels",
+        "ready",
+        "blockedBy",
+        "order",
+        "revision",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "IssueSummaryAnswer": {
+      "description": "The answer about one issue: its summary, under `issue`.",
+      "properties": {
+        "issue": {
+          "$ref": "#/$defs/IssueSummary"
+        }
+      },
+      "required": [
+        "issue"
+      ],
+      "type": "object"
+    },
+    "Label": {
+      "maxLength": 48,
+      "pattern": "^[a-z0-9]+([:._-][a-z0-9]+)*$",
+      "type": "string"
+    },
+    "Link": {
+      "additionalProperties": false,
+      "description": "A fact (`fact`), a file (`file`), or another kind that the tool names.",
+      "properties": {
+        "id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 32,
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "Move": {
+      "description": "A member of a workflow's `moves`.",
+      "enum": [
+        "claim",
+        "review",
+        "merge",
+        "release"
+      ],
+      "type": "string"
+    },
+    "NoProject": {
+      "properties": {
+        "_tag": {
+          "const": "NoProject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "_tag"
+      ],
+      "type": "object"
+    },
+    "NoWorkingCopy": {
+      "properties": {
+        "_tag": {
+          "const": "NoWorkingCopy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "_tag"
+      ],
+      "type": "object"
+    },
+    "NotFound": {
+      "properties": {
+        "_tag": {
+          "const": "NotFound",
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "issue",
+            "project"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "_tag",
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "NotReadyReason": {
+      "description": "`category`: the status is not of the unstarted category. `blocked`: a blocker of the issue or of an ancestor is unresolved. `children`: a child is unresolved. `assigned`: the issue is assigned, and not to the caller. `claimed`: someone else holds it. `mine`: the caller holds it, the same actor name in the same worktree.",
+      "enum": [
+        "category",
+        "blocked",
+        "children",
+        "assigned",
+        "claimed",
+        "mine"
+      ],
+      "type": "string"
+    },
+    "Note": {
+      "description": "One note on an issue, for whoever comes next. Notes only grow: none is changed or removed.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "author": {
+          "$ref": "#/$defs/ActorName"
+        },
+        "text": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "author",
+        "at"
+      ],
+      "type": "object"
+    },
+    "Priority": {
+      "description": "0 none, 1 urgent, 2 high, 3 medium, 4 low.",
+      "maximum": 4,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Project": {
+      "properties": {
+        "defaultBranch": {
+          "description": "The branch whose commits are merged work.",
+          "type": "string"
+        },
+        "extra": {
+          "$ref": "#/$defs/Extra"
+        },
+        "key": {
+          "$ref": "#/$defs/ProjectKey"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "repository": {
+          "description": "The absolute git common directory of the bound repository. Every worktree of it belongs to this project.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "workflow": {
+          "$ref": "#/$defs/Workflow"
+        }
+      },
+      "required": [
+        "key",
+        "name",
+        "workflow"
+      ],
+      "type": "object"
+    },
+    "ProjectKey": {
+      "description": "The key of a project, the prefix of its issue ids, such as `ABC`.",
+      "maxLength": 10,
+      "pattern": "^[A-Z][A-Z0-9]{1,9}$",
+      "type": "string"
+    },
+    "Relation": {
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "direction": {
+          "description": "`outgoing`: this issue is A in `A <kind> B`. `incoming`: this issue is B.",
+          "enum": [
+            "outgoing",
+            "incoming"
+          ],
+          "type": "string"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueId"
+        },
+        "kind": {
+          "$ref": "#/$defs/RelationKind"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "direction",
+        "issue",
+        "title",
+        "status",
+        "category"
+      ],
+      "type": "object"
+    },
+    "RelationKind": {
+      "description": "`A blocks B`: B is not ready while A is unresolved. `A duplicate B`: A tracks the same work as B. `A discovered-from B`: A was found while working on B. Only `blocks` affects readiness.",
+      "enum": [
+        "blocks",
+        "related",
+        "duplicate",
+        "discovered-from"
+      ],
+      "type": "string"
+    },
+    "RepositoryBound": {
+      "properties": {
+        "_tag": {
+          "const": "RepositoryBound",
+          "type": "string"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectKey"
+        }
+      },
+      "required": [
+        "_tag",
+        "project"
+      ],
+      "type": "object"
+    },
+    "Role": {
+      "description": "A kind of work that agents are launched for, such as `security` or `web-design`. Several agents can have one role at once. An invalid `QUADRATIC_ROLE` makes the `quadratic` command fail before it calls the server.",
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "The tool's finding that this issue is; absent for an issue made by hand. The tool's next complete run finishes the issue when the finding is gone.",
+      "properties": {
+        "key": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tool": {
+          "maxLength": 32,
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "key"
+      ],
+      "type": "object"
+    },
+    "Status": {
+      "description": "A status of the project's workflow, by its key, such as `in-review`. Rules read its category, its place in the workflow's `statuses` and the workflow's `moves`, never its key.",
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "Time": {
+      "description": "A moment in UTC, to the second, such as `2030-01-15T09:30:00Z`.",
+      "pattern": "^([0-9]{4}-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29)T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
+      "type": "string"
+    },
+    "ToolName": {
+      "description": "A tool that reports findings, such as `linter`.",
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "UnknownCommit": {
+      "properties": {
+        "_tag": {
+          "const": "UnknownCommit",
+          "type": "string"
+        },
+        "commit": {
+          "pattern": "^[0-9a-f]{7,64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "_tag",
+        "commit"
+      ],
+      "type": "object"
+    },
+    "UnknownStatus": {
+      "properties": {
+        "_tag": {
+          "const": "UnknownStatus",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "statuses": {
+          "description": "The statuses of the project's workflow.",
+          "items": {
+            "$ref": "#/$defs/Status"
+          },
+          "maxItems": 20,
+          "type": "array"
+        }
+      },
+      "required": [
+        "_tag",
+        "status",
+        "statuses"
+      ],
+      "type": "object"
+    },
+    "Workflow": {
+      "additionalProperties": false,
+      "default": {
+        "moves": {
+          "claim": "in-progress",
+          "merge": "merged",
+          "release": "todo",
+          "review": "in-review"
+        },
+        "statuses": [
+          {
+            "category": "backlog",
+            "key": "backlog",
+            "name": "Backlog"
+          },
+          {
+            "category": "unstarted",
+            "key": "todo",
+            "name": "Todo"
+          },
+          {
+            "category": "started",
+            "key": "in-progress",
+            "name": "In progress"
+          },
+          {
+            "category": "started",
+            "key": "in-review",
+            "name": "In review"
+          },
+          {
+            "category": "started",
+            "key": "merged",
+            "name": "Merged"
+          },
+          {
+            "category": "completed",
+            "key": "done",
+            "name": "Done"
+          },
+          {
+            "category": "canceled",
+            "key": "canceled",
+            "name": "Canceled"
+          }
+        ]
+      },
+      "description": "A project's statuses, and the status that each move of the server puts an issue in. Each key is once in `statuses` (`DuplicateStatus` otherwise). Each move names a status of the workflow, of the category it requires, and the `merge` status is neither the `claim` nor the `review` status (`InvalidMove` otherwise). `project.create` gives the default.",
+      "properties": {
+        "moves": {
+          "additionalProperties": false,
+          "properties": {
+            "claim": {
+              "$ref": "#/$defs/Status",
+              "description": "A status of the category started. Used by `issue.claim`."
+            },
+            "merge": {
+              "$ref": "#/$defs/Status",
+              "description": "A status of the category started or completed. Used by `issue.close` and the ref watcher: the work is in the default branch. Completed when the project has no step after the merge."
+            },
+            "release": {
+              "$ref": "#/$defs/Status",
+              "description": "A status of the category unstarted. Used by `issue.release`."
+            },
+            "review": {
+              "$ref": "#/$defs/Status",
+              "description": "A status of the category started. Used by `issue.close`: the work is finished and waits for its merge."
+            }
+          },
+          "required": [
+            "claim",
+            "review",
+            "merge",
+            "release"
+          ],
+          "type": "object"
+        },
+        "statuses": {
+          "description": "In board order, each key once.",
+          "items": {
+            "$ref": "#/$defs/WorkflowStatus"
+          },
+          "maxItems": 20,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "statuses",
+        "moves"
+      ],
+      "type": "object"
+    },
+    "WorkflowStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "key": {
+          "$ref": "#/$defs/Status"
+        },
+        "name": {
+          "description": "The name that people read, such as `In review`.",
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "name",
+        "category"
+      ],
+      "type": "object"
+    }
+  },
+  "capabilities": {
+    "findings.import": {
+      "description": "Record one run of a tool for one project: each finding becomes an issue with the source `tool` and the finding's `key`, and (project, tool, key) names at most one issue. By key: no issue yet, create one in the workflow's first unstarted status; an open issue, change the title, description, links, labels, assignee and priority that the finding gives where they differ, and nothing else; an issue of the completed category, the finding came back: it returns to the first unstarted status, and loses the evidence that the import wrote when it finished it (evidence that anyone wrote since stays); an issue of the canceled category: leave it, a person overruled the finding. When `complete`, each open issue of the tool and project whose key the run lacks moves to the workflow's first status of the completed category, with evidence that names the run, and its claim ends (`NoCompletedStatus` when the workflow has none); a run that is not complete finishes nothing. Each open `decision` blocks the other open issues of the tool and project that are no decision and share a link of kind `fact` with it, and no other kind of link blocks; the import adds and removes the `blocks` relations that it made so, and never one made by hand, nor one that would make issues wait on each other. `TooManyBlocks` when the run implies more than `limit` such relations, and nothing changes. `DuplicateKey` when two findings have one key. The same run imported again changes nothing. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "default": true,
+            "description": "The run checked the whole project, so a finding it lacks is gone.",
+            "type": "boolean"
+          },
+          "findings": {
+            "description": "Every finding of the run.",
+            "items": {
+              "$ref": "#/$defs/Finding"
+            },
+            "maxItems": 2000,
+            "type": "array"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey",
+            "description": "The project. Default: the project bound to the repository of the caller's working directory; with none, the call fails with `NoProject`: give `project`, or bind the repository with `project.create` or `project.update`."
+          },
+          "tool": {
+            "$ref": "#/$defs/ToolName"
+          }
+        },
+        "required": [
+          "tool",
+          "findings"
+        ],
+        "title": "FindingsImportInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "created": {
+            "$ref": "#/$defs/IssueIds"
+          },
+          "finished": {
+            "$ref": "#/$defs/IssueIds"
+          },
+          "left": {
+            "$ref": "#/$defs/IssueIds",
+            "description": "The issues of findings in the run that the import did not change: unchanged, or canceled."
+          },
+          "reopened": {
+            "$ref": "#/$defs/IssueIds"
+          },
+          "updated": {
+            "$ref": "#/$defs/IssueIds"
+          }
+        },
+        "required": [
+          "created",
+          "updated",
+          "reopened",
+          "finished",
+          "left"
+        ],
+        "title": "FindingsImported",
+        "type": "object"
+      },
+      "failures": {
+        "DuplicateKey": {
+          "properties": {
+            "_tag": {
+              "const": "DuplicateKey",
+              "type": "string"
+            },
+            "key": {
+              "$ref": "#/$defs/FindingKey"
+            }
+          },
+          "required": [
+            "_tag",
+            "key"
+          ],
+          "type": "object"
+        },
+        "NoCompletedStatus": {
+          "properties": {
+            "_tag": {
+              "const": "NoCompletedStatus",
+              "type": "string"
+            },
+            "project": {
+              "$ref": "#/$defs/ProjectKey"
+            }
+          },
+          "required": [
+            "_tag",
+            "project"
+          ],
+          "type": "object"
+        },
+        "NoProject": {
+          "$ref": "#/$defs/NoProject"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "TooManyBlocks": {
+          "properties": {
+            "_tag": {
+              "const": "TooManyBlocks",
+              "type": "string"
+            },
+            "limit": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "_tag",
+            "limit"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "history.query": {
+      "description": "List the changes to one issue, to one project, or to the whole board, newest first, from `asOf` back: who made each, with which operation and reason, from which branch and worktree, and the exact field changes. A commit that changed several issues gives one change for each. Changes nothing.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "asOf": {
+            "$ref": "#/$defs/AsOf"
+          },
+          "cursor": {
+            "description": "The `nextCursor` of the previous page of the same listing, else `BadCursor`.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey",
+            "description": "Default: every project."
+          }
+        },
+        "title": "HistoryQueryInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/$defs/Change"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "nextCursor": {
+            "description": "Give it as `cursor` to get the next page. Absent on the last page.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ChangePage",
+        "type": "object"
+      },
+      "failures": {
+        "BadCursor": {
+          "$ref": "#/$defs/BadCursor"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "UnknownCommit": {
+          "$ref": "#/$defs/UnknownCommit"
+        }
+      },
+      "readOnly": true
+    },
+    "issue.advance": {
+      "description": "For a deploy script on the machine that runs the server: move every issue that landed up to `commit` and waits after the merge to `status`. `status` comes after the workflow's `merge` status and is not of the canceled category, else `NotAfterMerge`. The call first runs one look at the project's git repository and waits for its outcome: `ScanFailed` when the look fails or its git times out, and nothing moves. `commit` must be the hash of a commit in the repository, not of a tag that points to one (`NotInRepository`; a project with no repository has none), and the default branch or its upstream, as the look read them, must reach it (`NotOnDefaultBranch`). An issue landed up to `commit` when the ref watcher recorded at least one landing of it in the project, and every one of them is `commit` or an ancestor of it. Each such issue that is unresolved and in the `merge` status, or after it and before `status`, moves to `status` when the rules of `issue.update` let the caller move it. An unresolved issue before `status` that has a landing and did not move is left: it is before the `merge` status, the caller may not move it, or it has a landing that `commit` lacks. Issues at or after `status`, and resolved issues, are in neither list. After a rewrite of the default branch, an issue whose old landing is no longer in the history is never moved: move it by hand. A landing the watcher never saw, such as one before its first look at the project or a branch deleted before its next look, is missed: move that issue by hand. `RepositoryChanged` when the project was bound to another repository or default branch during the call, and nothing moves. Reads the repository, never writes to it, and never fetches: fetch first. The same call again moves nothing. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/GitCommit",
+            "description": "The git commit that was deployed."
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey",
+            "description": "The project. Default: the project bound to the repository of the caller's working directory; with none, the call fails with `NoProject`: give `project`, or bind the repository with `project.create` or `project.update`."
+          },
+          "reason": {
+            "description": "Why the change is made, in free text. It goes in the message of the database commit, after the operation.",
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/Status",
+            "description": "The status to move the issues to, after the workflow's `merge` status, such as `deployed`."
+          }
+        },
+        "required": [
+          "commit",
+          "status"
+        ],
+        "title": "IssueAdvanceInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "left": {
+            "$ref": "#/$defs/IssueIds",
+            "description": "The unresolved issues before `status`, with a landing in the project, that the call did not move: before the `merge` status, not movable by the caller, or with a landing that `commit` lacks. Empty when every such issue moved."
+          },
+          "moved": {
+            "$ref": "#/$defs/IssueIds",
+            "description": "The issues the call moved to `status`."
+          }
+        },
+        "required": [
+          "moved",
+          "left"
+        ],
+        "title": "IssuesAdvanced",
+        "type": "object"
+      },
+      "failures": {
+        "NoProject": {
+          "$ref": "#/$defs/NoProject"
+        },
+        "NotAfterMerge": {
+          "properties": {
+            "_tag": {
+              "const": "NotAfterMerge",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/Status"
+            },
+            "statuses": {
+              "description": "The statuses after the workflow's `merge` status that are not of the canceled category.",
+              "items": {
+                "$ref": "#/$defs/Status"
+              },
+              "maxItems": 20,
+              "type": "array"
+            }
+          },
+          "required": [
+            "_tag",
+            "status",
+            "statuses"
+          ],
+          "type": "object"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "NotInRepository": {
+          "properties": {
+            "_tag": {
+              "const": "NotInRepository",
+              "type": "string"
+            },
+            "commit": {
+              "$ref": "#/$defs/GitCommit"
+            }
+          },
+          "required": [
+            "_tag",
+            "commit"
+          ],
+          "type": "object"
+        },
+        "NotOnDefaultBranch": {
+          "properties": {
+            "_tag": {
+              "const": "NotOnDefaultBranch",
+              "type": "string"
+            },
+            "commit": {
+              "$ref": "#/$defs/GitCommit"
+            }
+          },
+          "required": [
+            "_tag",
+            "commit"
+          ],
+          "type": "object"
+        },
+        "RepositoryChanged": {
+          "properties": {
+            "_tag": {
+              "const": "RepositoryChanged",
+              "type": "string"
+            },
+            "project": {
+              "$ref": "#/$defs/ProjectKey"
+            }
+          },
+          "required": [
+            "_tag",
+            "project"
+          ],
+          "type": "object"
+        },
+        "ScanFailed": {
+          "properties": {
+            "_tag": {
+              "const": "ScanFailed",
+              "type": "string"
+            },
+            "problem": {
+              "description": "What git or the store answered.",
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "_tag",
+            "problem"
+          ],
+          "type": "object"
+        },
+        "UnknownStatus": {
+          "$ref": "#/$defs/UnknownStatus"
+        }
+      }
+    },
+    "issue.claim": {
+      "description": "Take a ready issue, atomically: no two callers can hold it. The only way to start a claim. Records the caller, its branch and its worktree, and moves the issue to the workflow's `claim` status. The holder is the same actor name in the same worktree; its repeated call changes nothing. Fails with `Held`, naming the holder, when someone else holds it; with `NotReady`, giving the reasons and the unresolved blockers, when it is not ready; and with `NoWorkingCopy` when the caller is not in a git worktree on a branch, or not in `worktree` of the project. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "mcp"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "worktree": {
+            "description": "The worktree to work in, when not the caller's folder; later calls act from it.",
+            "maxLength": 4096,
+            "minLength": 1,
+            "pattern": "^/",
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue"
+        ],
+        "title": "IssueClaimInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/IssueAnswer"
+      },
+      "failures": {
+        "Held": {
+          "$ref": "#/$defs/Held"
+        },
+        "NoWorkingCopy": {
+          "$ref": "#/$defs/NoWorkingCopy"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "NotReady": {
+          "properties": {
+            "_tag": {
+              "const": "NotReady",
+              "type": "string"
+            },
+            "blockers": {
+              "items": {
+                "$ref": "#/$defs/IssueId"
+              },
+              "type": "array"
+            },
+            "category": {
+              "$ref": "#/$defs/Category"
+            },
+            "issue": {
+              "$ref": "#/$defs/IssueId"
+            },
+            "reasons": {
+              "description": "`category`: the status is not of the unstarted category. `blocked`: an issue in `blockers` is unresolved. `children`: a child is unresolved. `assigned`: the issue is assigned, and not to the caller: the human, or the caller's role.",
+              "items": {
+                "enum": [
+                  "category",
+                  "blocked",
+                  "children",
+                  "assigned"
+                ],
+                "type": "string"
+              },
+              "maxItems": 4,
+              "type": "array"
+            },
+            "status": {
+              "$ref": "#/$defs/Status"
+            }
+          },
+          "required": [
+            "_tag",
+            "issue",
+            "status",
+            "category",
+            "reasons",
+            "blockers"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "issue.close": {
+      "description": "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (the same actor name in the same worktree), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "description": "What was checked, and how: commands, results, links.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          }
+        },
+        "required": [
+          "issue",
+          "evidence"
+        ],
+        "title": "IssueCloseInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/IssueAnswer"
+      },
+      "failures": {
+        "Held": {
+          "$ref": "#/$defs/Held"
+        },
+        "HumanOnly": {
+          "$ref": "#/$defs/HumanOnly"
+        },
+        "NotClaimed": {
+          "properties": {
+            "_tag": {
+              "const": "NotClaimed",
+              "type": "string"
+            },
+            "issue": {
+              "$ref": "#/$defs/IssueId"
+            }
+          },
+          "required": [
+            "_tag",
+            "issue"
+          ],
+          "type": "object"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "Resolved": {
+          "properties": {
+            "_tag": {
+              "const": "Resolved",
+              "type": "string"
+            },
+            "issue": {
+              "$ref": "#/$defs/IssueId"
+            },
+            "status": {
+              "$ref": "#/$defs/Status",
+              "description": "The status of the canceled category that the issue is in."
+            }
+          },
+          "required": [
+            "_tag",
+            "issue",
+            "status"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "issue.create": {
+      "description": "Create an issue; the server gives its id. With `key`, a repeated call gives the issue of the first call and creates nothing; the same key with a different input fails with `KeyConflict`. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web",
+        "webmcp"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance": {
+            "description": "The acceptance criteria: when the issue is done.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "assignee": {
+            "$ref": "#/$defs/Assignee"
+          },
+          "description": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "due": {
+            "$ref": "#/$defs/Date"
+          },
+          "key": {
+            "description": "A key that the client chooses, unique to this issue.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "$ref": "#/$defs/Label"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "milestone": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "notes": {
+            "description": "The first note, by the caller.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "origin": {
+            "$ref": "#/$defs/IssueId",
+            "description": "The issue whose work found this one. Adds the relation `discovered-from`."
+          },
+          "parent": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "priority": {
+            "$ref": "#/$defs/Priority",
+            "default": 0
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey",
+            "description": "The project. Default: the project bound to the repository of the caller's working directory; with none, the call fails with `NoProject`: give `project`, or bind the repository with `project.create` or `project.update`."
+          },
+          "status": {
+            "$ref": "#/$defs/Status",
+            "description": "A status of the project's workflow, else `UnknownStatus`. Default: its first status of the unstarted category."
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "acceptance"
+        ],
+        "title": "IssueCreateInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "created": {
+            "description": "False when `key` matched an earlier call.",
+            "type": "boolean"
+          },
+          "issue": {
+            "$ref": "#/$defs/IssueSummary"
+          }
+        },
+        "required": [
+          "issue",
+          "created"
+        ],
+        "title": "IssueCreated",
+        "type": "object"
+      },
+      "failures": {
+        "KeyConflict": {
+          "properties": {
+            "_tag": {
+              "const": "KeyConflict",
+              "type": "string"
+            },
+            "issue": {
+              "$ref": "#/$defs/IssueId"
+            }
+          },
+          "required": [
+            "_tag",
+            "issue"
+          ],
+          "type": "object"
+        },
+        "NoProject": {
+          "$ref": "#/$defs/NoProject"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "UnknownStatus": {
+          "$ref": "#/$defs/UnknownStatus"
+        }
+      }
+    },
+    "issue.get": {
+      "description": "Give one issue with its body, relations and children; `history.query` with `issue` gives its changes. With `asOf`, as it was then. Changes nothing.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web",
+        "webmcp"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "asOf": {
+            "$ref": "#/$defs/AsOf"
+          },
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          }
+        },
+        "required": [
+          "issue"
+        ],
+        "title": "IssueGetInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/IssueAnswer"
+      },
+      "failures": {
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "UnknownCommit": {
+          "$ref": "#/$defs/UnknownCommit"
+        }
+      },
+      "readOnly": true
+    },
+    "issue.link": {
+      "description": "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` fails with `Cycle` when issues would wait on each other. An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web",
+        "webmcp"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "kind": {
+            "$ref": "#/$defs/RelationKind"
+          },
+          "remove": {
+            "default": false,
+            "type": "boolean"
+          },
+          "target": {
+            "$ref": "#/$defs/IssueId"
+          }
+        },
+        "required": [
+          "issue",
+          "kind",
+          "target"
+        ],
+        "title": "IssueLinkInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "issue": {
+            "$ref": "#/$defs/IssueSummary"
+          },
+          "relations": {
+            "items": {
+              "$ref": "#/$defs/Relation"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "issue",
+          "relations"
+        ],
+        "title": "IssueRelations",
+        "type": "object"
+      },
+      "failures": {
+        "Cycle": {
+          "$ref": "#/$defs/Cycle"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "SelfLink": {
+          "properties": {
+            "_tag": {
+              "const": "SelfLink",
+              "type": "string"
+            }
+          },
+          "required": [
+            "_tag"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "issue.list": {
+      "description": "List issues that match every filter given, by order. With `asOf`, the board as it was then. Changes nothing.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web",
+        "webmcp"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "asOf": {
+            "$ref": "#/$defs/AsOf"
+          },
+          "assignee": {
+            "$ref": "#/$defs/Assignee"
+          },
+          "category": {
+            "items": {
+              "$ref": "#/$defs/Category"
+            },
+            "maxItems": 5,
+            "type": "array"
+          },
+          "claim": {
+            "description": "`mine`: held by the caller, the same actor name in the same worktree. `any`: claimed by anyone. `none`: unclaimed.",
+            "enum": [
+              "mine",
+              "any",
+              "none"
+            ],
+            "type": "string"
+          },
+          "cursor": {
+            "description": "The `nextCursor` of the previous page of the same listing, else `BadCursor`.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "labels": {
+            "description": "Only issues with every one of these labels.",
+            "items": {
+              "$ref": "#/$defs/Label"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "parent": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey",
+            "description": "Default: every project."
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "status": {
+            "description": "A status that no listed project has matches nothing.",
+            "items": {
+              "$ref": "#/$defs/Status"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "text": {
+            "description": "Words that the title or the description contains.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "tool": {
+            "$ref": "#/$defs/ToolName",
+            "description": "Only issues from this tool's findings."
+          }
+        },
+        "title": "IssueListInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/$defs/IssueSummary"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "nextCursor": {
+            "description": "Give it as `cursor` to get the next page. Absent on the last page.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "IssueSummaryPage",
+        "type": "object"
+      },
+      "failures": {
+        "BadCursor": {
+          "$ref": "#/$defs/BadCursor"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "UnknownCommit": {
+          "$ref": "#/$defs/UnknownCommit"
+        }
+      },
+      "readOnly": true
+    },
+    "issue.ready": {
+      "description": "List the issues that the caller can start now: a status of the unstarted category, unclaimed, every blocker and child resolved, no ancestor blocked, and assigned to nobody or to the caller: the human, or the caller's role. The issues assigned to the caller first, then the unassigned ones; in each, most urgent first, then by order; at most `limit`. Changes nothing.",
+      "audience": [
+        "cli",
+        "mcp"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "labels": {
+            "description": "Only issues with every one of these labels.",
+            "items": {
+              "$ref": "#/$defs/Label"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "limit": {
+            "default": 5,
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey",
+            "description": "The project. Default: the project bound to the repository of the caller's working directory; with none, the call fails with `NoProject`: give `project`, or bind the repository with `project.create` or `project.update`."
+          }
+        },
+        "title": "IssueReadyInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/$defs/IssueSummary"
+            },
+            "maxItems": 50,
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ReadyIssues",
+        "type": "object"
+      },
+      "failures": {
+        "NoProject": {
+          "$ref": "#/$defs/NoProject"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        }
+      },
+      "readOnly": true
+    },
+    "issue.release": {
+      "description": "Give a claim back: the issue moves to the workflow's `release` status with no claim, and keeps its assignee. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`). Only the holder or the human (`Held`). One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "reason": {
+            "description": "Why the change is made, in free text. It goes in the message of the database commit, after the operation.",
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue"
+        ],
+        "title": "IssueReleaseInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/IssueSummaryAnswer"
+      },
+      "failures": {
+        "Held": {
+          "$ref": "#/$defs/Held"
+        },
+        "HumanOnly": {
+          "$ref": "#/$defs/HumanOnly"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        }
+      }
+    },
+    "issue.update": {
+      "description": "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web",
+        "webmcp"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance": {
+            "description": "Replaces the acceptance criteria.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "assignee": {
+            "$ref": "#/$defs/Assignee"
+          },
+          "clear": {
+            "description": "Fields to empty. A field that the call also gives keeps the given value. Notes cannot be emptied.",
+            "items": {
+              "enum": [
+                "parent",
+                "assignee",
+                "milestone",
+                "due",
+                "description"
+              ],
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "description": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "due": {
+            "$ref": "#/$defs/Date"
+          },
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "labels": {
+            "description": "Replaces every label.",
+            "items": {
+              "$ref": "#/$defs/Label"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "milestone": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "notes": {
+            "description": "Adds a note, by the caller, after the earlier ones. It never changes or removes a note.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "order": {
+            "type": "number"
+          },
+          "parent": {
+            "$ref": "#/$defs/IssueId"
+          },
+          "priority": {
+            "$ref": "#/$defs/Priority"
+          },
+          "reason": {
+            "description": "Why the change is made, in free text. It goes in the message of the database commit, after the operation.",
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "revision": {
+            "description": "The `revision` of the issue as the caller last read it.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/Status"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue",
+          "revision"
+        ],
+        "title": "IssueUpdateInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/IssueSummaryAnswer"
+      },
+      "failures": {
+        "Cycle": {
+          "$ref": "#/$defs/Cycle"
+        },
+        "Held": {
+          "$ref": "#/$defs/Held"
+        },
+        "HumanOnly": {
+          "$ref": "#/$defs/HumanOnly"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "Stale": {
+          "properties": {
+            "_tag": {
+              "const": "Stale",
+              "type": "string"
+            },
+            "revision": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "_tag",
+            "revision"
+          ],
+          "type": "object"
+        },
+        "UnknownStatus": {
+          "$ref": "#/$defs/UnknownStatus"
+        }
+      }
+    },
+    "project.create": {
+      "description": "Create a project with the default workflow. When the caller is in a git repository, bind that repository to it: each worktree of it then belongs to the project (`RepositoryBound` when another project has it). `KeyTaken` when a project has the key. Writes nothing into the repository. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the project with `project.list` to know.",
+      "audience": [
+        "cli",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "defaultBranch": {
+            "description": "The branch whose commits are merged work. Default: the repository's `origin/HEAD`, else the branch checked out in its main worktree, else `main`.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra": {
+            "$ref": "#/$defs/Extra"
+          },
+          "key": {
+            "$ref": "#/$defs/ProjectKey"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "name"
+        ],
+        "title": "ProjectCreateInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/Project"
+      },
+      "failures": {
+        "KeyTaken": {
+          "properties": {
+            "_tag": {
+              "const": "KeyTaken",
+              "type": "string"
+            },
+            "project": {
+              "$ref": "#/$defs/ProjectKey"
+            }
+          },
+          "required": [
+            "_tag",
+            "project"
+          ],
+          "type": "object"
+        },
+        "RepositoryBound": {
+          "$ref": "#/$defs/RepositoryBound"
+        }
+      }
+    },
+    "project.list": {
+      "description": "List every project, with its repository and workflow. Changes nothing.",
+      "audience": [
+        "cli",
+        "web"
+      ],
+      "output": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/$defs/Project"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ProjectList",
+        "type": "object"
+      },
+      "readOnly": true
+    },
+    "project.update": {
+      "description": "Change a project: the given members, and leave the others. Only the human (`HumanOnly`). With `bindRepository`, the git repository of the caller's working directory replaces the one the project had, for example after the repository moved (`NoWorkingCopy` when the caller has no working directory in a git repository, such as the web app; `RepositoryBound` when another project has it). A new repository or a new `defaultBranch` is refused while issues of the project hold a claim (`ClaimsHeld`): release or close them first. A new `workflow` is refused with `DuplicateStatus` or `InvalidMove` when it breaks a rule of `Workflow`, and with `StatusInUse` when issues are in a status that it drops or puts in another category: move those issues first. Writes nothing into the repository. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the project with `project.list` to know.",
+      "audience": [
+        "cli",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "bindRepository": {
+            "default": false,
+            "description": "Bind the git repository of the caller's working directory to the project.",
+            "type": "boolean"
+          },
+          "defaultBranch": {
+            "description": "The branch whose commits are merged work.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "extra": {
+            "$ref": "#/$defs/Extra",
+            "description": "Replaces every extra field; `{}` empties them."
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey"
+          },
+          "reason": {
+            "description": "Why the change is made, in free text. It goes in the message of the database commit, after the operation.",
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/$defs/Workflow"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "ProjectUpdateInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/Project"
+      },
+      "failures": {
+        "ClaimsHeld": {
+          "properties": {
+            "_tag": {
+              "const": "ClaimsHeld",
+              "type": "string"
+            },
+            "issues": {
+              "description": "The issues of the project that hold a claim.",
+              "items": {
+                "$ref": "#/$defs/IssueId"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "_tag",
+            "issues"
+          ],
+          "type": "object"
+        },
+        "DuplicateStatus": {
+          "properties": {
+            "_tag": {
+              "const": "DuplicateStatus",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/Status"
+            }
+          },
+          "required": [
+            "_tag",
+            "status"
+          ],
+          "type": "object"
+        },
+        "HumanOnly": {
+          "$ref": "#/$defs/HumanOnly"
+        },
+        "InvalidMove": {
+          "properties": {
+            "_tag": {
+              "const": "InvalidMove",
+              "type": "string"
+            },
+            "move": {
+              "$ref": "#/$defs/Move"
+            },
+            "problem": {
+              "description": "`missing`: `status` is not in `statuses`. `category`: `status` is of another category than the move requires. `merge`: `move` is `claim` or `review`, and `status` is the `merge` status.",
+              "enum": [
+                "missing",
+                "category",
+                "merge"
+              ],
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/Status"
+            }
+          },
+          "required": [
+            "_tag",
+            "move",
+            "status",
+            "problem"
+          ],
+          "type": "object"
+        },
+        "NoWorkingCopy": {
+          "$ref": "#/$defs/NoWorkingCopy"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "RepositoryBound": {
+          "$ref": "#/$defs/RepositoryBound"
+        },
+        "StatusInUse": {
+          "properties": {
+            "_tag": {
+              "const": "StatusInUse",
+              "type": "string"
+            },
+            "issues": {
+              "items": {
+                "$ref": "#/$defs/IssueId"
+              },
+              "type": "array"
+            },
+            "statuses": {
+              "description": "The statuses that issues are in and that the new workflow drops or puts in another category.",
+              "items": {
+                "$ref": "#/$defs/Status"
+              },
+              "maxItems": 20,
+              "type": "array"
+            }
+          },
+          "required": [
+            "_tag",
+            "statuses",
+            "issues"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "token.create": {
+      "description": "Create an agent token. The server writes its value, `qdt_` and 32 random bytes in base64url, to a new file at `file` with mode 0600, and keeps only its SHA-256, with the label and the date, in `credentials.json` beside the database. The value is in no answer, output or log. `NotAbsolute` when `file` is a relative path; `InDataFolder` when its folder, with symbolic links resolved, is the server's data folder; `FileExists` when something is at `file`, which stays untouched; `LabelTaken` when a token has the label. No backend accepts a token yet.",
+      "audience": [
+        "cli"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "description": "The absolute path of a file that does not exist yet, outside the server's data folder. The value is written there and nowhere else.",
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "label": {
+            "description": "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratic`, `agent`, `browser`, `human`), else `LabelTaken`.",
+            "maxLength": 32,
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "file"
+        ],
+        "title": "TokenCreateInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "file": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "label": {
+            "description": "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratic`, `agent`, `browser`, `human`), else `LabelTaken`.",
+            "maxLength": 32,
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "file"
+        ],
+        "title": "TokenCreated",
+        "type": "object"
+      },
+      "failures": {
+        "FileExists": {
+          "properties": {
+            "_tag": {
+              "const": "FileExists",
+              "type": "string"
+            },
+            "file": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "_tag",
+            "file"
+          ],
+          "type": "object"
+        },
+        "InDataFolder": {
+          "properties": {
+            "_tag": {
+              "const": "InDataFolder",
+              "type": "string"
+            },
+            "file": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "_tag",
+            "file"
+          ],
+          "type": "object"
+        },
+        "LabelTaken": {
+          "properties": {
+            "_tag": {
+              "const": "LabelTaken",
+              "type": "string"
+            },
+            "label": {
+              "description": "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratic`, `agent`, `browser`, `human`), else `LabelTaken`.",
+              "maxLength": 32,
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "_tag",
+            "label"
+          ],
+          "type": "object"
+        },
+        "NotAbsolute": {
+          "properties": {
+            "_tag": {
+              "const": "NotAbsolute",
+              "type": "string"
+            },
+            "file": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "_tag",
+            "file"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "token.list": {
+      "description": "List the agent tokens: each one's label and the moment it was created. No value and no verifier. Changes nothing.",
+      "audience": [
+        "cli"
+      ],
+      "output": {
+        "properties": {
+          "items": {
+            "description": "The tokens, oldest first.",
+            "items": {
+              "properties": {
+                "created": {
+                  "$ref": "#/$defs/Time"
+                },
+                "label": {
+                  "description": "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratic`, `agent`, `browser`, `human`), else `LabelTaken`.",
+                  "maxLength": 32,
+                  "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "created"
+              ],
+              "title": "Token",
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "TokenList",
+        "type": "object"
+      },
+      "readOnly": true
+    },
+    "token.revoke": {
+      "description": "Revoke the agent token with the label: its verifier leaves `credentials.json` and the server's memory before the answer. `revoked` is false when no token had the label, and then nothing changed. The file that holds the value stays: delete it yourself.",
+      "audience": [
+        "cli"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "description": "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratic`, `agent`, `browser`, `human`), else `LabelTaken`.",
+            "maxLength": 32,
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "TokenRevokeInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "label": {
+            "description": "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratic`, `agent`, `browser`, `human`), else `LabelTaken`.",
+            "maxLength": 32,
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "revoked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "label",
+          "revoked"
+        ],
+        "title": "TokenRevoked",
+        "type": "object"
+      }
+    },
+    "workspace.instructions": {
+      "description": "Give the command reference for agents, and who and where the caller is: its actor, project, branch and worktree. Changes nothing.",
+      "audience": [
+        "cli",
+        "mcp"
+      ],
+      "output": {
+        "properties": {
+          "actor": {
+            "$ref": "#/$defs/Actor"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey"
+          },
+          "text": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "worktree": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "actor"
+        ],
+        "title": "Instructions",
+        "type": "object"
+      },
+      "readOnly": true
+    }
+  },
+  "events": {
+    "issue.changed": {
+      "description": "A database commit changed issues or projects. The occurrence gives the commit, its author, the new summary of each issue whose summary changed, at most 500, and the keys of the projects whose own members the commit changed: after one, read `project.list` again. Computed members count: resolving a blocker lists the issues that became ready. With `cut`, the commit changed more: read `project.list` again, and the issues with `issue.list` or the changes with `history.query` from `commit`. After an occurrence with `truncated`, occurrences were skipped: read `project.list` again, and the board with `issue.list` or the changes since the last commit seen with `history.query`. A subscription with `issue` gets only the commits that change that issue, with that issue alone in `issues` and `projects` empty; one with `project`, or with no filter, also gets the commits that change only a project. The cursor is the commit: a subscription that resumes with it gets every later commit.",
+      "audience": [
+        "cli",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "$ref": "#/$defs/IssueId",
+            "description": "Only changes to this issue. A commit that changes only a project is not sent."
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey",
+            "description": "Only changes to this project: its issues, and its own members. Default: every project."
+          }
+        },
+        "title": "IssueChangedInput",
+        "type": "object"
+      },
+      "payload": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "author": {
+            "$ref": "#/$defs/Actor"
+          },
+          "commit": {
+            "$ref": "#/$defs/CommitHash"
+          },
+          "cut": {
+            "const": true,
+            "description": "Present when the commit changed more issues than `issues` lists.",
+            "type": "boolean"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/$defs/ChangedIssue"
+            },
+            "maxItems": 500,
+            "type": "array"
+          },
+          "operation": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "projects": {
+            "description": "The projects whose name, default branch, repository, workflow or extra fields the commit changed, or that it created.",
+            "items": {
+              "$ref": "#/$defs/ProjectKey"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit",
+          "at",
+          "author",
+          "operation",
+          "issues",
+          "projects"
+        ],
+        "title": "IssueChangedPayload",
+        "type": "object"
+      }
+    }
+  }
+}

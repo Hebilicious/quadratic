@@ -1,0 +1,97 @@
+[
+  {
+    "key": "L204 f:49f3eaf2628a1f35",
+    "title": "L204: A setting documented for one release only is read by no page",
+    "description": "guide.install.timeout is documented only from release 2.1, and no page uses it; put it in the reference or delete it\n\nRule: A setting documented for one release only is read by no page\nFix (decision): move it to the reference, or read it from a page\n\nOccurrences (2):\n- guide/install.md:10:1: guide.install.timeout is documented only from release 2.1, and no page uses it; put it in the reference or delete it\n- guide/install.md:11:1: guide.install.timeout is documented only from release 2.2, and no page uses it; put it in the reference or delete it",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 2,
+    "labels": [
+      "guide"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "guide/install.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L420 f:d92e04ead10cf3a5",
+    "title": "L420: translated passage in en: the translation is not approved (f:d92e04ead10cf3a5)",
+    "description": "translated passage in en: the translation is not approved (f:d92e04ead10cf3a5)\n\nRule: A person approved the text of this translated passage\nFix (decision): approve (`linter approve`), or rewrite\n\nAt reference/errors.md:48:5",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 3,
+    "labels": [
+      "reference"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "reference/errors.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L420 f:1504868284e4459c",
+    "title": "L420: translated passage in fr: the translation is not approved (f:1504868284e4459c)",
+    "description": "translated passage in fr: the translation is not approved (f:1504868284e4459c)\n\nRule: A person approved the text of this translated passage\nFix (decision): approve (`linter approve`), or rewrite\n\nAt reference/errors.md:52:5",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 3,
+    "labels": [
+      "reference"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "reference/errors.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L420 f:8fa4bb97b408b8e8",
+    "title": "L420: translated passage in en: the translation is not approved (f:8fa4bb97b408b8e8)",
+    "description": "translated passage in en: the translation is not approved (f:8fa4bb97b408b8e8)\n\nRule: A person approved the text of this translated passage\nFix (decision): approve (`linter approve`), or rewrite\n\nAt tutorial/start.md:27:12",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 3,
+    "labels": [
+      "tutorial"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "tutorial/start.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L420 f:ccc1b435268295c9",
+    "title": "L420: translated passage in fr: the translation is not approved (f:ccc1b435268295c9)",
+    "description": "translated passage in fr: the translation is not approved (f:ccc1b435268295c9)\n\nRule: A person approved the text of this translated passage\nFix (decision): approve (`linter approve`), or rewrite\n\nAt tutorial/start.md:28:12",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 3,
+    "labels": [
+      "tutorial"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "tutorial/start.md"
+      }
+    ],
+    "decision": true
+  }
+]

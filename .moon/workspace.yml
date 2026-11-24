@@ -1,0 +1,9 @@
+# Each folder of apps/quadratic/ that has a moon.yml is a moon project.
+projects:
+  - "apps/quadratic/*/moon.yml"
+
+telemetry: false
+
+vcs:
+  defaultBranch: "main"
+  provider: "github"

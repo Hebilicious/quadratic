@@ -1,0 +1,21 @@
+[
+  {
+    "key": "L204 f:49f3eaf2628a1f35",
+    "title": "L204: A setting documented for one release only is read by no page",
+    "description": "guide.install.timeout is documented only from release 2.1, and no page uses it; put it in the reference or delete it\n\nRule: A setting documented for one release only is read by no page\nFix (decision): move it to the reference, or read it from a page\n\nOccurrences (2):\n- guide/install.md:10:1: guide.install.timeout is documented only from release 2.1, and no page uses it; put it in the reference or delete it\n- guide/install.md:11:1: guide.install.timeout is documented only from release 2.2, and no page uses it; put it in the reference or delete it",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 2,
+    "labels": [
+      "guide"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "guide/install.md"
+      }
+    ],
+    "decision": true
+  }
+]

@@ -1,0 +1,2 @@
+# Playwright writes traces and screenshots of failed journeys here.
+test-results/

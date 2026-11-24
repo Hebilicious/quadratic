@@ -1,0 +1,45 @@
+[
+  {
+    "key": "L204 f:49f3eaf2628a1f35",
+    "title": "L204: A setting documented for one release only is read by no page",
+    "description": "guide.install.timeout is documented only from release 2.1, and no page uses it; put it in the reference or delete it\n\nRule: A setting documented for one release only is read by no page\nFix (decision): move it to the reference, or read it from a page\n\nOccurrences (2):\n- guide/install.md:10:1: guide.install.timeout is documented only from release 2.1, and no page uses it; put it in the reference or delete it\n- guide/install.md:11:1: guide.install.timeout is documented only from release 2.2, and no page uses it; put it in the reference or delete it",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 2,
+    "labels": [
+      "guide"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "guide/install.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L420 f:a420556f407006e2",
+    "title": "L420: A person approved the text of this translated passage",
+    "description": "translated passage in en: the translation is not approved (f:d92e04ead10cf3a5)\n\nRule: A person approved the text of this translated passage\nFix (decision): approve (`linter approve`), or rewrite\n\nOccurrences (4):\n- reference/errors.md:48:5: translated passage in en: the translation is not approved (f:d92e04ead10cf3a5)\n- reference/errors.md:52:5: translated passage in fr: the translation is not approved (f:1504868284e4459c)\n- tutorial/start.md:27:12: translated passage in en: the translation is not approved (f:8fa4bb97b408b8e8)\n- tutorial/start.md:28:12: translated passage in fr: the translation is not approved (f:ccc1b435268295c9)",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 3,
+    "labels": [
+      "reference",
+      "tutorial"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "reference/errors.md"
+      },
+      {
+        "kind": "file",
+        "id": "tutorial/start.md"
+      }
+    ],
+    "decision": true
+  }
+]

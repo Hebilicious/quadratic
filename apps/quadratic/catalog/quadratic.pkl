@@ -1,0 +1,1179 @@
+amends "@acidcat/Catalog.pkl"
+
+title = "Quadratic"
+description = "An issue tracker for one person working with many AI agents: ready work, atomic claims, full history, and the statuses of the work after the merge."
+
+targets {
+  ["cli"] {
+    description = "The `quadratic` command line, for the human and for agents in their worktrees. It is a client of the server's HTTP binding of this target."
+    bindings { "cli"; "http" }
+    options {
+      cli {
+        aliases {
+          instructions { capability = "workspace.instructions" }
+          ready { capability = "issue.ready" }
+          show { capability = "issue.get" }
+          create { capability = "issue.create" }
+          claim { capability = "issue.claim" }
+          release { capability = "issue.release" }
+          close { capability = "issue.close" }
+        }
+        ["default"] = "ready"
+      }
+    }
+  }
+  ["mcp"] {
+    description = "Coding agents, through the MCP server that `quadratic mcp` starts: the agent interface, to find work, claim it, record it, finish it with evidence, and read the history."
+    bindings { "mcp" }
+  }
+  ["web"] {
+    description = "The web app of the human, through its TypeScript core."
+    bindings { "typescript"; "http" }
+  }
+  ["webmcp"] {
+    description = "Agents in the browser, through WebMCP tools of the web app. They act for the human, as the agent `browser`."
+    bindings { "webmcp"; "http" }
+  }
+}
+
+local function string(max: Int, text: String?): Dynamic = new {
+  type = "string"
+  minLength = 1
+  maxLength = max
+  description = text
+}
+
+local function text(text: String?): Dynamic = new {
+  type = "string"
+  description = text
+}
+
+local slug = "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+
+local function token(max: Int, text: String?): Dynamic = new {
+  type = "string"
+  maxLength = max
+  pattern = slug
+  description = text
+}
+
+local realDate = "([0-9]{4}-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29)"
+
+local function array(item: Dynamic, max: Int?, text: String?): Dynamic = new {
+  type = "array"
+  items = item
+  maxItems = max
+  description = text
+}
+
+local function failure(tag: String, fields: Dynamic, names: Listing<String>): Dynamic = new {
+  type = "object"
+  properties {
+    ["_tag"] { type = "string"; ["const"] = tag }
+    ...fields
+  }
+  required { "_tag"; ...names }
+}
+
+local function failures(tags: Listing<String>): Mapping<String, Dynamic> = new {
+  for (tag in tags) { [tag] = module.ref(tag) }
+}
+
+local function tagged(tag: String, value: String, fields: Dynamic, names: Listing<String>): Dynamic = new {
+  type = "object"
+  additionalProperties = false
+  properties {
+    [tag] { type = "string"; ["const"] = value }
+    ...fields
+  }
+  required { tag; ...names }
+}
+
+local workflowMoves = new Listing<Dynamic> {
+  new { name = "claim"; category = "started"; status = "in-progress"; text = "Used by `issue.claim`." }
+  new { name = "review"; category = "started"; status = "in-review"; text = "Used by `issue.close`: the work is finished and waits for its merge." }
+  new { name = "merge"; category = "started or completed"; status = "merged"; text = "Used by `issue.close` and the ref watcher: the work is in the default branch. Completed when the project has no step after the merge." }
+  new { name = "release"; category = "unstarted"; status = "todo"; text = "Used by `issue.release`." }
+}
+
+local timestamp = new Dynamic { type = "string"; format = "date-time" }
+
+local reasonSchema = string(500, "Why the change is made, in free text. It goes in the message of the database commit, after the operation.")
+
+local function committedThen(check: String): String = " One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: \(check) to know."
+
+local committed = committedThen("read the issue")
+
+local projectCommitted = committedThen("read the project with `project.list`")
+
+local projectInput = new Dynamic {
+  ["$ref"] = "#/$defs/ProjectKey"
+  description = "The project. Default: the project bound to the repository of the caller's working directory; with none, the call fails with `NoProject`: give `project`, or bind the repository with `project.create` or `project.update`."
+}
+
+local cursorSchema = string(512, "The `nextCursor` of the previous page of the same listing, else `BadCursor`.")
+
+local function limitSchema(max: Int, default: Int): Dynamic = new {
+  type = "integer"
+  minimum = 1
+  maximum = max
+  ["default"] = default
+}
+
+local function page(item: String, max: Int): Dynamic = new {
+  type = "object"
+  title = "\(item)Page"
+  properties {
+    items = array(module.ref(item), max, null)
+    nextCursor = string(512, "Give it as `cursor` to get the next page. Absent on the last page.")
+  }
+  required { "items" }
+}
+
+local function workflowStatus(key: String, name: String, category: String): Dynamic = new {
+  ["key"] = key
+  ["name"] = name
+  ["category"] = category
+}
+
+local summaryProperties = new Dynamic {
+  id = module.ref("IssueId")
+  project = module.ref("ProjectKey")
+  title = string(200, null)
+  status = module.ref("Status")
+  category = module.ref("Category")
+  priority = module.ref("Priority")
+  labels = array(module.ref("Label"), 20, null)
+  parent = module.ref("IssueId")
+  assignee = module.ref("Assignee")
+  claim = module.ref("Claim")
+  ready {
+    type = "boolean"
+    description = "Computed, never stored. True when the category is unstarted, nobody holds a claim, every blocker and every child is resolved, no ancestor has an unresolved blocker, and the issue is assigned to nobody or to the caller: the human, or the caller's role. A blocker that cannot be read counts as unresolved."
+  }
+  blockedBy = array(module.ref("IssueId"), null, "The unresolved issues that keep this one from being ready: its blockers, its unresolved children, and the blockers of its ancestors.")
+  notReady = array(module.ref("NotReadyReason"), 6, "Why the issue is not ready; absent when it is.")
+  order {
+    type = "number"
+    description = "The position of the issue in lists and boards. Lower comes first."
+  }
+  revision {
+    type = "integer"
+    minimum = 1
+    description = "Grows by one with each change to the issue's own fields, claims and status moves included; relations leave it. `issue.update` takes it."
+  }
+  updatedAt = timestamp
+}
+
+local summaryRequired = new Listing<String> {
+  "id"; "project"; "title"; "status"; "category"; "priority"; "labels"; "ready"; "blockedBy"; "order"; "revision"; "updatedAt"
+}
+
+local function bodyField(text: String?): Dynamic = string(20000, text)
+
+local function criteria(text: String): Dynamic = (bodyField(text)) {
+  pattern = #"\S"#
+}
+
+types {
+  ["IssueId"] {
+    type = "string"
+    maxLength = 20
+    pattern = "^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,8}$"
+    description = "An issue, such as `ABC-12`. The server gives the id, and it never changes."
+  }
+  ["ProjectKey"] {
+    type = "string"
+    maxLength = 10
+    pattern = "^[A-Z][A-Z0-9]{1,9}$"
+    description = "The key of a project, the prefix of its issue ids, such as `ABC`."
+  }
+  ["Status"] {
+    type = "string"
+    maxLength = 32
+    pattern = slug
+    description = "A status of the project's workflow, by its key, such as `in-review`. Rules read its category, its place in the workflow's `statuses` and the workflow's `moves`, never its key."
+  }
+  ["Category"] {
+    type = "string"
+    enum { "backlog"; "unstarted"; "started"; "completed"; "canceled" }
+    description = "The kind of a status. An issue is resolved when its category is completed or canceled."
+  }
+  ["WorkflowStatus"] {
+    type = "object"
+    additionalProperties = false
+    properties {
+      key = module.ref("Status")
+      name = string(32, "The name that people read, such as `In review`.")
+      category = module.ref("Category")
+    }
+    required { "key"; "name"; "category" }
+  }
+  ["Move"] {
+    type = "string"
+    enum { for (m in workflowMoves) { m.name } }
+    description = "A member of a workflow's `moves`."
+  }
+  ["Workflow"] {
+    type = "object"
+    description = "A project's statuses, and the status that each move of the server puts an issue in. Each key is once in `statuses` (`DuplicateStatus` otherwise). Each move names a status of the workflow, of the category it requires, and the `merge` status is neither the `claim` nor the `review` status (`InvalidMove` otherwise). `project.create` gives the default."
+    additionalProperties = false
+    properties {
+      statuses {
+        type = "array"
+        items = module.ref("WorkflowStatus")
+        minItems = 3
+        maxItems = 20
+        description = "In board order, each key once."
+      }
+      moves {
+        type = "object"
+        additionalProperties = false
+        properties {
+          for (m in workflowMoves) {
+            [m.name] {
+              ["$ref"] = "#/$defs/Status"
+              description = "A status of the category \(m.category). \(m.text)"
+            }
+          }
+        }
+        required { for (m in workflowMoves) { m.name } }
+      }
+    }
+    required { "statuses"; "moves" }
+    ["default"] {
+      statuses {
+        workflowStatus("backlog", "Backlog", "backlog")
+        workflowStatus("todo", "Todo", "unstarted")
+        workflowStatus("in-progress", "In progress", "started")
+        workflowStatus("in-review", "In review", "started")
+        workflowStatus("merged", "Merged", "started")
+        workflowStatus("done", "Done", "completed")
+        workflowStatus("canceled", "Canceled", "canceled")
+      }
+      moves {
+        for (m in workflowMoves) { [m.name] = m.status }
+      }
+    }
+  }
+  ["Priority"] {
+    type = "integer"
+    minimum = 0
+    maximum = 4
+    description = "0 none, 1 urgent, 2 high, 3 medium, 4 low."
+  }
+  ["ActorName"] {
+    type = "string"
+    minLength = 1
+    maxLength = 420
+    description = "The name of an actor. An agent's is built from its members, `[<role>]<harness>(<host>)@<worktree directory name>`, each part absent when its member is and `agent` for an absent harness: `[security]claude-code(t3)@fix-login`, `claude-code@fix-login`; through `webmcp`, harness `browser` and no worktree: `browser`. The human's is the login name. The server's own changes are by the agent `quadratic`; a call with no actor is by the agent `agent`."
+  }
+  ["Role"] = token(32, "A kind of work that agents are launched for, such as `security` or `web-design`. Several agents can have one role at once. An invalid `QUADRATIC_ROLE` makes the `quadratic` command fail before it calls the server.")
+  ["Assignee"] {
+    description = "Who must act on the issue: the human, or every agent with one role. An issue assigned to someone is ready only for them; one assigned to nobody is ready for everyone. On an issue assigned to the human, an agent cannot claim it or change its status or its assignee."
+    oneOf {
+      tagged("kind", "human", new Dynamic {}, new Listing {})
+      tagged("kind", "agent", new Dynamic { role = module.ref("Role") }, new Listing { "role" })
+    }
+  }
+  ["Label"] {
+    type = "string"
+    maxLength = 48
+    pattern = "^[a-z0-9]+([:._-][a-z0-9]+)*$"
+  }
+  ["Time"] {
+    type = "string"
+    pattern = "^\(realDate)T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+    description = "A moment in UTC, to the second, such as `2030-01-15T09:30:00Z`."
+  }
+  ["Date"] {
+    type = "string"
+    pattern = "^\(realDate)$"
+    description = "A day, such as `2030-01-15`."
+  }
+  ["AsOf"] {
+    type = "string"
+    anyOf {
+      module.ref("Time")
+      module.ref("CommitHash")
+    }
+    description = "Read the state as of a moment: a `Time` (the last database commit at or before it; before the first, an empty board), or a `CommitHash` (`UnknownCommit` when no single commit has it). Default: now."
+  }
+  ["CommitHash"] {
+    type = "string"
+    pattern = "^[0-9a-f]{7,64}$"
+    description = "A database commit, by its hash: whole, or its first 7 or more hex digits."
+  }
+  ["GitCommit"] {
+    type = "string"
+    pattern = "^([0-9a-f]{40}|[0-9a-f]{64})$"
+    description = "A git commit, by its whole hash: 40 lowercase hexadecimal digits, or 64 in a SHA-256 repository."
+  }
+  ["Actor"] {
+    type = "object"
+    description = "Who made a change, as the caller's process detected it: the human, or an agent with how it runs."
+    properties {
+      kind { type = "string"; enum { "human"; "agent" } }
+      name = module.ref("ActorName")
+      role = module.ref("Role")
+      harness = token(64, "The coding agent, such as `claude-code` or `codex`.")
+      host = token(64, "What runs the harness, such as `t3`.")
+      hostThread = string(200, "The id of the host's thread or session that runs the agent.")
+      parent {
+        ["$ref"] = "#/$defs/ActorName"
+        description = "The actor that started this one: the agent whose subagent this is, or that delegated the work."
+      }
+      model = string(128, "The model of the agent.")
+      session = string(200, "The id of the harness's own session.")
+    }
+    required { "kind"; "name" }
+  }
+  ["Extra"] {
+    type = "object"
+    maxProperties = 16
+    propertyNames { maxLength = 64; pattern = "^[a-z][a-z0-9]*([._-][a-z0-9]+)*$" }
+    additionalProperties = string(300, null)
+    description = "Free fields, string to string."
+  }
+  ["Claim"] {
+    type = "object"
+    description = "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time."
+    properties {
+      holder = module.ref("Actor")
+      branch = text("The git branch of the holder.")
+      worktree = string(4096, "The absolute path of the holder's worktree.")
+      since = timestamp
+    }
+    required { "holder"; "branch"; "worktree"; "since" }
+  }
+  ["NotReadyReason"] {
+    type = "string"
+    enum { "category"; "blocked"; "children"; "assigned"; "claimed"; "mine" }
+    description = "`category`: the status is not of the unstarted category. `blocked`: a blocker of the issue or of an ancestor is unresolved. `children`: a child is unresolved. `assigned`: the issue is assigned, and not to the caller. `claimed`: someone else holds it. `mine`: the caller holds it, the same actor name in the same worktree."
+  }
+  ["IssueSummary"] {
+    type = "object"
+    properties { ...summaryProperties }
+    required { ...summaryRequired }
+  }
+  ["Issue"] {
+    type = "object"
+    properties {
+      ...summaryProperties
+      description = bodyField(null)
+      acceptance = bodyField("The acceptance criteria.")
+      notes = array(module.ref("Note"), 50, "The last 50 notes, oldest first. A note is never changed or removed; `history.query` with `issue` gives every note.")
+      evidence = bodyField("What was checked, from `issue.close`.")
+      milestone = string(64, null)
+      due = module.ref("Date")
+      relations = array(module.ref("Relation"), null, null)
+      children = array(module.ref("IssueId"), null, null)
+      createdAt = timestamp
+      createdBy = module.ref("Actor")
+      source = module.ref("Source")
+      links = array(module.ref("Link"), 50, "What the finding is about. Empty for an issue made by hand.")
+    }
+    required { ...summaryRequired; "notes"; "relations"; "children"; "createdAt"; "createdBy"; "links" }
+  }
+  ["Note"] {
+    type = "object"
+    description = "One note on an issue, for whoever comes next. Notes only grow: none is changed or removed."
+    properties {
+      text = bodyField(null)
+      author = module.ref("ActorName")
+      at = timestamp
+    }
+    required { "text"; "author"; "at" }
+  }
+  ["ToolName"] = token(32, "A tool that reports findings, such as `linter`.")
+  ["Source"] {
+    type = "object"
+    description = "The tool's finding that this issue is; absent for an issue made by hand. The tool's next complete run finishes the issue when the finding is gone."
+    additionalProperties = false
+    properties {
+      tool = token(32, null)
+      key = string(200, null)
+    }
+    required { "tool"; "key" }
+  }
+  ["FindingKey"] = string(200, "The finding's key in its tool, the same from run to run.")
+  ["Link"] {
+    type = "object"
+    description = "A fact (`fact`), a file (`file`), or another kind that the tool names."
+    additionalProperties = false
+    properties {
+      kind = token(32, null)
+      id = string(500, null)
+    }
+    required { "kind"; "id" }
+  }
+  ["Finding"] {
+    type = "object"
+    description = "One finding of a tool's run. A member that the finding leaves out leaves that member of its issue as it is, except `decision`, which each run states anew."
+    additionalProperties = false
+    properties {
+      key = module.ref("FindingKey")
+      title = string(200, null)
+      description = bodyField(null)
+      assignee = module.ref("Assignee")
+      priority = module.ref("Priority")
+      labels = array(module.ref("Label"), 20, "Replaces every label of the issue.")
+      links = array(module.ref("Link"), 50, "Replaces every link of the issue. Only links of kind `fact` make a decision block.")
+      decision {
+        type = "boolean"
+        ["default"] = false
+        description = "A person must decide. While its issue is open, it blocks every other open issue of the same tool and project that is no decision and shares a link of kind `fact` with it; links of other kinds never block. Each run states it anew: a finding that leaves it out is no decision, and its blocks go."
+      }
+    }
+    required { "key"; "title"; "description" }
+  }
+  ["IssueIds"] {
+    type = "object"
+    properties {
+      count { type = "integer"; minimum = 0 }
+      issues = array(module.ref("IssueId"), 200, "The first 200, by id.")
+    }
+    required { "count"; "issues" }
+  }
+  ["RelationKind"] {
+    type = "string"
+    enum { "blocks"; "related"; "duplicate"; "discovered-from" }
+    description = "`A blocks B`: B is not ready while A is unresolved. `A duplicate B`: A tracks the same work as B. `A discovered-from B`: A was found while working on B. Only `blocks` affects readiness."
+  }
+  ["Relation"] {
+    type = "object"
+    properties {
+      kind = module.ref("RelationKind")
+      direction {
+        type = "string"
+        enum { "outgoing"; "incoming" }
+        description = "`outgoing`: this issue is A in `A <kind> B`. `incoming`: this issue is B."
+      }
+      issue = module.ref("IssueId")
+      title = string(200, null)
+      status = module.ref("Status")
+      category = module.ref("Category")
+    }
+    required { "kind"; "direction"; "issue"; "title"; "status"; "category" }
+  }
+  ["Change"] {
+    type = "object"
+    description = "One change to one issue, or to one project, in one database commit. A commit that changes several issues gives one change for each, with the same `commit`."
+    properties {
+      commit = module.ref("CommitHash")
+      at = timestamp
+      author = module.ref("Actor")
+      operation {
+        type = "string"
+        maxLength = 128
+        description = "Why the change was made: the capability, such as `issue.claim`, or the server's own work: `git.merged` when the ref watcher sees a merge."
+      }
+      reason = string(500, "The free text of the input's `reason`.")
+      branch = text("The git branch of the author's working directory.")
+      worktree = string(4096, "The author's worktree.")
+      project = module.ref("ProjectKey")
+      issue {
+        ["$ref"] = "#/$defs/IssueId"
+        description = "The issue changed. Absent for a change to the project itself."
+      }
+      fields = array(module.ref("FieldChange"), 50, null)
+    }
+    required { "commit"; "at"; "author"; "operation"; "project"; "fields" }
+  }
+  ["FieldChange"] {
+    type = "object"
+    description = "One field, before and after, each as JSON text; absent: no value. `field` is a member of the issue or of the project, such as `status` or `workflow`. An added note is `notes` with its text in `after` and no `before`."
+    properties {
+      field = string(64, null)
+      before = text(null)
+      after = text(null)
+    }
+    required { "field" }
+  }
+  ["Project"] {
+    type = "object"
+    properties {
+      key = module.ref("ProjectKey")
+      name = string(100, null)
+      repository = string(4096, "The absolute git common directory of the bound repository. Every worktree of it belongs to this project.")
+      defaultBranch = text("The branch whose commits are merged work.")
+      workflow = module.ref("Workflow")
+      extra = module.ref("Extra")
+    }
+    required { "key"; "name"; "workflow" }
+  }
+  ["IssueAnswer"] {
+    type = "object"
+    description = "The answer about one issue: the issue, with its body, relations and children, under `issue`."
+    properties { issue = module.ref("Issue") }
+    required { "issue" }
+  }
+  ["IssueSummaryAnswer"] {
+    type = "object"
+    description = "The answer about one issue: its summary, under `issue`."
+    properties { issue = module.ref("IssueSummary") }
+    required { "issue" }
+  }
+  ["ChangedIssue"] {
+    type = "object"
+    properties {
+      issue = module.ref("IssueSummary")
+      fields = array(string(64, null), 50, "The names of the fields that changed.")
+    }
+    required { "issue"; "fields" }
+  }
+
+  ["NotFound"] = failure("NotFound", new Dynamic {
+    kind { type = "string"; enum { "issue"; "project" } }
+    id = string(64, null)
+  }, new Listing { "kind"; "id" })
+  ["NoProject"] = failure("NoProject", new Dynamic {}, new Listing {})
+  ["NoWorkingCopy"] = failure("NoWorkingCopy", new Dynamic {}, new Listing {})
+  ["Held"] = failure("Held", new Dynamic {
+    issue = module.ref("IssueId")
+    claim = module.ref("Claim")
+  }, new Listing { "issue"; "claim" })
+  ["HumanOnly"] = failure("HumanOnly", new Dynamic {}, new Listing {})
+  ["Cycle"] = failure("Cycle", new Dynamic {
+    path = array(module.ref("IssueId"), null, null)
+  }, new Listing { "path" })
+  ["UnknownStatus"] = failure("UnknownStatus", new Dynamic {
+    status = module.ref("Status")
+    statuses = array(module.ref("Status"), 20, "The statuses of the project's workflow.")
+  }, new Listing { "status"; "statuses" })
+  ["UnknownCommit"] = failure("UnknownCommit", new Dynamic {
+    commit { type = "string"; pattern = "^[0-9a-f]{7,64}$" }
+  }, new Listing { "commit" })
+  ["RepositoryBound"] = failure("RepositoryBound", new Dynamic {
+    project = module.ref("ProjectKey")
+  }, new Listing { "project" })
+  ["BadCursor"] = failure("BadCursor", new Dynamic {}, new Listing {})
+}
+
+local tokenLabel = token(32, "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratic`, `agent`, `browser`, `human`), else `LabelTaken`.")
+
+local interactiveClients = new Listing { "cli"; "mcp"; "web"; "webmcp" }
+
+capabilities {
+  ["workspace.instructions"] {
+    description = "Give the command reference for agents, and who and where the caller is: its actor, project, branch and worktree. Changes nothing."
+    audience { "cli"; "mcp" }
+    output {
+      type = "object"
+      title = "Instructions"
+      properties {
+        text = string(4000, null)
+        actor = module.ref("Actor")
+        project = module.ref("ProjectKey")
+        branch = text(null)
+        worktree = string(4096, null)
+      }
+      required { "text"; "actor" }
+    }
+    readOnly = true
+  }
+
+  ["project.list"] {
+    description = "List every project, with its repository and workflow. Changes nothing."
+    audience { "cli"; "web" }
+    output {
+      type = "object"
+      title = "ProjectList"
+      properties { items = array(module.ref("Project"), null, null) }
+      required { "items" }
+    }
+    readOnly = true
+  }
+
+  ["project.create"] {
+    description = "Create a project with the default workflow. When the caller is in a git repository, bind that repository to it: each worktree of it then belongs to the project (`RepositoryBound` when another project has it). `KeyTaken` when a project has the key. Writes nothing into the repository." + projectCommitted
+    audience { "cli"; "web" }
+    input {
+      type = "object"
+      title = "ProjectCreateInput"
+      additionalProperties = false
+      properties {
+        key = module.ref("ProjectKey")
+        name = string(100, null)
+        defaultBranch = string(255, "The branch whose commits are merged work. Default: the repository's `origin/HEAD`, else the branch checked out in its main worktree, else `main`.")
+        extra = module.ref("Extra")
+      }
+      required { "key"; "name" }
+    }
+    output = module.ref("Project")
+    failures {
+      ["KeyTaken"] = failure("KeyTaken", new Dynamic { project = module.ref("ProjectKey") }, new Listing { "project" })
+      ["RepositoryBound"] = module.ref("RepositoryBound")
+    }
+  }
+
+  ["project.update"] {
+    description = "Change a project: the given members, and leave the others. Only the human (`HumanOnly`). With `bindRepository`, the git repository of the caller's working directory replaces the one the project had, for example after the repository moved (`NoWorkingCopy` when the caller has no working directory in a git repository, such as the web app; `RepositoryBound` when another project has it). A new repository or a new `defaultBranch` is refused while issues of the project hold a claim (`ClaimsHeld`): release or close them first. A new `workflow` is refused with `DuplicateStatus` or `InvalidMove` when it breaks a rule of `Workflow`, and with `StatusInUse` when issues are in a status that it drops or puts in another category: move those issues first. Writes nothing into the repository." + projectCommitted
+    audience { "cli"; "web" }
+    input {
+      type = "object"
+      title = "ProjectUpdateInput"
+      additionalProperties = false
+      properties {
+        project = module.ref("ProjectKey")
+        name = string(100, null)
+        defaultBranch = string(255, "The branch whose commits are merged work.")
+        bindRepository {
+          type = "boolean"
+          ["default"] = false
+          description = "Bind the git repository of the caller's working directory to the project."
+        }
+        workflow = module.ref("Workflow")
+        extra {
+          ["$ref"] = "#/$defs/Extra"
+          description = "Replaces every extra field; `{}` empties them."
+        }
+        reason = reasonSchema
+      }
+      required { "project" }
+    }
+    output = module.ref("Project")
+    failures {
+      ...failures(new Listing { "NotFound"; "NoWorkingCopy"; "RepositoryBound"; "HumanOnly" })
+      ["DuplicateStatus"] = failure("DuplicateStatus", new Dynamic {
+        status = module.ref("Status")
+      }, new Listing { "status" })
+      ["InvalidMove"] = failure("InvalidMove", new Dynamic {
+        move = module.ref("Move")
+        status = module.ref("Status")
+        problem {
+          type = "string"
+          enum { "missing"; "category"; "merge" }
+          description = "`missing`: `status` is not in `statuses`. `category`: `status` is of another category than the move requires. `merge`: `move` is `claim` or `review`, and `status` is the `merge` status."
+        }
+      }, new Listing { "move"; "status"; "problem" })
+      ["StatusInUse"] = failure("StatusInUse", new Dynamic {
+        statuses = array(module.ref("Status"), 20, "The statuses that issues are in and that the new workflow drops or puts in another category.")
+        issues = array(module.ref("IssueId"), null, null)
+      }, new Listing { "statuses"; "issues" })
+      ["ClaimsHeld"] = failure("ClaimsHeld", new Dynamic {
+        issues = array(module.ref("IssueId"), null, "The issues of the project that hold a claim.")
+      }, new Listing { "issues" })
+    }
+  }
+
+  ["issue.ready"] {
+    description = "List the issues that the caller can start now: a status of the unstarted category, unclaimed, every blocker and child resolved, no ancestor blocked, and assigned to nobody or to the caller: the human, or the caller's role. The issues assigned to the caller first, then the unassigned ones; in each, most urgent first, then by order; at most `limit`. Changes nothing."
+    audience { "cli"; "mcp" }
+    input {
+      type = "object"
+      title = "IssueReadyInput"
+      additionalProperties = false
+      properties {
+        project = projectInput
+        labels = array(module.ref("Label"), 10, "Only issues with every one of these labels.")
+        limit = limitSchema(50, 5)
+      }
+    }
+    output {
+      type = "object"
+      title = "ReadyIssues"
+      properties { items = array(module.ref("IssueSummary"), 50, null) }
+      required { "items" }
+    }
+    failures { ...failures(new Listing { "NotFound"; "NoProject" }) }
+    readOnly = true
+  }
+
+  ["issue.list"] {
+    description = "List issues that match every filter given, by order. With `asOf`, the board as it was then. Changes nothing."
+    audience = interactiveClients
+    input {
+      type = "object"
+      title = "IssueListInput"
+      additionalProperties = false
+      properties {
+        project {
+          ["$ref"] = "#/$defs/ProjectKey"
+          description = "Default: every project."
+        }
+        status = array(module.ref("Status"), 20, "A status that no listed project has matches nothing.")
+        category = array(module.ref("Category"), 5, null)
+        labels = array(module.ref("Label"), 10, "Only issues with every one of these labels.")
+        assignee = module.ref("Assignee")
+        claim {
+          type = "string"
+          enum { "mine"; "any"; "none" }
+          description = "`mine`: held by the caller, the same actor name in the same worktree. `any`: claimed by anyone. `none`: unclaimed."
+        }
+        ready { type = "boolean" }
+        parent = module.ref("IssueId")
+        tool {
+          ["$ref"] = "#/$defs/ToolName"
+          description = "Only issues from this tool's findings."
+        }
+        text = string(200, "Words that the title or the description contains.")
+        asOf = module.ref("AsOf")
+        limit = limitSchema(200, 50)
+        cursor = cursorSchema
+      }
+    }
+    output = page("IssueSummary", 200)
+    failures { ...failures(new Listing { "NotFound"; "UnknownCommit"; "BadCursor" }) }
+    readOnly = true
+  }
+
+  ["issue.get"] {
+    description = "Give one issue with its body, relations and children; `history.query` with `issue` gives its changes. With `asOf`, as it was then. Changes nothing."
+    audience = interactiveClients
+    input {
+      type = "object"
+      title = "IssueGetInput"
+      additionalProperties = false
+      properties {
+        issue = module.ref("IssueId")
+        asOf = module.ref("AsOf")
+      }
+      required { "issue" }
+    }
+    output = module.ref("IssueAnswer")
+    failures { ...failures(new Listing { "NotFound"; "UnknownCommit" }) }
+    readOnly = true
+  }
+
+  ["issue.create"] {
+    description = "Create an issue; the server gives its id. With `key`, a repeated call gives the issue of the first call and creates nothing; the same key with a different input fails with `KeyConflict`." + committed
+    audience = interactiveClients
+    input {
+      type = "object"
+      title = "IssueCreateInput"
+      additionalProperties = false
+      properties {
+        key = string(128, "A key that the client chooses, unique to this issue.")
+        project = projectInput
+        title = string(200, null)
+        description = bodyField(null)
+        acceptance = criteria("The acceptance criteria: when the issue is done.")
+        notes = bodyField("The first note, by the caller.")
+        status {
+          ["$ref"] = "#/$defs/Status"
+          description = "A status of the project's workflow, else `UnknownStatus`. Default: its first status of the unstarted category."
+        }
+        priority {
+          ["$ref"] = "#/$defs/Priority"
+          ["default"] = 0
+        }
+        labels = array(module.ref("Label"), 20, null)
+        parent = module.ref("IssueId")
+        origin {
+          ["$ref"] = "#/$defs/IssueId"
+          description = "The issue whose work found this one. Adds the relation `discovered-from`."
+        }
+        assignee = module.ref("Assignee")
+        milestone = string(64, null)
+        due = module.ref("Date")
+      }
+      required { "title"; "acceptance" }
+    }
+    output {
+      type = "object"
+      title = "IssueCreated"
+      properties {
+        issue = module.ref("IssueSummary")
+        created {
+          type = "boolean"
+          description = "False when `key` matched an earlier call."
+        }
+      }
+      required { "issue"; "created" }
+    }
+    failures {
+      ...failures(new Listing { "NotFound"; "NoProject"; "UnknownStatus" })
+      ["KeyConflict"] = failure("KeyConflict", new Dynamic {
+        issue = module.ref("IssueId")
+      }, new Listing { "issue" })
+    }
+  }
+
+  ["issue.update"] {
+    description = "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence." + committed
+    audience = interactiveClients
+    input {
+      type = "object"
+      title = "IssueUpdateInput"
+      additionalProperties = false
+      properties {
+        issue = module.ref("IssueId")
+        revision {
+          type = "integer"
+          minimum = 1
+          description = "The `revision` of the issue as the caller last read it."
+        }
+        title = string(200, null)
+        status = module.ref("Status")
+        priority = module.ref("Priority")
+        labels = array(module.ref("Label"), 20, "Replaces every label.")
+        parent = module.ref("IssueId")
+        assignee = module.ref("Assignee")
+        milestone = string(64, null)
+        due = module.ref("Date")
+        description = bodyField(null)
+        acceptance = criteria("Replaces the acceptance criteria.")
+        notes = bodyField("Adds a note, by the caller, after the earlier ones. It never changes or removes a note.")
+        clear = array(new Dynamic {
+          type = "string"
+          enum { "parent"; "assignee"; "milestone"; "due"; "description" }
+        }, 8, "Fields to empty. A field that the call also gives keeps the given value. Notes cannot be emptied.")
+        order { type = "number" }
+        reason = reasonSchema
+      }
+      required { "issue"; "revision" }
+    }
+    output = module.ref("IssueSummaryAnswer")
+    failures {
+      ...failures(new Listing { "NotFound"; "Held"; "HumanOnly"; "Cycle"; "UnknownStatus" })
+      ["Stale"] = failure("Stale", new Dynamic {
+        revision { type = "integer"; minimum = 1 }
+      }, new Listing { "revision" })
+    }
+  }
+
+  ["issue.claim"] {
+    description = "Take a ready issue, atomically: no two callers can hold it. The only way to start a claim. Records the caller, its branch and its worktree, and moves the issue to the workflow's `claim` status. The holder is the same actor name in the same worktree; its repeated call changes nothing. Fails with `Held`, naming the holder, when someone else holds it; with `NotReady`, giving the reasons and the unresolved blockers, when it is not ready; and with `NoWorkingCopy` when the caller is not in a git worktree on a branch, or not in `worktree` of the project." + committed
+    audience { "cli"; "mcp" }
+    input {
+      type = "object"
+      title = "IssueClaimInput"
+      additionalProperties = false
+      properties {
+        issue = module.ref("IssueId")
+        worktree = (string(4096, "The worktree to work in, when not the caller's folder; later calls act from it.")) { pattern = "^/" }
+      }
+      required { "issue" }
+    }
+    output = module.ref("IssueAnswer")
+    failures {
+      ...failures(new Listing { "NotFound"; "Held"; "NoWorkingCopy" })
+      ["NotReady"] = failure("NotReady", new Dynamic {
+        issue = module.ref("IssueId")
+        status = module.ref("Status")
+        category = module.ref("Category")
+        reasons = array(new Dynamic {
+          type = "string"
+          enum { "category"; "blocked"; "children"; "assigned" }
+        }, 4, "`category`: the status is not of the unstarted category. `blocked`: an issue in `blockers` is unresolved. `children`: a child is unresolved. `assigned`: the issue is assigned, and not to the caller: the human, or the caller's role.")
+        blockers = array(module.ref("IssueId"), null, null)
+      }, new Listing { "issue"; "status"; "category"; "reasons"; "blockers" })
+    }
+  }
+
+  ["issue.release"] {
+    description = "Give a claim back: the issue moves to the workflow's `release` status with no claim, and keeps its assignee. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`). Only the holder or the human (`Held`)." + committed
+    audience { "cli"; "mcp"; "web" }
+    input {
+      type = "object"
+      title = "IssueReleaseInput"
+      additionalProperties = false
+      properties {
+        issue = module.ref("IssueId")
+        reason = reasonSchema
+      }
+      required { "issue" }
+    }
+    output = module.ref("IssueSummaryAnswer")
+    failures { ...failures(new Listing { "NotFound"; "Held"; "HumanOnly" }) }
+  }
+
+  ["issue.close"] {
+    description = "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (the same actor name in the same worktree), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence." + committed
+    audience { "cli"; "mcp"; "web" }
+    input {
+      type = "object"
+      title = "IssueCloseInput"
+      additionalProperties = false
+      properties {
+        issue = module.ref("IssueId")
+        evidence = bodyField("What was checked, and how: commands, results, links.")
+      }
+      required { "issue"; "evidence" }
+    }
+    output = module.ref("IssueAnswer")
+    failures {
+      ...failures(new Listing { "NotFound"; "Held"; "HumanOnly" })
+      ["NotClaimed"] = failure("NotClaimed", new Dynamic {
+        issue = module.ref("IssueId")
+      }, new Listing { "issue" })
+      ["Resolved"] = failure("Resolved", new Dynamic {
+        issue = module.ref("IssueId")
+        status {
+          ["$ref"] = "#/$defs/Status"
+          description = "The status of the canceled category that the issue is in."
+        }
+      }, new Listing { "issue"; "status" })
+    }
+  }
+
+  ["issue.link"] {
+    description = "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` fails with `Cycle` when issues would wait on each other. An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open." + committed
+    audience = interactiveClients
+    input {
+      type = "object"
+      title = "IssueLinkInput"
+      additionalProperties = false
+      properties {
+        issue = module.ref("IssueId")
+        kind = module.ref("RelationKind")
+        target = module.ref("IssueId")
+        remove {
+          type = "boolean"
+          ["default"] = false
+        }
+      }
+      required { "issue"; "kind"; "target" }
+    }
+    output {
+      type = "object"
+      title = "IssueRelations"
+      properties {
+        issue = module.ref("IssueSummary")
+        relations = array(module.ref("Relation"), null, null)
+      }
+      required { "issue"; "relations" }
+    }
+    failures {
+      ...failures(new Listing { "NotFound"; "Cycle" })
+      ["SelfLink"] = failure("SelfLink", new Dynamic {}, new Listing {})
+    }
+  }
+
+  ["findings.import"] {
+    description = "Record one run of a tool for one project: each finding becomes an issue with the source `tool` and the finding's `key`, and (project, tool, key) names at most one issue. By key: no issue yet, create one in the workflow's first unstarted status; an open issue, change the title, description, links, labels, assignee and priority that the finding gives where they differ, and nothing else; an issue of the completed category, the finding came back: it returns to the first unstarted status, and loses the evidence that the import wrote when it finished it (evidence that anyone wrote since stays); an issue of the canceled category: leave it, a person overruled the finding. When `complete`, each open issue of the tool and project whose key the run lacks moves to the workflow's first status of the completed category, with evidence that names the run, and its claim ends (`NoCompletedStatus` when the workflow has none); a run that is not complete finishes nothing. Each open `decision` blocks the other open issues of the tool and project that are no decision and share a link of kind `fact` with it, and no other kind of link blocks; the import adds and removes the `blocks` relations that it made so, and never one made by hand, nor one that would make issues wait on each other. `TooManyBlocks` when the run implies more than `limit` such relations, and nothing changes. `DuplicateKey` when two findings have one key. The same run imported again changes nothing." + committed
+    audience { "cli"; "web" }
+    input {
+      type = "object"
+      title = "FindingsImportInput"
+      additionalProperties = false
+      properties {
+        project = projectInput
+        tool = module.ref("ToolName")
+        findings = array(module.ref("Finding"), 2000, "Every finding of the run.")
+        complete {
+          type = "boolean"
+          ["default"] = true
+          description = "The run checked the whole project, so a finding it lacks is gone."
+        }
+      }
+      required { "tool"; "findings" }
+    }
+    output {
+      type = "object"
+      title = "FindingsImported"
+      properties {
+        created = module.ref("IssueIds")
+        updated = module.ref("IssueIds")
+        reopened = module.ref("IssueIds")
+        finished = module.ref("IssueIds")
+        left {
+          ["$ref"] = "#/$defs/IssueIds"
+          description = "The issues of findings in the run that the import did not change: unchanged, or canceled."
+        }
+      }
+      required { "created"; "updated"; "reopened"; "finished"; "left" }
+    }
+    failures {
+      ...failures(new Listing { "NotFound"; "NoProject" })
+      ["DuplicateKey"] = failure("DuplicateKey", new Dynamic { key = module.ref("FindingKey") }, new Listing { "key" })
+      ["NoCompletedStatus"] = failure("NoCompletedStatus", new Dynamic { project = module.ref("ProjectKey") }, new Listing { "project" })
+      ["TooManyBlocks"] = failure("TooManyBlocks", new Dynamic { limit { type = "integer"; minimum = 1 } }, new Listing { "limit" })
+    }
+  }
+
+  ["issue.advance"] {
+    description = "For a deploy script on the machine that runs the server: move every issue that landed up to `commit` and waits after the merge to `status`. `status` comes after the workflow's `merge` status and is not of the canceled category, else `NotAfterMerge`. The call first runs one look at the project's git repository and waits for its outcome: `ScanFailed` when the look fails or its git times out, and nothing moves. `commit` must be the hash of a commit in the repository, not of a tag that points to one (`NotInRepository`; a project with no repository has none), and the default branch or its upstream, as the look read them, must reach it (`NotOnDefaultBranch`). An issue landed up to `commit` when the ref watcher recorded at least one landing of it in the project, and every one of them is `commit` or an ancestor of it. Each such issue that is unresolved and in the `merge` status, or after it and before `status`, moves to `status` when the rules of `issue.update` let the caller move it. An unresolved issue before `status` that has a landing and did not move is left: it is before the `merge` status, the caller may not move it, or it has a landing that `commit` lacks. Issues at or after `status`, and resolved issues, are in neither list. After a rewrite of the default branch, an issue whose old landing is no longer in the history is never moved: move it by hand. A landing the watcher never saw, such as one before its first look at the project or a branch deleted before its next look, is missed: move that issue by hand. `RepositoryChanged` when the project was bound to another repository or default branch during the call, and nothing moves. Reads the repository, never writes to it, and never fetches: fetch first. The same call again moves nothing." + committed
+    audience { "cli" }
+    input {
+      type = "object"
+      title = "IssueAdvanceInput"
+      additionalProperties = false
+      properties {
+        project = projectInput
+        commit {
+          ["$ref"] = "#/$defs/GitCommit"
+          description = "The git commit that was deployed."
+        }
+        status {
+          ["$ref"] = "#/$defs/Status"
+          description = "The status to move the issues to, after the workflow's `merge` status, such as `deployed`."
+        }
+        reason = reasonSchema
+      }
+      required { "commit"; "status" }
+    }
+    output {
+      type = "object"
+      title = "IssuesAdvanced"
+      properties {
+        moved {
+          ["$ref"] = "#/$defs/IssueIds"
+          description = "The issues the call moved to `status`."
+        }
+        left {
+          ["$ref"] = "#/$defs/IssueIds"
+          description = "The unresolved issues before `status`, with a landing in the project, that the call did not move: before the `merge` status, not movable by the caller, or with a landing that `commit` lacks. Empty when every such issue moved."
+        }
+      }
+      required { "moved"; "left" }
+    }
+    failures {
+      ...failures(new Listing { "NotFound"; "NoProject"; "UnknownStatus" })
+      ["NotAfterMerge"] = failure("NotAfterMerge", new Dynamic {
+        status = module.ref("Status")
+        statuses = array(module.ref("Status"), 20, "The statuses after the workflow's `merge` status that are not of the canceled category.")
+      }, new Listing { "status"; "statuses" })
+      ["NotInRepository"] = failure("NotInRepository", new Dynamic {
+        commit = module.ref("GitCommit")
+      }, new Listing { "commit" })
+      ["NotOnDefaultBranch"] = failure("NotOnDefaultBranch", new Dynamic {
+        commit = module.ref("GitCommit")
+      }, new Listing { "commit" })
+      ["ScanFailed"] = failure("ScanFailed", new Dynamic {
+        problem = string(500, "What git or the store answered.")
+      }, new Listing { "problem" })
+      ["RepositoryChanged"] = failure("RepositoryChanged", new Dynamic {
+        project = module.ref("ProjectKey")
+      }, new Listing { "project" })
+    }
+  }
+
+  ["history.query"] {
+    description = "List the changes to one issue, to one project, or to the whole board, newest first, from `asOf` back: who made each, with which operation and reason, from which branch and worktree, and the exact field changes. A commit that changed several issues gives one change for each. Changes nothing."
+    audience { "cli"; "mcp"; "web" }
+    input {
+      type = "object"
+      title = "HistoryQueryInput"
+      additionalProperties = false
+      properties {
+        issue = module.ref("IssueId")
+        project {
+          ["$ref"] = "#/$defs/ProjectKey"
+          description = "Default: every project."
+        }
+        asOf = module.ref("AsOf")
+        limit = limitSchema(200, 50)
+        cursor = cursorSchema
+      }
+    }
+    output = page("Change", 200)
+    failures { ...failures(new Listing { "NotFound"; "UnknownCommit"; "BadCursor" }) }
+    readOnly = true
+  }
+
+  ["token.create"] {
+    description = "Create an agent token. The server writes its value, `qdt_` and 32 random bytes in base64url, to a new file at `file` with mode 0600, and keeps only its SHA-256, with the label and the date, in `credentials.json` beside the database. The value is in no answer, output or log. `NotAbsolute` when `file` is a relative path; `InDataFolder` when its folder, with symbolic links resolved, is the server's data folder; `FileExists` when something is at `file`, which stays untouched; `LabelTaken` when a token has the label. No backend accepts a token yet."
+    audience { "cli" }
+    input {
+      type = "object"
+      title = "TokenCreateInput"
+      additionalProperties = false
+      properties {
+        label = tokenLabel
+        file = string(4096, "The absolute path of a file that does not exist yet, outside the server's data folder. The value is written there and nowhere else.")
+      }
+      required { "label"; "file" }
+    }
+    output {
+      type = "object"
+      title = "TokenCreated"
+      properties {
+        label = tokenLabel
+        file = string(4096, null)
+      }
+      required { "label"; "file" }
+    }
+    failures {
+      ["LabelTaken"] = failure("LabelTaken", new Dynamic { label = tokenLabel }, new Listing { "label" })
+      ["FileExists"] = failure("FileExists", new Dynamic { file = string(4096, null) }, new Listing { "file" })
+      ["NotAbsolute"] = failure("NotAbsolute", new Dynamic { file = string(4096, null) }, new Listing { "file" })
+      ["InDataFolder"] = failure("InDataFolder", new Dynamic { file = string(4096, null) }, new Listing { "file" })
+    }
+  }
+
+  ["token.list"] {
+    description = "List the agent tokens: each one's label and the moment it was created. No value and no verifier. Changes nothing."
+    audience { "cli" }
+    output {
+      type = "object"
+      title = "TokenList"
+      properties {
+        items = array(new Dynamic {
+          type = "object"
+          title = "Token"
+          properties {
+            label = tokenLabel
+            created = module.ref("Time")
+          }
+          required { "label"; "created" }
+        }, null, "The tokens, oldest first.")
+      }
+      required { "items" }
+    }
+    readOnly = true
+  }
+
+  ["token.revoke"] {
+    description = "Revoke the agent token with the label: its verifier leaves `credentials.json` and the server's memory before the answer. `revoked` is false when no token had the label, and then nothing changed. The file that holds the value stays: delete it yourself."
+    audience { "cli" }
+    input {
+      type = "object"
+      title = "TokenRevokeInput"
+      additionalProperties = false
+      properties { label = tokenLabel }
+      required { "label" }
+    }
+    output {
+      type = "object"
+      title = "TokenRevoked"
+      properties {
+        label = tokenLabel
+        revoked { type = "boolean" }
+      }
+      required { "label"; "revoked" }
+    }
+  }
+}
+
+events {
+  ["issue.changed"] {
+    description = "A database commit changed issues or projects. The occurrence gives the commit, its author, the new summary of each issue whose summary changed, at most 500, and the keys of the projects whose own members the commit changed: after one, read `project.list` again. Computed members count: resolving a blocker lists the issues that became ready. With `cut`, the commit changed more: read `project.list` again, and the issues with `issue.list` or the changes with `history.query` from `commit`. After an occurrence with `truncated`, occurrences were skipped: read `project.list` again, and the board with `issue.list` or the changes since the last commit seen with `history.query`. A subscription with `issue` gets only the commits that change that issue, with that issue alone in `issues` and `projects` empty; one with `project`, or with no filter, also gets the commits that change only a project. The cursor is the commit: a subscription that resumes with it gets every later commit."
+    audience { "cli"; "web" }
+    input {
+      type = "object"
+      title = "IssueChangedInput"
+      additionalProperties = false
+      properties {
+        project {
+          ["$ref"] = "#/$defs/ProjectKey"
+          description = "Only changes to this project: its issues, and its own members. Default: every project."
+        }
+        issue {
+          ["$ref"] = "#/$defs/IssueId"
+          description = "Only changes to this issue. A commit that changes only a project is not sent."
+        }
+      }
+    }
+    payload {
+      type = "object"
+      title = "IssueChangedPayload"
+      properties {
+        commit = module.ref("CommitHash")
+        at = timestamp
+        author = module.ref("Actor")
+        operation = string(128, null)
+        reason = string(500, null)
+        issues = array(module.ref("ChangedIssue"), 500, null)
+        projects = array(module.ref("ProjectKey"), null, "The projects whose name, default branch, repository, workflow or extra fields the commit changed, or that it created.")
+        cut {
+          type = "boolean"
+          ["const"] = true
+          description = "Present when the commit changed more issues than `issues` lists."
+        }
+      }
+      required { "commit"; "at"; "author"; "operation"; "issues"; "projects" }
+    }
+  }
+}

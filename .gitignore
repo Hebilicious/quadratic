@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.tmp/
+.moon/cache/
+.moon/docker/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+.DS_Store
+.worktrees/
+target/

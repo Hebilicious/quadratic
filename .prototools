@@ -1,0 +1,17 @@
+# Toolchain pins for this repo. `proto use` installs them.
+moon = "2.6.4"
+node = "26.13.0"
+pnpm = "12.8.1"
+pkl = "0.32.1"
+java = "temurin-25.0.5+8"
+python = "3.14.6"
+rust = "1.99.1"
+uv = "0.13.7"
+
+[plugins.tools]
+pkl = "https://raw.githubusercontent.com/milesj/proto-plugins/0b5491d381e13ecd663cf7c0e10cfe8d17ba00ef/pkl.toml"
+
+[settings]
+detect-strategy = "prefer-prototools"
+auto-install = true
+telemetry = false

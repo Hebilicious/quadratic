@@ -1,0 +1,4 @@
+{
+  "printWidth": 100,
+  "ignorePatterns": ["**/*.vue", "dist/**", "node_modules/**"]
+}

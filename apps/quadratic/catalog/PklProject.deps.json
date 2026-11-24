@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "resolvedDependencies": {
+    "package://pkg.pkl-lang.org/github.com/Hebilicious/acidcat/acid-cat-catalog@0": {
+      "type": "remote",
+      "uri": "projectpackage://pkg.pkl-lang.org/github.com/Hebilicious/acidcat/acid-cat-catalog@0.2.1",
+      "checksums": {
+        "sha256": "3b21690da27ef032c16d34f2f09a23c55d6c124fd2344575788cf2e31184c5a3"
+      }
+    }
+  }
+}

@@ -1,0 +1,154 @@
+[
+  {
+    "key": "L311 f:c7de2a79fd61899b",
+    "title": "L311: guide.install.nodeVersion cites notes.v2 in the published page of release 2.0; notes.v2 was withdrawn after the release",
+    "description": "guide.install.nodeVersion cites notes.v2 in the published page of release 2.0, published 2026-04-01; notes.v2 was withdrawn on 2026-07-02\n\nRule: A published page cites no note that was withdrawn after the page's release\nFix (decision): release a corrected page, or leave the page as it is\n\nAt guide/install.md:42:11",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 4,
+    "labels": [
+      "guide"
+    ],
+    "links": [
+      {
+        "kind": "fact",
+        "id": "guide.install.nodeVersion"
+      },
+      {
+        "kind": "file",
+        "id": "guide/install.md"
+      },
+      {
+        "kind": "file",
+        "id": "notes/releases.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L420 f:a420556f407006e2",
+    "title": "L420: A person approved the text of this translated passage",
+    "description": "translated passage in en: the translation is not approved (f:96db3828b884edc9)\n\nRule: A person approved the text of this translated passage\nFix (decision): approve (`linter approve`), or rewrite\n\nOccurrences (4):\n- api/pages.md:12:5: translated passage in fr: the translation is not approved\n- guide/naming.md:15:5: translated passage in fr: the translation is not approved\n- guide/pages.md:18:5: translated passage in fr: the translation is not approved\n- tutorial/pages.md:21:5: translated passage in fr: the translation is not approved",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 3,
+    "labels": [
+      "api",
+      "guide",
+      "tutorial"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "api/pages.md"
+      },
+      {
+        "kind": "file",
+        "id": "guide/naming.md"
+      },
+      {
+        "kind": "file",
+        "id": "guide/pages.md"
+      },
+      {
+        "kind": "file",
+        "id": "tutorial/pages.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L312 f:cb12e3b9d061e008",
+    "title": "L312: guide.upgrade.steps cites notes.v3, dated 2026-09-11, in the page of release 2.0, published 2026-03-01",
+    "description": "guide.upgrade.steps cites notes.v3, dated 2026-09-11, in the page of release 2.0, published 2026-03-01\n\nRule: A page cites no note dated after the page's release\nFix (decision): cite a note of the release, or move the page to a later release\n\nAt guide/upgrade.md:7:3",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 2,
+    "labels": [
+      "guide"
+    ],
+    "links": [
+      {
+        "kind": "file",
+        "id": "guide/upgrade.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L101 f:1cb08721f0420784",
+    "title": "L101: test \"every example runs\" fails in the latest release: the first failing example is tutorial/examples.md#3",
+    "description": "test \"every example runs\" fails in the latest release: the first failing example is tutorial/examples.md#3\n\nRule: Every test of the site passes in the latest release\n\nAt tutorial/examples.md:30:1",
+    "priority": 2,
+    "labels": [
+      "tutorial"
+    ],
+    "links": [
+      {
+        "kind": "fact",
+        "id": "every example runs"
+      },
+      {
+        "kind": "file",
+        "id": "tutorial/examples.md"
+      }
+    ]
+  },
+  {
+    "key": "L310 f:4eb730980c401e69",
+    "title": "L310: notes.v4.cache is newer than notes.v3.cache, cited for guide.config.cache in release 3.0",
+    "description": "notes.v4.cache is newer than notes.v3.cache, cited for guide.config.cache in release 3.0\n\nRule: A page cites the newest note on its subject\nFix (decision): cite the newer note, or record why the older one stays\n\nAt guide/config.md:18:9",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 4,
+    "labels": [
+      "guide"
+    ],
+    "links": [
+      {
+        "kind": "fact",
+        "id": "guide.config.cache"
+      },
+      {
+        "kind": "file",
+        "id": "guide/config.md"
+      },
+      {
+        "kind": "file",
+        "id": "notes/v4.md"
+      }
+    ],
+    "decision": true
+  },
+  {
+    "key": "L310 f:d0995378d2ee0b67",
+    "title": "L310: notes.v5.cache is newer than notes.v3.cache, cited for guide.config.cache in release 3.0",
+    "description": "notes.v5.cache is newer than notes.v3.cache, cited for guide.config.cache in release 3.0\n\nRule: A page cites the newest note on its subject\nFix (decision): cite the newer note, or record why the older one stays\n\nAt guide/config.md:18:9",
+    "assignee": {
+      "kind": "human"
+    },
+    "priority": 4,
+    "labels": [
+      "guide"
+    ],
+    "links": [
+      {
+        "kind": "fact",
+        "id": "guide.config.cache"
+      },
+      {
+        "kind": "file",
+        "id": "guide/config.md"
+      },
+      {
+        "kind": "file",
+        "id": "notes/v5.md"
+      }
+    ],
+    "decision": true
+  }
+]
