@@ -465,10 +465,13 @@ its data folder and reads a relative path from there, so the page would answer 5
 
 ### Releases
 
-[release-please](https://github.com/googleapis/release-please) makes the releases, from the
-[Conventional Commits](https://www.conventionalcommits.org) on `main`: a `fix:` makes a patch
-release, a `feat:` a minor one (a major one while the version is below 1.0.0). Other commits
-make none. The workflow [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
+A pull request is squash-merged, and its title, which becomes the commit on `main`, is a
+[Conventional Commit](https://www.conventionalcommits.org). Only `feat:` (a minor release) and
+`fix:` (a patch release) make a release; `chore:`, `docs:`, `ci:`, `test:`, `refactor:` and
+`build:` do not. Before 1.0.0, a breaking change (`!`) makes a minor release, not a major one.
+
+[release-please](https://github.com/googleapis/release-please) makes the releases from those
+commits. The workflow [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
 runs on every push to `main`:
 
 1. release-please opens or updates the release pull request. It sets the new version in
@@ -478,7 +481,8 @@ runs on every push to `main`:
    release.
 3. Then one job per platform builds the web app and the release binary with it inside, on the
    oldest hosted Ubuntu (22.04), and attaches the archive and its SHA-256 file to the release.
-   The job prints the newest glibc version that the binary needs (2.34). `install/package.sh` makes the archive.
+   The job prints the newest glibc version that the binary needs (2.34). `install/package.sh`
+   makes the archive.
 
 The workflow writes with a token of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
 workflow for a tag that `GITHUB_TOKEN` pushes, and holds the checks of a pull request that it
