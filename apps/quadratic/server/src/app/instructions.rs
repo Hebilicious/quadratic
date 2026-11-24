@@ -11,12 +11,12 @@ const REFERENCE: &str = "\
 The skill `quadratic` gives the workflow. This is the command reference. Every command prints JSON; `quadratic <command> --help` lists its flags. Issue ids look like ABC-12. An answer about one issue has it under `issue`; a list has its entries under `items`.
 
 Issues
-- `quadratic issue list` filters by `--claim mine`, `--status`, `--category`, `--assignee`, `--labels`, `--text`, `--asOf`. `notReady` says why an issue is not ready: `category` (backlog, started or finished: only an unstarted issue is ready), `blocked` (an open issue blocks it or a parent, named in `blockedBy`), `children` (it has open children), `assigned` (to someone else), `claimed` (someone else holds it), `mine` (you hold it). An issue you hold shows `category` and `mine`: it is yours, not blocked.
+- `quadratic issue list` filters by `--claim mine`, `--status`, `--category`, `--assignee`, `--labels`, `--text`, `--asOf`. `notReady` says why an issue is not ready: `category` (backlog, started or finished: only an unstarted issue is ready), `blocked` (an open issue blocks it or a parent, named in `blockedBy`), `children` (it has open children), `assigned` (to someone else), `claimed` (someone else holds it), `mine` (you hold it). An issue you hold shows `category` and `mine`: it is yours, not blocked; it also shows `stacked` while an issue it is stacked on is back before review.
 - `quadratic ready`: the issues you can start now, those for your role first, then by priority (1 urgent to 4 low, 0 none last). A snapshot.
 - `quadratic show --issue ABC-12`: one issue with its notes and relations. `quadratic history query --issue ABC-12`: its changes.
 - `quadratic create --title \"...\" --description \"...\" --acceptance \"...\" --priority 2`; `--acceptance` is required; `--origin ABC-12` links work found on that issue; `--assignee '{\"kind\":\"human\"}'` assigns it to the human.
 - `quadratic issue link --issue A --kind blocks --target B`.
-- `quadratic issue link --issue B --kind stacked-on --target A`: B's branch starts from A's. B is ready once A is in review, from A's branch or one on top of it, and reaches merged only after A (`BaseNotMerged`); until then, and when A goes back, `notReady` has `stacked` (A, in `blockedBy`, is before review or canceled, or your branch lacks A's).
+- `quadratic issue link --issue B --kind stacked-on --target A`: B's branch starts from A's. B is ready once A is in review, from A's branch or one on top of it, and reaches merged only after A (`BaseNotMerged`). `stacked` (an issue it is stacked on holds it back, named in `blockedBy`): `show` that issue; before review, wait for it, and a claim you hold stays yours; canceled, remove the link; in review, work from a branch that contains its branch.
 
 Work
 - `quadratic claim --issue ABC-12`: atomic; prints the whole issue. `Held` (exit code 1): someone else holds it. `NotReady`: what it waits on.

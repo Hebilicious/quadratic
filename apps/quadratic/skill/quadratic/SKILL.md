@@ -26,7 +26,7 @@ Read [`planning.md`](planning.md) before you turn a plan or a PRD into issues.
 3. Commit with `Refs: ABC-12` as the last line. A pull request's body carries the same line: a squash merge may keep only that body.
 4. `quadratic close --issue ABC-12 --evidence "..."`: per acceptance criterion the command and what it printed, and the commit. The issue is now in review and still yours.
 5. Ask for the review as `AGENTS.md` says, with the issue, the branch and the evidence.
-6. While it waits, you may go on with the next issue on a branch from this one: `quadratic issue link --issue ABC-13 --kind stacked-on --target ABC-12`, then claim ABC-13 from that branch.
+6. While it waits, you may go on with the next issue on a branch from this one: `quadratic issue link --issue ABC-13 --kind stacked-on --target ABC-12`, then claim ABC-13 from that branch. If ABC-12 goes back to work, keep your claim on ABC-13 and merge ABC-12's new commits into your branch before you go on.
 
 ## After the review
 
