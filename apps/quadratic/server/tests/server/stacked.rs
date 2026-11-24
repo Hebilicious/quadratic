@@ -1004,3 +1004,37 @@ async fn adding_a_link_that_exists_changes_nothing_and_succeeds() {
         "{repeated}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_base_branch_name_with_a_revision_suffix_gives_no_evidence() {
+    let stack = Stack::new().await;
+    let human = stack.human();
+    let c = create(&stack.board, &human, "Name the headers").await;
+    let d = create(&stack.board, &human, "Index the named headers").await;
+    stack.link("stacked-on", &d, &c).await.expect("D on C");
+    let suffixed = Who {
+        branch: Some("main^{commit}".into()),
+        worktree: Some(stack.repository.root.join("suffixed").display().to_string()),
+        ..stack.repository.agent(&stack.repository.root, "suffixed")
+    };
+    stack
+        .board
+        .ok(&suffixed, "issue.claim", json!({ "issue": c }))
+        .await;
+    stack
+        .board
+        .ok(
+            &suffixed,
+            "issue.close",
+            json!({ "issue": c, "evidence": "done" }),
+        )
+        .await;
+    let (on_main, _) = stack.agent_from("docs", "main").await;
+
+    assert!(!stack.board.ready_ids(&on_main, 10).await.contains(&d));
+    let refused = stack
+        .board
+        .failure(&on_main, "issue.claim", json!({ "issue": d }))
+        .await;
+    assert_eq!(refused["reasons"], json!(["stacked"]), "{refused}");
+}

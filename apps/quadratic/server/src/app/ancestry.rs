@@ -63,19 +63,34 @@ pub(super) async fn verified(context: &Context, scope: Scope) -> Result<Caller, 
     if bases.is_empty() {
         return Ok(caller);
     }
-    let git = Repository::at(&repository, GIT_LIMIT);
-    let tip = format!("refs/heads/{branch}");
+    caller.working_copy.contains = Some(contained(&repository, &branch, bases).await);
+    Ok(caller)
+}
+
+/// The base branches whose tip the caller's branch tip is or descends from. Each name is looked
+/// up as an exact local branch, never parsed as a revision: a name that is no local branch
+/// gives no evidence.
+async fn contained(repository: &str, branch: &str, bases: BTreeSet<String>) -> BTreeSet<String> {
+    let git = Repository::at(repository, GIT_LIMIT);
+    counted(repository);
+    let Ok(tips) = git.branch_tips().await else {
+        return BTreeSet::new();
+    };
+    let Some(caller_tip) = tips.get(branch) else {
+        return BTreeSet::new();
+    };
     let mut contained = BTreeSet::new();
     for base in bases {
-        counted(&repository);
-        if git
-            .reaches(&format!("refs/heads/{base}"), &tip)
-            .await
-            .unwrap_or(false)
-        {
+        let Some(base_tip) = tips.get(&base) else {
+            continue;
+        };
+        let descends = base_tip == caller_tip || {
+            counted(repository);
+            git.reaches(base_tip, caller_tip).await.unwrap_or(false)
+        };
+        if descends {
             contained.insert(base);
         }
     }
-    caller.working_copy.contains = Some(contained);
-    Ok(caller)
+    contained
 }

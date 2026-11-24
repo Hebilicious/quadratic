@@ -66,6 +66,12 @@ impl Repository {
         self.text(&["for-each-ref", REFS, HEADS, REMOTES]).await
     }
 
+    /// Every local branch and the commit it points to, by its exact name.
+    pub async fn branch_tips(&self) -> Result<BTreeMap<String, String>, GitError> {
+        let text = self.text(&["for-each-ref", REFS, HEADS]).await?;
+        Ok(parse_heads(&text))
+    }
+
     pub async fn tip(&self, branch: &str) -> Result<Option<String>, GitError> {
         let reference = format!("{HEADS}{branch}");
         let text = self.text(&["for-each-ref", REFS, &reference]).await?;
