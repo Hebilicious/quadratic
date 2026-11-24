@@ -19,6 +19,7 @@ futures.workspace = true
 quadratique-server.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]

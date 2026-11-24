@@ -13,6 +13,8 @@ mod create;
 mod import;
 #[path = "cli/init.rs"]
 mod init;
+#[path = "cli/init_update.rs"]
+mod init_update;
 #[path = "cli/mcp.rs"]
 mod mcp;
 #[path = "cli/other_build.rs"]

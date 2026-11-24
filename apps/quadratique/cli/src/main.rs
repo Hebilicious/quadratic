@@ -4,6 +4,7 @@ mod commands;
 mod init;
 mod mcp;
 mod route;
+mod shipped;
 
 use std::sync::Arc;
 

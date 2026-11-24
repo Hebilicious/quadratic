@@ -10,18 +10,27 @@ use serde_json::{Map, Value, json};
 
 use crate::caller;
 use crate::commands::{print_json, report};
+use crate::shipped;
 
-pub const USAGE: &str = "init [--key <KEY>] [--name <name>] [--default-branch <branch>]: set up Quadratique in this git repository. Writes the skill to .agents/skills/quadratique/ (SKILL.md and planning.md), adds the Quadratique line to AGENTS.md, and creates the project bound to the repository (key from --key, else from the folder's name; default branch from --default-branch, else the remote's HEAD, else the branch checked out in the main worktree, else main; a project that has the repository already is left alone). A skill file you changed is left as it is. Its files stay inside the repository; the project is in the server's store. Writes no agent configuration and makes no commit: when it wrote a setup file, or one of its own is not committed yet, it prints the commit to run.";
+pub const USAGE: &str = "init [--key <KEY>] [--name <name>] [--default-branch <branch>] [--dry-run]: set up Quadratique in this git repository, or bring its setup to this build's text after an upgrade. Writes the skill to .agents/skills/quadratique/ (SKILL.md and planning.md), adds the Quadratique line to AGENTS.md, and creates the project bound to the repository (key from --key, else from the folder's name; default branch from --default-branch, else the remote's HEAD, else the branch checked out in the main worktree, else main; a project that has the repository already is left alone). A skill file that holds the text of an earlier build is replaced with this build's; a skill file that holds any other text, which a person wrote, is left as it is. The skill files and the AGENTS.md line of Quadratic, the earlier name, move to Quadratique's. The answer says per file what was done. --dry-run changes nothing and answers what init would do. Its files stay inside the repository; the project is in the server's store. Writes no agent configuration and makes no commit: when it wrote a setup file, or one of its own is not committed yet, it prints the commit to run.";
 
-const SKILL_FILES: [(&str, &str); 2] = [
-    (
-        ".agents/skills/quadratique/SKILL.md",
-        include_str!("../../skill/quadratique/SKILL.md"),
-    ),
-    (
-        ".agents/skills/quadratique/planning.md",
-        include_str!("../../skill/quadratique/planning.md"),
-    ),
+struct SkillFile {
+    path: &'static str,
+    text: &'static str,
+    shipped: &'static [&'static str],
+}
+
+const SKILL_FILES: [SkillFile; 2] = [
+    SkillFile {
+        path: ".agents/skills/quadratique/SKILL.md",
+        text: include_str!("../../skill/quadratique/SKILL.md"),
+        shipped: shipped::SKILL_MD,
+    },
+    SkillFile {
+        path: ".agents/skills/quadratique/planning.md",
+        text: include_str!("../../skill/quadratique/planning.md"),
+        shipped: shipped::PLANNING_MD,
+    },
 ];
 const AGENTS_PATH: &str = "AGENTS.md";
 pub const AGENTS_LINE: &str = "We use Quadratique for issues: every task is an issue there. Use the `quadratique` skill (`.agents/skills/quadratique/SKILL.md`) for anything about tasks.";
@@ -32,6 +41,7 @@ struct Request {
     key: Option<String>,
     name: Option<String>,
     default_branch: Option<String>,
+    dry_run: bool,
 }
 
 fn request(words: &[&str]) -> Option<Request> {
@@ -39,10 +49,15 @@ fn request(words: &[&str]) -> Option<Request> {
         key: None,
         name: None,
         default_branch: None,
+        dry_run: false,
     };
     let mut rest = words.iter();
     while let Some(word) = rest.next() {
         let slot = match *word {
+            "--dry-run" if !request.dry_run => {
+                request.dry_run = true;
+                continue;
+            }
             "--key" => &mut request.key,
             "--name" => &mut request.name,
             "--default-branch" => &mut request.default_branch,
@@ -70,6 +85,7 @@ fn key_of(folder: &str) -> Option<String> {
 enum Content {
     Absent,
     Same,
+    Earlier(String),
     Different(String),
 }
 
@@ -103,19 +119,16 @@ fn landing(path: &Path, depth: usize) -> std::io::Result<PathBuf> {
     }
 }
 
-fn inspect(
-    root: &Path,
-    relative: &str,
-    is_same: &dyn Fn(&str) -> bool,
-) -> std::io::Result<Destination> {
+type Classify<'a> = &'a dyn Fn(String) -> Content;
+
+fn inspect(root: &Path, relative: &str, classify: Classify) -> std::io::Result<Destination> {
     let lexical = root.join(relative);
     let target = landing(&lexical, 0)?;
     if !target.starts_with(root) {
         return Ok(Destination::LinkOutside(target));
     }
     let content = match std::fs::read_to_string(&target) {
-        Ok(text) if is_same(&text) => Content::Same,
-        Ok(text) => Content::Different(text),
+        Ok(text) => classify(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Content::Absent,
         Err(error) => return Err(error),
     };
@@ -134,13 +147,9 @@ struct File {
 }
 
 impl File {
-    fn plan(
-        root: &Path,
-        shown: &'static str,
-        is_same: &dyn Fn(&str) -> bool,
-    ) -> Result<File, String> {
+    fn plan(root: &Path, shown: &'static str, classify: Classify) -> Result<File, String> {
         let destination =
-            inspect(root, shown, is_same).map_err(|error| format!("{shown}: {error}"))?;
+            inspect(root, shown, classify).map_err(|error| format!("{shown}: {error}"))?;
         let reached = match &destination {
             Destination::Here(_) => root.join(shown),
             Destination::LinkInside { target, .. } | Destination::LinkOutside(target) => {
@@ -201,6 +210,16 @@ impl File {
             .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
     }
 
+    fn remove(&self, root: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(&self.target)?;
+        if let Some(folder) = self.target.parent()
+            && folder == root.join(shipped::QUADRATIC_SKILL_FOLDER)
+        {
+            let _ = std::fs::remove_dir(folder);
+        }
+        Ok(())
+    }
+
     fn write(&self, text: &str) -> std::io::Result<()> {
         if let Some(folder) = self.target.parent() {
             std::fs::create_dir_all(folder)?;
@@ -220,8 +239,43 @@ fn shell_word(path: &str) -> String {
     }
 }
 
-fn has_line(text: &str) -> bool {
-    text.lines().any(|line| line.trim() == AGENTS_LINE)
+fn has_line(text: &str, line: &str) -> bool {
+    text.lines().any(|found| found.trim() == line)
+}
+
+fn skill_content(file: &SkillFile) -> impl Fn(String) -> Content {
+    |text| {
+        if text == file.text {
+            Content::Same
+        } else if shipped::is_listed(&text, file.shipped) {
+            Content::Earlier(text)
+        } else {
+            Content::Different(text)
+        }
+    }
+}
+
+fn agents_content(text: String) -> Content {
+    if has_line(&text, AGENTS_LINE) {
+        Content::Same
+    } else if shipped::AGENTS_LINES
+        .iter()
+        .any(|line| has_line(&text, line))
+    {
+        Content::Earlier(text)
+    } else {
+        Content::Different(text)
+    }
+}
+
+fn with_line_updated(text: &str) -> String {
+    shipped::AGENTS_LINES
+        .iter()
+        .find(|line| has_line(text, line))
+        .map_or_else(
+            || with_line(text),
+            |line| text.replacen(line, AGENTS_LINE, 1),
+        )
 }
 
 fn with_line(text: &str) -> String {
@@ -244,12 +298,55 @@ enum ProjectStep {
     },
 }
 
+/// A skill file where Quadratic, before the rename, wrote it.
+enum Retired {
+    Remove(File),
+    Keep(&'static str, &'static str),
+}
+
+impl Retired {
+    fn plan(
+        root: &Path,
+        shown: &'static str,
+        digests: &[&str],
+    ) -> std::io::Result<Option<Retired>> {
+        let classify = |text: String| {
+            if shipped::is_listed(&text, digests) {
+                Content::Earlier(text)
+            } else {
+                Content::Different(text)
+            }
+        };
+        Ok(match inspect(root, shown, &classify)? {
+            Destination::Here(Content::Absent)
+            | Destination::LinkInside {
+                content: Content::Absent,
+                ..
+            } => None,
+            Destination::Here(content @ Content::Earlier(_)) => Some(Retired::Remove(File {
+                shown,
+                target: root.join(shown),
+                linked: false,
+                content,
+            })),
+            Destination::Here(_) => Some(Retired::Keep(shown, KEPT)),
+            Destination::LinkInside { .. } | Destination::LinkOutside(_) => {
+                Some(Retired::Keep(shown, "a link: kept"))
+            }
+        })
+    }
+}
+
+const KEPT: &str = "different: yours is kept";
+
 struct Plan {
     root: PathBuf,
     client: HttpClient,
     skills: Vec<(File, &'static str)>,
+    retired: Vec<Retired>,
     agents: File,
     project: ProjectStep,
+    dry_run: bool,
 }
 
 pub async fn init(words: &[&str], io: &mut CliIo) -> i32 {
@@ -294,12 +391,26 @@ async fn check(words: &[&str], io: &mut CliIo) -> Result<Plan, i32> {
 
     let planned = SKILL_FILES
         .iter()
-        .map(|&(path, text)| {
-            File::plan(&root, path, &|found| found == text).map(|file| (file, text))
+        .map(|file| {
+            File::plan(&root, file.path, &skill_content(file)).map(|planned| (planned, file.text))
         })
         .collect::<Result<Vec<_>, _>>()
-        .and_then(|skills| Ok((skills, File::plan(&root, AGENTS_PATH, &has_line)?)));
-    let (skills, agents) = match planned {
+        .and_then(|skills| {
+            let retired = shipped::QUADRATIC_SKILL_FILES
+                .iter()
+                .filter_map(|&(path, digests)| {
+                    Retired::plan(&root, path, digests)
+                        .map_err(|error| format!("{path}: {error}"))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                skills,
+                retired,
+                File::plan(&root, AGENTS_PATH, &agents_content)?,
+            ))
+        });
+    let (skills, retired, agents) = match planned {
         Ok(planned) => planned,
         Err(refusal) => {
             return Err(report(
@@ -312,6 +423,10 @@ async fn check(words: &[&str], io: &mut CliIo) -> Result<Plan, i32> {
     let files: Vec<&File> = skills
         .iter()
         .map(|(file, _)| file)
+        .chain(retired.iter().filter_map(|retired| match retired {
+            Retired::Remove(file) => Some(file),
+            Retired::Keep(..) => None,
+        }))
         .chain([&agents])
         .collect();
     for (index, file) in files.iter().enumerate() {
@@ -405,8 +520,10 @@ async fn check(words: &[&str], io: &mut CliIo) -> Result<Plan, i32> {
         root,
         client,
         skills,
+        retired,
         agents,
         project,
+        dry_run: request.dry_run,
     })
 }
 
@@ -439,6 +556,10 @@ async fn apply(plan: Plan, io: &mut CliIo) -> i32 {
         Ok(words) => words,
         Err((step, error)) => return progress.failed(io, &step, error),
     };
+    let retired_words = match remove_retired(&plan, &mut progress) {
+        Ok(words) => words,
+        Err((step, error)) => return progress.failed(io, &step, error),
+    };
     let project = match create_project(&plan, &mut progress).await {
         Ok(project) => project,
         Err((step, error)) => return progress.failed(io, &step, error),
@@ -450,10 +571,14 @@ async fn apply(plan: Plan, io: &mut CliIo) -> i32 {
 
     let mut files: Map<String, Value> = skill_words
         .into_iter()
+        .chain(retired_words)
         .map(|(path, word)| (path.to_owned(), json!(word)))
         .collect();
     files.insert(AGENTS_PATH.into(), json!(agents_word));
     let mut answer = json!({ "files": files, "project": project });
+    if plan.dry_run {
+        answer["dryRun"] = json!(true);
+    }
     let links: Map<String, Value> = plan
         .skills
         .iter()
@@ -463,9 +588,14 @@ async fn apply(plan: Plan, io: &mut CliIo) -> i32 {
         .map(|file| (file.shown.to_owned(), json!(file.committed(&plan.root))))
         .collect();
     if !links.is_empty() {
-        answer["writtenThroughLinks"] = Value::Object(links);
+        let field = if plan.dry_run {
+            "wouldWriteThroughLinks"
+        } else {
+            "writtenThroughLinks"
+        };
+        answer[field] = Value::Object(links);
     }
-    if !progress.committed.is_empty() {
+    if !plan.dry_run && !progress.committed.is_empty() {
         let paths = progress
             .committed
             .iter()
@@ -486,40 +616,82 @@ async fn apply(plan: Plan, io: &mut CliIo) -> i32 {
 
 type StepFailure = (String, String);
 
+/// The word for a change: what was done, or with --dry-run what would be done.
+fn said(dry_run: bool, done: &'static str, would: &'static str) -> &'static str {
+    if dry_run { would } else { done }
+}
+
 fn write_skills(
     plan: &Plan,
     progress: &mut Progress,
 ) -> Result<Vec<(&'static str, &'static str)>, StepFailure> {
     plan.skills
         .iter()
-        .map(|(skill, text)| Ok((skill.shown, write_skill(skill, text, &plan.root, progress)?)))
+        .map(|(skill, text)| Ok((skill.shown, write_skill(skill, text, plan, progress)?)))
         .collect()
 }
 
 fn write_skill(
     skill: &File,
     text: &str,
-    root: &Path,
+    plan: &Plan,
     progress: &mut Progress,
 ) -> Result<&'static str, StepFailure> {
     let shown = skill.shown;
-    Ok(match &skill.content {
-        Content::Absent => {
-            skill
-                .write(text)
-                .map_err(|error| (format!("Writing {shown}"), error.to_string()))?;
-            progress.done.push(format!("wrote {shown}"));
-            progress.committed.push(skill.committed(root));
-            "created"
-        }
+    let root = &plan.root;
+    let (done, would) = match &skill.content {
         Content::Same => {
             if skill.uncommitted(root) {
                 progress.committed.push(skill.committed(root));
             }
-            "unchanged"
+            return Ok("unchanged");
         }
-        Content::Different(_) => "different: yours is kept",
-    })
+        Content::Different(_) => return Ok(KEPT),
+        Content::Absent => ("created", "would create"),
+        Content::Earlier(_) => (
+            "updated: it held an earlier Quadratique text",
+            "would update: it holds an earlier Quadratique text",
+        ),
+    };
+    if !plan.dry_run {
+        skill
+            .write(text)
+            .map_err(|error| (format!("Writing {shown}"), error.to_string()))?;
+        progress.done.push(format!("wrote {shown}"));
+        progress.committed.push(skill.committed(root));
+    }
+    Ok(said(plan.dry_run, done, would))
+}
+
+fn remove_retired(
+    plan: &Plan,
+    progress: &mut Progress,
+) -> Result<Vec<(&'static str, &'static str)>, StepFailure> {
+    plan.retired
+        .iter()
+        .map(|retired| match retired {
+            Retired::Keep(shown, word) => Ok((*shown, *word)),
+            Retired::Remove(file) => {
+                let shown = file.shown;
+                if !plan.dry_run {
+                    file.remove(&plan.root)
+                        .map_err(|error| (format!("Removing {shown}"), error.to_string()))?;
+                    progress.done.push(format!("removed {shown}"));
+                    if file.uncommitted(&plan.root) {
+                        progress.committed.push(file.committed(&plan.root));
+                    }
+                }
+                Ok((
+                    shown,
+                    said(
+                        plan.dry_run,
+                        "removed: Quadratic's text, now in .agents/skills/quadratique/",
+                        "would remove: Quadratic's text, now in .agents/skills/quadratique/",
+                    ),
+                ))
+            }
+        })
+        .collect()
 }
 
 async fn create_project(plan: &Plan, progress: &mut Progress) -> Result<Value, StepFailure> {
@@ -529,6 +701,17 @@ async fn create_project(plan: &Plan, progress: &mut Progress) -> Result<Value, S
             "key": project["key"],
             "created": false,
             "defaultBranch": project["defaultBranch"],
+        })),
+        ProjectStep::Create {
+            key,
+            checked_input,
+            from,
+        } if plan.dry_run => Ok(json!({
+            "key": key,
+            "created": false,
+            "wouldCreate": true,
+            "defaultBranch": checked_input["defaultBranch"],
+            "defaultBranchFrom": from,
         })),
         ProjectStep::Create {
             key,
@@ -554,21 +737,28 @@ async fn create_project(plan: &Plan, progress: &mut Progress) -> Result<Value, S
 
 fn add_agents_line(plan: &Plan, progress: &mut Progress) -> Result<&'static str, StepFailure> {
     let agents = &plan.agents;
-    let (text, word) = match &agents.content {
+    let (text, done, would) = match &agents.content {
         Content::Same => {
             if agents.uncommitted(&plan.root) {
                 progress.committed.push(agents.committed(&plan.root));
             }
             return Ok("unchanged");
         }
-        Content::Different(text) => (with_line(text), "changed"),
-        Content::Absent => (with_line(""), "created"),
+        Content::Earlier(text) => (
+            with_line_updated(text),
+            "updated: it held Quadratic's line",
+            "would update: it holds Quadratic's line",
+        ),
+        Content::Different(text) => (with_line(text), "changed", "would change"),
+        Content::Absent => (with_line(""), "created", "would create"),
     };
-    agents
-        .write(&text)
-        .map_err(|error| (format!("Writing {AGENTS_PATH}"), error.to_string()))?;
-    progress.committed.push(agents.committed(&plan.root));
-    Ok(word)
+    if !plan.dry_run {
+        agents
+            .write(&text)
+            .map_err(|error| (format!("Writing {AGENTS_PATH}"), error.to_string()))?;
+        progress.committed.push(agents.committed(&plan.root));
+    }
+    Ok(said(plan.dry_run, done, would))
 }
 
 #[cfg(test)]

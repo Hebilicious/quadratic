@@ -94,13 +94,36 @@ the main worktree. When none of these names a branch, as in a main worktree with
 "nothing in the repository names one: give --default-branch". Change it later with
 `quadratique project update`.
 
-A skill file you changed is left as it is. Of the setup files, `init` writes only the three
+A skill file you changed is left as it is: `init` replaces only a file that holds a text an
+earlier build wrote (see "Update a repository's skill after an upgrade"). Of the setup files, `init` writes only the three
 above, all inside the repository, and writes no agent configuration. Like any command, it starts
 the server when none answers, and the server keeps its store in the data folder (see "Backups"),
 outside the repository. `init` makes no commit. Its answer has an optional `commit` field: the
 `git add` and `git commit` to run for the setup files that `init` wrote, or that hold exactly its
 own text and are not committed yet. A skill file you changed, which `init` left alone, is not in
 that command. When every setup file is already committed, the answer has no `commit` field.
+
+## Update a repository's skill after an upgrade
+
+A new build can ship a new skill text. Bring a repository's setup to it with the same command,
+from inside the repository:
+
+```sh
+quadratique init
+```
+
+The binary knows every skill text that a build of Quadratique wrote, by its SHA-256. A skill file
+that holds one of them is replaced with this build's text, and the answer says `updated: it held
+an earlier Quadratique text`. A skill file that holds any other text was changed by a person: it
+is kept, and the answer says `different: yours is kept`. A repository set up by Quadratic, the
+earlier name, moves to Quadratique: the skill is written to `.agents/skills/quadratique/`, the
+files of `.agents/skills/quadratic/` that hold Quadratic's text are removed, and Quadratic's line
+in `AGENTS.md` becomes Quadratique's. The `commit` field records these changes.
+
+`quadratique init --dry-run` changes nothing and creates no project. Its answer has
+`"dryRun": true` and says per file what `init` would do: `would create` (the file is missing),
+`unchanged` (it holds this build's text), `would update: it holds an earlier Quadratique text`, or
+`different: yours is kept` (a person changed it).
 
 ## Who can talk to the server
 
@@ -305,6 +328,10 @@ command can start another, so the new server is the one that answers.
 The first start of a new binary upgrades the store to that binary's schema, one commit per
 step. A binary refuses a store newer than the schema it knows. Back up the store (see "Backups") before you upgrade, so that you can go back to the older binary
 with the store as it was.
+
+The install does not change the repositories that use Quadratique. Run `quadratique init` in each
+of them to bring its skill to the new build's text (see "Update a repository's skill after an
+upgrade").
 
 ## Uninstall
 
