@@ -13,6 +13,8 @@ mod claims;
 mod close_several;
 #[path = "server/creation.rs"]
 mod creation;
+#[path = "server/ended_holder.rs"]
+mod ended_holder;
 #[path = "server/failures.rs"]
 mod failures;
 #[path = "server/findings.rs"]
