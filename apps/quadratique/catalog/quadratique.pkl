@@ -337,7 +337,7 @@ types {
   }
   ["Claim"] {
     type = "object"
-    description = "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time. Its session is the holder's `harness` and `session`, not `hostThread`; a holder without `session` has none."
+    description = "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time. Its session is the holder's `harness` and `session`, not `hostThread`; a holder without both has none."
     properties {
       holder = module.ref("Actor")
       branch = text("The git branch of the holder.")

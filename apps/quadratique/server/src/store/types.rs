@@ -234,10 +234,10 @@ pub enum ClaimFilter {
     Unclaimed,
 }
 
-/// A harness's session id, which is only unique within that harness.
+/// A harness's session id, which means something only within that harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HolderSession {
-    pub harness: Option<String>,
+    pub harness: String,
     pub session: String,
 }
 

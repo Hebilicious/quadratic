@@ -219,6 +219,43 @@ async fn the_same_session_id_from_another_harness_is_another_session() {
     assert_eq!(mine["items"], json!([]));
 }
 
+fn without_harness(mut who: Who, session: &str) -> Who {
+    let actor = who
+        .actor
+        .as_mut()
+        .expect("an actor")
+        .as_object_mut()
+        .expect("an object");
+    actor.remove("harness");
+    actor.insert("session".into(), json!(session));
+    who
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_id_without_a_harness_is_no_session() {
+    let board = start().await;
+    board.project("DEM").await;
+    let here = board.issue("Here").await;
+    let there = board.issue("There").await;
+    let lead = without_harness(board.agent("lead"), "session-1");
+    board
+        .ok(&lead, "issue.claim", json!({ "issue": here }))
+        .await;
+    board
+        .ok(
+            &without_harness(board.agent("audit"), "session-1"),
+            "issue.claim",
+            json!({ "issue": there }),
+        )
+        .await;
+
+    let mine = board
+        .ok(&lead, "issue.list", json!({ "claim": "mine" }))
+        .await;
+
+    assert_eq!(ids(&mine["items"]), vec![here]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claim_gives_the_issues_description_and_acceptance() {
     let board = start().await;

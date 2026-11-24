@@ -122,10 +122,12 @@ async fn list_issues(context: &Context, input: ListInput) -> Result<IssuePage, R
     };
     let mine = ClaimFilter::Mine {
         key: caller.holder_key().as_str().to_owned(),
-        session: caller.actor.session.clone().map(|session| HolderSession {
-            harness: caller.actor.harness.clone(),
-            session,
-        }),
+        session: caller
+            .actor
+            .harness
+            .clone()
+            .zip(caller.actor.session.clone())
+            .map(|(harness, session)| HolderSession { harness, session }),
     };
     let claim = match input.claim.as_deref() {
         Some("mine") => Some(mine),

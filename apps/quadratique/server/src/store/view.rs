@@ -204,12 +204,12 @@ impl<'c> View<'c> {
                 Some(HolderSession { harness, session }) => {
                     conditions.push(
                         "(i.claim_key = ? OR (json_extract(i.claim_holder, '$.session') = ? \
-                         AND json_extract(i.claim_holder, '$.harness') IS ?))"
+                         AND json_extract(i.claim_holder, '$.harness') = ?))"
                             .into(),
                     );
                     params.push(key.as_str().into());
                     params.push(session.as_str().into());
-                    params.push(harness.as_deref().map_or(Value::Null, Value::from));
+                    params.push(harness.as_str().into());
                 }
             },
             Some(ClaimFilter::Any) => conditions.push("i.claim_holder IS NOT NULL".into()),
