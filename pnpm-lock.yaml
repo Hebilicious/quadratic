@@ -220,13 +220,13 @@ importers:
 
   .: {}
 
-  apps/quadratic/catalog:
+  apps/quadratique/catalog:
     devDependencies:
       '@acid-cat/cli':
         specifier: 'catalog:'
         version: 0.13.1(playwright@1.64.1)(redis@6.3.1)
 
-  apps/quadratic/web:
+  apps/quadratique/web:
     dependencies:
       '@acid-cat/core-effect':
         specifier: 'catalog:'
@@ -237,7 +237,7 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.1.4
-      quadratic-catalog:
+      quadratique-catalog:
         specifier: workspace:*
         version: link:../catalog
       vue:

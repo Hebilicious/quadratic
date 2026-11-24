@@ -22,17 +22,17 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "package-name": "quadratic",
+      "package-name": "quadratique",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        { "type": "toml", "path": "apps/quadratic/Cargo.toml", "jsonpath": "$.workspace.package.version" },
-        { "type": "toml", "path": "apps/quadratic/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='quadratic')].version" },
-        { "type": "toml", "path": "apps/quadratic/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='quadratic-server')].version" },
+        { "type": "toml", "path": "apps/quadratique/Cargo.toml", "jsonpath": "$.workspace.package.version" },
+        { "type": "toml", "path": "apps/quadratique/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='quadratique')].version" },
+        { "type": "toml", "path": "apps/quadratique/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='quadratique-server')].version" },
         { "type": "json", "path": "package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "apps/quadratic/web/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "apps/quadratic/catalog/package.json", "jsonpath": "$.version" },
-        { "type": "toml", "path": "apps/quadratic/eval/harness/pyproject.toml", "jsonpath": "$.project.version" },
-        { "type": "toml", "path": "apps/quadratic/eval/harness/uv.lock", "jsonpath": "$.package[?(@.name.value=='quadratic-eval')].version" }
+        { "type": "json", "path": "apps/quadratique/web/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "apps/quadratique/catalog/package.json", "jsonpath": "$.version" },
+        { "type": "toml", "path": "apps/quadratique/eval/harness/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "apps/quadratique/eval/harness/uv.lock", "jsonpath": "$.package[?(@.name.value=='quadratique-eval')].version" }
       ]
     }
   }

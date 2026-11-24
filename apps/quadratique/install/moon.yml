@@ -1,0 +1,45 @@
+id: "quadratique-install"
+language: "bash"
+layer: "automation"
+tags: ["quadratique"]
+
+project:
+  title: "Quadratique install"
+  description: "Installs the quadratique binary, with the web app inside it, and its systemd user service for the current user."
+
+fileGroups:
+  scripts: ["*.sh"]
+  rust:
+    - "/apps/quadratique/cli/src/**/*"
+    - "/apps/quadratique/cli/Cargo.toml"
+    - "/apps/quadratique/skill/quadratique/*.md"
+    - "/apps/quadratique/server/src/**/*"
+    - "/apps/quadratique/server/Cargo.toml"
+    - "/apps/quadratique/server/build.rs"
+    - "/apps/quadratique/catalog/quadratique.acidcat.json"
+    - "/apps/quadratique/Cargo.toml"
+    - "/apps/quadratique/Cargo.lock"
+    - "/apps/quadratique/rust-toolchain.toml"
+
+tasks:
+  install:
+    description: "Build the release binary with the web app inside it, install it as $XDG_BIN_HOME/quadratique (else ~/.local/bin/quadratique), and install, enable and restart the systemd user service quadratique.service."
+    script: |
+      set -eu
+      sh install.sh "$(sh build.sh ../web/dist ../target)"
+    deps: ["quadratique-web:build"]
+    options:
+      cache: false
+      runInCI: false
+  uninstall:
+    description: "Stop and remove the systemd user service quadratique.service, its unit and the installed binary. The store stays."
+    command: "sh uninstall.sh"
+    options:
+      cache: false
+      runInCI: false
+  test:
+    description: "Install on a temporary home with no systemd: the binary serves the web app with no source tree, a release archive installs with no Rust toolchain, the service's ownership cases, and an uninstall that keeps the store."
+    command: "sh test.sh"
+    deps: ["quadratique-web:build"]
+    inputs: ["@group(scripts)", "@group(rust)", "/apps/quadratique/web/dist/**/*", "/apps/quadratique/README.md", "/LICENSE"]
+    tags: ["candidate"]
