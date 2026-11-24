@@ -68,7 +68,7 @@ pub fn decide(
         caller,
         project,
     };
-    match event {
+    let outcome = match event {
         Event::Claim {
             waits,
             at,
@@ -83,7 +83,11 @@ pub fn decide(
         } => rules.update(*revision, status.as_deref(), *changes_assignee),
         Event::Merge { landing } => rules.merge(landing),
         Event::Advance { status } => rules.advance(status),
+    }?;
+    if let Outcome::Changed(change) = &outcome {
+        may_reach(issue, &project.workflow, &change.status)?;
     }
+    Ok(outcome)
 }
 
 pub fn create_status(workflow: &Workflow, requested: Option<&str>) -> Result<Status, Failure> {
@@ -216,7 +220,6 @@ impl Rules<'_> {
         {
             return Err(self.held(claim));
         }
-        may_reach(self.issue, workflow, status)?;
         let status = status.to_string();
         let claim = if status == workflow.moves.merge || category != Category::Started {
             ClaimAfter::Ended
@@ -287,10 +290,7 @@ impl Rules<'_> {
             {
                 Ok(self.moves_to(&moves.review, ClaimAfter::Kept, true))
             }
-            _ => {
-                may_reach(self.issue, &self.project.workflow, &moves.merge)?;
-                Ok(self.moves_to(&moves.merge, ClaimAfter::Ended, true))
-            }
+            _ => Ok(self.moves_to(&moves.merge, ClaimAfter::Ended, true)),
         }
     }
 
@@ -312,8 +312,6 @@ impl Rules<'_> {
         if !lands {
             return Ok(Outcome::Unchanged);
         }
-        let merge = &self.project.workflow.moves.merge;
-        may_reach(self.issue, &self.project.workflow, merge)?;
-        Ok(self.moves_to(merge, ClaimAfter::Ended, false))
+        Ok(self.moves_to(&self.project.workflow.moves.merge, ClaimAfter::Ended, false))
     }
 }

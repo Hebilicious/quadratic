@@ -1,4 +1,5 @@
 mod advance;
+mod ancestry;
 mod board;
 mod caller;
 mod catalog;
@@ -26,10 +27,11 @@ use crate::git::watcher::Looks;
 use crate::store::{AsOf, Author, Call, Kind, Store, StoreError, Tx, View, Written};
 use model::IssueSummary;
 
+pub use ancestry::branch_checks_in;
 pub use board::board_loads_on_this_thread;
 pub use caller::{
     ACTOR_HEADER, BRANCH_HEADER, REPOSITORY_HEADER, WORKTREE_HEADER, caller_of, decode_header,
-    encode_header, with_branches,
+    encode_header,
 };
 pub use catalog::{CATALOG_JSON, input_refusal, interface};
 

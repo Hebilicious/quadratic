@@ -64,6 +64,9 @@ pub enum Failure {
         issue: IssueId,
         bases: Vec<IssueId>,
     },
+    MergedBeforeBase {
+        issues: Vec<IssueId>,
+    },
     DuplicateStatus {
         status: Status,
     },

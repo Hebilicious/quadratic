@@ -58,8 +58,8 @@ pub struct WorkingCopy {
     pub repository: Option<String>,
     pub worktree: Option<String>,
     pub branch: Option<String>,
-    /// The local branches whose tips `branch` contains, itself included; `None` when they
-    /// were not read.
+    /// The base branches that git verified `branch` contains, in `repository`; `None` when no
+    /// decision asked git.
     pub contains: Option<BTreeSet<String>>,
 }
 

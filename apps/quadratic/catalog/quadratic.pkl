@@ -541,6 +541,9 @@ types {
     issue = module.ref("IssueId")
     bases = array(module.ref("IssueId"), null, "The issues it is stacked on that are not in the workflow's `merge` status or after it.")
   }, new Listing { "issue"; "bases" })
+  ["MergedBeforeBase"] = failure("MergedBeforeBase", new Dynamic {
+    issues = array(module.ref("IssueId"), null, "The issues that would be at the `merge` status or later while an issue they are stacked on is not merged.")
+  }, new Listing { "issues" })
   ["UnknownStatus"] = failure("UnknownStatus", new Dynamic {
     status = module.ref("Status")
     statuses = array(module.ref("Status"), 20, "The statuses of the project's workflow.")
@@ -612,7 +615,7 @@ capabilities {
   }
 
   ["project.update"] {
-    description = "Change a project: the given members, and leave the others. Only the human (`HumanOnly`). With `bindRepository`, the git repository of the caller's working directory replaces the one the project had, for example after the repository moved (`NoWorkingCopy` when the caller has no working directory in a git repository, such as the web app; `RepositoryBound` when another project has it). A new repository or a new `defaultBranch` is refused while issues of the project hold a claim (`ClaimsHeld`): release or close them first. A new `workflow` is refused with `DuplicateStatus` or `InvalidMove` when it breaks a rule of `Workflow`, and with `StatusInUse` when issues are in a status that it drops or puts in another category: move those issues first. Writes nothing into the repository." + projectCommitted
+    description = "Change a project: the given members, and leave the others. Only the human (`HumanOnly`). With `bindRepository`, the git repository of the caller's working directory replaces the one the project had, for example after the repository moved (`NoWorkingCopy` when the caller has no working directory in a git repository, such as the web app; `RepositoryBound` when another project has it). A new repository or a new `defaultBranch` is refused while issues of the project hold a claim (`ClaimsHeld`): release or close them first. A new `workflow` is refused with `DuplicateStatus` or `InvalidMove` when it breaks a rule of `Workflow`, and with `StatusInUse` when issues are in a status that it drops or puts in another category: move those issues first. A new `workflow` is also refused with `MergedBeforeBase` when, under it, an issue would be at the `merge` status or later while an issue it is stacked on is not merged; a held landing whose bases all count as merged under it moves its issue to the `merge` status in the same write. Writes nothing into the repository." + projectCommitted
     audience { "cli"; "web" }
     input {
       type = "object"
@@ -638,7 +641,7 @@ capabilities {
     }
     output = module.ref("Project")
     failures {
-      ...failures(new Listing { "NotFound"; "NoWorkingCopy"; "RepositoryBound"; "HumanOnly" })
+      ...failures(new Listing { "NotFound"; "NoWorkingCopy"; "RepositoryBound"; "HumanOnly"; "MergedBeforeBase" })
       ["DuplicateStatus"] = failure("DuplicateStatus", new Dynamic {
         status = module.ref("Status")
       }, new Listing { "status" })
@@ -838,7 +841,7 @@ capabilities {
   }
 
   ["issue.claim"] {
-    description = "Take a ready issue, atomically: no two callers can hold it. The only way to start a claim. Records the caller, its branch and its worktree, and moves the issue to the workflow's `claim` status. The holder is the same actor name in the same worktree; its repeated call changes nothing. Fails with `Held`, naming the holder, when someone else holds it; with `NotReady`, giving the reasons and the unresolved blockers, when it is not ready; and with `NoWorkingCopy` when the caller is not in a git worktree on a branch, or not in `worktree` of the project." + committed
+    description = "Take a ready issue, atomically: no two callers can hold it. The only way to start a claim. Records the caller, its branch and its worktree, and moves the issue to the workflow's `claim` status. The holder is the same actor name in the same worktree; its repeated call changes nothing. Fails with `Held`, naming the holder, when someone else holds it; with `NotReady`, giving the reasons and the unresolved blockers, when it is not ready; and with `NoWorkingCopy` when the caller is not in a git worktree on a branch, or not in `worktree` of the project. Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged." + committed
     audience { "cli"; "mcp" }
     input {
       type = "object"
@@ -852,7 +855,7 @@ capabilities {
     }
     output = module.ref("IssueAnswer")
     failures {
-      ...failures(new Listing { "NotFound"; "Held"; "NoWorkingCopy" })
+      ...failures(new Listing { "NotFound"; "Held"; "NoWorkingCopy"; "BaseNotMerged" })
       ["NotReady"] = failure("NotReady", new Dynamic {
         issue = module.ref("IssueId")
         status = module.ref("Status")
@@ -867,7 +870,7 @@ capabilities {
   }
 
   ["issue.release"] {
-    description = "Give a claim back: the issue moves to the workflow's `release` status with no claim, and keeps its assignee. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`). Only the holder or the human (`Held`)." + committed
+    description = "Give a claim back: the issue moves to the workflow's `release` status with no claim, and keeps its assignee. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`). Only the holder or the human (`Held`). Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged." + committed
     audience { "cli"; "mcp"; "web" }
     input {
       type = "object"
@@ -880,7 +883,7 @@ capabilities {
       required { "issue" }
     }
     output = module.ref("IssueSummaryAnswer")
-    failures { ...failures(new Listing { "NotFound"; "Held"; "HumanOnly" }) }
+    failures { ...failures(new Listing { "NotFound"; "Held"; "HumanOnly"; "BaseNotMerged" }) }
   }
 
   ["issue.close"] {
@@ -913,7 +916,7 @@ capabilities {
   }
 
   ["issue.link"] {
-    description = "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` or a `stacked-on` fails with `Cycle` when issues would wait on each other through blockers, children, ancestors and the issues they are stacked on. An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open." + committed
+    description = "Add the relation `issue <kind> target`, or remove it with `remove`. Adding a relation that exists, or removing one that does not, changes nothing. `SelfLink` when the issue is the target. A `blocks` or a `stacked-on` fails with `Cycle` when issues would wait on each other through blockers, children, ancestors and the issues they are stacked on. A `stacked-on` fails with `BaseNotMerged` when `issue` is at the workflow's `merge` status or later and `target` is not merged. An issue waits on its unresolved children, on its blockers and on the blockers of its ancestors, so a parent cannot block its own child. Removing a relation is how an issue stops waiting on one that stays open." + committed
     audience = interactiveClients
     input {
       type = "object"
@@ -940,13 +943,13 @@ capabilities {
       required { "issue"; "relations" }
     }
     failures {
-      ...failures(new Listing { "NotFound"; "Cycle" })
+      ...failures(new Listing { "NotFound"; "Cycle"; "BaseNotMerged" })
       ["SelfLink"] = failure("SelfLink", new Dynamic {}, new Listing {})
     }
   }
 
   ["findings.import"] {
-    description = "Record one run of a tool for one project: each finding becomes an issue with the source `tool` and the finding's `key`, and (project, tool, key) names at most one issue. By key: no issue yet, create one in the workflow's first unstarted status; an open issue, change the title, description, links, labels, assignee and priority that the finding gives where they differ, and nothing else; an issue of the completed category, the finding came back: it returns to the first unstarted status, and loses the evidence that the import wrote when it finished it (evidence that anyone wrote since stays); an issue of the canceled category: leave it, a person overruled the finding. When `complete`, each open issue of the tool and project whose key the run lacks moves to the workflow's first status of the completed category, with evidence that names the run, and its claim ends (`NoCompletedStatus` when the workflow has none); a run that is not complete finishes nothing. Each open `decision` blocks the other open issues of the tool and project that are no decision and share a link of kind `fact` with it, and no other kind of link blocks; the import adds and removes the `blocks` relations that it made so, and never one made by hand, nor one that would make issues wait on each other. `TooManyBlocks` when the run implies more than `limit` such relations, and nothing changes. `DuplicateKey` when two findings have one key. The same run imported again changes nothing." + committed
+    description = "Record one run of a tool for one project: each finding becomes an issue with the source `tool` and the finding's `key`, and (project, tool, key) names at most one issue. By key: no issue yet, create one in the workflow's first unstarted status; an open issue, change the title, description, links, labels, assignee and priority that the finding gives where they differ, and nothing else; an issue of the completed category, the finding came back: it returns to the first unstarted status, and loses the evidence that the import wrote when it finished it (evidence that anyone wrote since stays); an issue of the canceled category: leave it, a person overruled the finding. When `complete`, each open issue of the tool and project whose key the run lacks moves to the workflow's first status of the completed category, with evidence that names the run, and its claim ends (`NoCompletedStatus` when the workflow has none), unless an issue it is stacked on is not merged: such an issue stays as it is and is in `left`, and an issue that the run finishes releases the held landings stacked on it; a run that is not complete finishes nothing. Each open `decision` blocks the other open issues of the tool and project that are no decision and share a link of kind `fact` with it, and no other kind of link blocks; the import adds and removes the `blocks` relations that it made so, and never one made by hand, nor one that would make issues wait on each other. `TooManyBlocks` when the run implies more than `limit` such relations, and nothing changes. `DuplicateKey` when two findings have one key. The same run imported again changes nothing." + committed
     audience { "cli"; "web" }
     input {
       type = "object"
@@ -974,7 +977,7 @@ capabilities {
         finished = module.ref("IssueIds")
         left {
           ["$ref"] = "#/$defs/IssueIds"
-          description = "The issues of findings in the run that the import did not change: unchanged, or canceled."
+          description = "The issues that the import did not change: of findings in the run, unchanged or canceled; of findings the complete run lacks, those it could not finish because an issue they are stacked on is not merged."
         }
       }
       required { "created"; "updated"; "reopened"; "finished"; "left" }

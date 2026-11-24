@@ -441,6 +441,14 @@ impl<'c> View<'c> {
             .collect())
     }
 
+    pub fn has_relation_kind(&self, kind: &str) -> Result<bool, StoreError> {
+        let sql = format!(
+            "SELECT 1 FROM {} WHERE kind = ? LIMIT 1",
+            self.table("relations")
+        );
+        Ok(self.row(&sql, &[kind.into()])?.is_some())
+    }
+
     pub fn graph(&self) -> Result<Graph, StoreError> {
         let sql = format!(
             "SELECT i.id, i.parent, i.status, s.category, i.project, i.claim_branch FROM {} ORDER BY i.id",

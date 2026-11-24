@@ -72,19 +72,6 @@ impl Repository {
         Ok(parse_heads(&text).remove(branch))
     }
 
-    /// The local branches whose tips `branch` contains, `branch` itself included.
-    pub async fn contained_in(&self, branch: &str) -> Result<BTreeSet<String>, GitError> {
-        let merged = format!("--merged={HEADS}{branch}");
-        let text = self
-            .text(&["for-each-ref", "--format=%(refname)", &merged, HEADS])
-            .await?;
-        Ok(text
-            .lines()
-            .filter_map(|reference| reference.strip_prefix(HEADS))
-            .map(str::to_owned)
-            .collect())
-    }
-
     pub async fn look(
         &self,
         default_branch: &str,

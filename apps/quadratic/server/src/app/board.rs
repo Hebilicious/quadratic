@@ -1,21 +1,26 @@
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Refused;
 use super::model::{self, IssueSummary};
 use crate::domain::{
-    self, Base, Caller, IssueId, RelationChange, Stage, Wait, WaitGraph, Workflow, readiness,
+    self, Base, Caller, IssueId, RelationChange, STACKED_ON, Stage, Wait, WaitGraph, Workflow,
+    readiness,
 };
 use crate::store::{self, IssueFilter, IssueRecord, Kind, View};
 
 pub(crate) struct Board {
     graph: WaitGraph,
-    bases: BTreeMap<IssueId, BaseState>,
+    stacked: BTreeMap<IssueId, Node>,
 }
 
-struct BaseState {
+/// What the `stacked-on` rules read of an issue at either end of such a link. Only those
+/// issues are read: a board without the link reads no project and no stage.
+struct Node {
     stage: Stage,
     branch: Option<String>,
+    repository: Option<String>,
+    open: bool,
 }
 
 thread_local! {
@@ -31,40 +36,100 @@ impl Board {
     pub(crate) fn load(view: &View<'_>) -> Result<Board, Refused> {
         LOADS.with(|loads| loads.set(loads.get() + 1));
         let stored = view.graph()?;
-        let workflows: BTreeMap<String, Workflow> = view
-            .projects()?
+        let ends: BTreeSet<&str> = stored
+            .links
             .iter()
-            .map(|project| Ok((project.key.clone(), model::workflow(&project.workflow)?)))
-            .collect::<Result<_, Refused>>()?;
+            .filter(|link| link.kind == STACKED_ON)
+            .flat_map(|link| [link.source.as_str(), link.target.as_str()])
+            .collect();
+        let projects: BTreeMap<String, (Workflow, Option<String>)> = if ends.is_empty() {
+            BTreeMap::new()
+        } else {
+            view.projects()?
+                .iter()
+                .map(|project| {
+                    let workflow = model::workflow(&project.workflow)?;
+                    Ok((project.key.clone(), (workflow, project.repository.clone())))
+                })
+                .collect::<Result<_, Refused>>()?
+        };
         let mut graph = WaitGraph::default();
-        let mut bases = BTreeMap::new();
-        for node in stored.issues {
-            if let Some(parent) = node.parent {
+        let mut stacked = BTreeMap::new();
+        for node in &stored.issues {
+            if let Some(parent) = &node.parent {
                 graph.apply(RelationChange::Parent {
                     child: node.id.clone(),
-                    parent,
+                    parent: parent.clone(),
                 });
             }
             let category = node.category.as_deref().and_then(model::category);
-            let stage = match workflows.get(&node.project) {
-                Some(workflow) => Stage::of(workflow, &node.status, category),
-                None => Stage::BeforeReview,
-            };
-            bases.insert(
-                node.id.clone(),
-                BaseState {
-                    stage,
-                    branch: node.claim_branch,
-                },
-            );
-            graph.issue(node.id, category);
+            if ends.contains(node.id.as_str()) {
+                let (stage, repository) = match projects.get(&node.project) {
+                    Some((workflow, repository)) => (
+                        Stage::of(workflow, &node.status, category),
+                        repository.clone(),
+                    ),
+                    None => (Stage::BeforeReview, None),
+                };
+                stacked.insert(
+                    node.id.clone(),
+                    Node {
+                        stage,
+                        branch: node.claim_branch.clone(),
+                        repository,
+                        open: node.claim_branch.is_none()
+                            && !category.is_some_and(domain::Category::is_resolved),
+                    },
+                );
+            }
+            graph.issue(node.id.clone(), category);
         }
-        for link in stored.links {
+        for link in &stored.links {
             if let Some(change) = RelationChange::link(&link.source, &link.kind, &link.target) {
                 graph.apply(change);
             }
         }
-        Ok(Board { graph, bases })
+        Ok(Board { graph, stacked })
+    }
+
+    /// The base branches that git must check against the caller's branch before deciding
+    /// whether the caller can start one of `issues` (every issue when `None`): the bases in
+    /// review, in the caller's repository, of unclaimed open issues stacked on them.
+    pub(crate) fn branches_to_check(
+        &self,
+        issues: Option<&[IssueId]>,
+        caller: &Caller,
+    ) -> BTreeSet<String> {
+        let mut branches = BTreeSet::new();
+        for (id, node) in &self.stacked {
+            let wanted = issues.is_none_or(|issues| issues.contains(id));
+            if !wanted || !node.open {
+                continue;
+            }
+            for base in self.bases(id) {
+                if base.asks_git(caller)
+                    && let Some(branch) = base.branch
+                {
+                    branches.insert(branch);
+                }
+            }
+        }
+        branches
+    }
+
+    /// The issues at the `merge` status or later that are stacked on an issue not yet merged.
+    pub(crate) fn merged_before_base(&self) -> Vec<IssueId> {
+        self.stacked
+            .iter()
+            .filter(|(id, node)| {
+                node.stage == Stage::Merged
+                    && self
+                        .bases(id)
+                        .iter()
+                        .any(|base| base.stage != Stage::Merged)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     pub(crate) fn waits(&self, id: &str) -> Vec<Wait> {
@@ -79,12 +144,19 @@ impl Board {
         self.graph
             .bases(id)
             .into_iter()
-            .map(|on| {
-                let (stage, branch) = match self.bases.get(&on) {
-                    Some(state) => (state.stage, state.branch.clone()),
-                    None => (Stage::BeforeReview, None),
-                };
-                Base { on, stage, branch }
+            .map(|on| match self.stacked.get(&on) {
+                Some(node) => Base {
+                    stage: node.stage,
+                    branch: node.branch.clone(),
+                    repository: node.repository.clone(),
+                    on,
+                },
+                None => Base {
+                    on,
+                    stage: Stage::BeforeReview,
+                    branch: None,
+                    repository: None,
+                },
             })
             .collect()
     }

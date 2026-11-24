@@ -2,6 +2,7 @@ use acid_cat_core::CapabilityDefinition;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::ancestry::{Scope, verified};
 use super::board::{self, Board};
 use super::catalog::capability;
 use super::issues::whole_issue;
@@ -20,6 +21,9 @@ pub(super) fn apply(
     evidence: Option<&str>,
 ) -> Result<(), Refused> {
     tx.set_status(id, &change.status)?;
+    if change.claim != ClaimAfter::Kept {
+        tx.end_held_merge(id)?;
+    }
     match &change.claim {
         ClaimAfter::Kept => {}
         ClaimAfter::Started(claim) => {
@@ -47,7 +51,8 @@ pub(super) fn apply(
     release_held_on(tx, id)
 }
 
-fn release_held_on(tx: &mut Tx<'_>, base: &str) -> Result<(), Refused> {
+/// Releases the held issues stacked on `base`, once it moved.
+pub(super) fn release_held_on(tx: &mut Tx<'_>, base: &str) -> Result<(), Refused> {
     if tx.held_merges()?.is_empty() {
         return Ok(());
     }
@@ -89,6 +94,7 @@ pub(super) fn release_held(tx: &mut Tx<'_>, issues: Vec<String>) -> Result<(), R
     Ok(())
 }
 
+#[derive(Clone)]
 enum Request {
     Claim { worktree: Option<String> },
     Release { reason: Option<String> },
@@ -126,11 +132,11 @@ impl Request {
 
 async fn move_issue<R: Send + 'static>(
     context: &Context,
+    caller: Caller,
     id: String,
     request: Request,
     answer: IssueReader<R>,
 ) -> Result<IssueAnswer<R>, Refused> {
-    let caller = context.caller.clone();
     let reason = match &request {
         Request::Release { reason } => reason.clone(),
         Request::Claim { .. } | Request::Close { .. } => None,
@@ -207,11 +213,43 @@ pub(super) struct ClaimInput {
 
 pub(super) fn claim() -> CapabilityDefinition<Context, ClaimInput, IssueAnswer<Issue>, Value> {
     capability::<ClaimInput, IssueAnswer<Issue>>("issue.claim").run(|input, call| async move {
-        let request = Request::Claim {
-            worktree: input.worktree,
-        };
-        finish(move_issue(call.context(), input.issue, request, whole_issue).await)
+        finish(claim_issue(call.context(), input.issue, input.worktree).await)
     })
+}
+
+/// A claim is decided first without git. Only when that refuses it for `stacked`, and a base
+/// in review asks git about the caller's branch, is it decided again with git's answer.
+async fn claim_issue(
+    context: &Context,
+    id: String,
+    worktree: Option<String>,
+) -> Result<IssueAnswer<Issue>, Refused> {
+    let request = Request::Claim { worktree };
+    let first = move_issue(
+        context,
+        context.caller.clone(),
+        id.clone(),
+        request.clone(),
+        whole_issue,
+    )
+    .await;
+    match first {
+        Err(Refused::Failure(failure)) if refused_for_stacked(&failure) => {
+            let caller = verified(context, Scope::Issue(id.clone())).await?;
+            if caller.working_copy.contains.is_none() {
+                return Err(Refused::Failure(failure));
+            }
+            move_issue(context, caller, id, request, whole_issue).await
+        }
+        other => other,
+    }
+}
+
+fn refused_for_stacked(failure: &Value) -> bool {
+    failure["_tag"] == "NotReady"
+        && failure["reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| reason == "stacked"))
 }
 
 #[derive(Deserialize)]
@@ -227,7 +265,16 @@ pub(super) fn release()
             let request = Request::Release {
                 reason: input.reason,
             };
-            finish(move_issue(call.context(), input.issue, request, board::summary).await)
+            finish(
+                move_issue(
+                    call.context(),
+                    call.context().caller.clone(),
+                    input.issue,
+                    request,
+                    board::summary,
+                )
+                .await,
+            )
         },
     )
 }
@@ -243,6 +290,15 @@ pub(super) fn close() -> CapabilityDefinition<Context, CloseInput, IssueAnswer<I
         let request = Request::Close {
             evidence: input.evidence,
         };
-        finish(move_issue(call.context(), input.issue, request, whole_issue).await)
+        finish(
+            move_issue(
+                call.context(),
+                call.context().caller.clone(),
+                input.issue,
+                request,
+                whole_issue,
+            )
+            .await,
+        )
     })
 }

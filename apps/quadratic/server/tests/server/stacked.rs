@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use crate::repository::{Repository, git};
-use crate::support::{Running, Who, reasons, start};
+use quadratic_server::app::branch_checks_in;
+
+use crate::support::{Running, Who, ids, reasons, start};
 
 struct Stack {
     board: Running,
@@ -110,6 +112,63 @@ impl Stack {
             .as_str()
             .expect("a status")
             .to_owned()
+    }
+
+    async fn restarted(self) -> Stack {
+        let Stack {
+            board,
+            repository,
+            a,
+            b,
+            a_agent,
+            a_worktree,
+        } = self;
+        let (home, code) = board.stop().await;
+        let board = Running::resume(home, code).await;
+        Stack {
+            board,
+            repository,
+            a,
+            b,
+            a_agent,
+            a_worktree,
+        }
+    }
+
+    /// B, unclaimed, in review, whose commit lands on main while a base is not merged.
+    async fn hold_b(&self) -> String {
+        self.move_to(&self.human(), &self.b, "in-review")
+            .await
+            .expect("B in review");
+        let root = &self.repository.root;
+        let landing =
+            self.repository
+                .commit(root, "cache.rs", &format!("Cache\n\nRefs: {}", self.b));
+        self.board.look().await;
+        assert_eq!(self.status(&self.b).await, "in-review", "B is held");
+        landing
+    }
+
+    /// The changes that moved `issue` to `status`, with their store commits.
+    async fn moves_to(&self, issue: &str, status: &str) -> Vec<Value> {
+        let page = self
+            .board
+            .ok(&self.human(), "history.query", json!({ "issue": issue }))
+            .await;
+        let after = Value::from(json!(status).to_string());
+        page["items"]
+            .as_array()
+            .expect("a list of changes")
+            .iter()
+            .filter(|change| {
+                change["fields"]
+                    .as_array()
+                    .expect("fields")
+                    .iter()
+                    .any(|field| field["field"] == "status" && field["after"] == after)
+            })
+            .cloned()
+            .collect()
     }
 
     fn squash_onto_main(&self, branch: &str, issue: &str) {
@@ -470,4 +529,402 @@ async fn an_issue_stacked_on_two_issues_waits_for_both() {
         .await
         .expect_err("A is not merged");
     assert_eq!(refused["bases"], json!([stack.a]), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_landing_moves_once_every_base_is_merged_in_the_last_base_commit() {
+    let stack = Stack::new().await;
+    let human = stack.human();
+    let d = create(&stack.board, &human, "Log the parsed headers").await;
+    stack
+        .link("stacked-on", &stack.b, &d)
+        .await
+        .expect("a second base");
+    stack.close_a().await;
+    stack.hold_b().await;
+
+    stack.move_to(&human, &d, "merged").await.expect("D merges");
+    assert_eq!(stack.status(&stack.b).await, "in-review", "A still holds B");
+
+    let stack = stack.restarted().await;
+    stack
+        .move_to(&stack.human(), &stack.a, "merged")
+        .await
+        .expect("A merges");
+
+    assert_eq!(stack.status(&stack.b).await, "merged");
+    let moves = stack.moves_to(&stack.b, "merged").await;
+    assert_eq!(moves.len(), 1, "{moves:?}");
+    let a_moves = stack.moves_to(&stack.a, "merged").await;
+    assert_eq!(
+        moves[0]["commit"], a_moves[0]["commit"],
+        "{moves:?} {a_moves:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn advance_leaves_a_held_landing_in_left() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    let landing = stack.hold_b().await;
+
+    let advanced = stack
+        .board
+        .ok(
+            &stack.human(),
+            "issue.advance",
+            json!({ "project": "ABC", "commit": landing, "status": "done" }),
+        )
+        .await;
+    assert_eq!(advanced["moved"]["issues"], json!([]), "{advanced}");
+    assert_eq!(advanced["left"]["issues"], json!([stack.b]), "{advanced}");
+    assert_eq!(stack.status(&stack.b).await, "in-review");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hold_ends_when_its_issue_is_canceled_and_a_new_claim_never_lands_with_it() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    let human = stack.human();
+    let (agent, worktree) = stack.agent_from("cache", "parse").await;
+    stack
+        .board
+        .ok(&agent, "issue.claim", json!({ "issue": stack.b }))
+        .await;
+    stack
+        .repository
+        .commit(&worktree, "cache.rs", "Cache the parsed headers");
+    stack.board.look().await;
+    stack
+        .board
+        .ok(
+            &agent,
+            "issue.close",
+            json!({ "issue": stack.b, "evidence": "the tests pass" }),
+        )
+        .await;
+    stack.squash_onto_main("cache", &stack.b);
+    stack.board.look().await;
+    assert_eq!(stack.status(&stack.b).await, "in-review", "B is held");
+
+    stack
+        .move_to(&human, &stack.b, "canceled")
+        .await
+        .expect("B is canceled");
+    stack
+        .move_to(&human, &stack.b, "todo")
+        .await
+        .expect("B reopens");
+    let (again, _) = stack.agent_from("cache-again", "parse").await;
+    stack
+        .board
+        .ok(&again, "issue.claim", json!({ "issue": stack.b }))
+        .await;
+    stack
+        .move_to(&human, &stack.a, "merged")
+        .await
+        .expect("A merges");
+
+    let shown = stack.board.get(&stack.b).await;
+    assert_eq!(shown["status"], "in-progress", "{shown}");
+    assert_eq!(shown["claim"]["branch"], "cache-again", "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hold_ends_when_its_claim_is_released() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    let human = stack.human();
+    let (agent, worktree) = stack.agent_from("cache", "parse").await;
+    stack
+        .board
+        .ok(&agent, "issue.claim", json!({ "issue": stack.b }))
+        .await;
+    stack
+        .repository
+        .commit(&worktree, "cache.rs", "Cache the parsed headers");
+    stack.board.look().await;
+    stack
+        .board
+        .ok(
+            &agent,
+            "issue.close",
+            json!({ "issue": stack.b, "evidence": "the tests pass" }),
+        )
+        .await;
+    stack.squash_onto_main("cache", &stack.b);
+    stack.board.look().await;
+    assert_eq!(stack.status(&stack.b).await, "in-review", "B is held");
+
+    stack
+        .board
+        .ok(&agent, "issue.release", json!({ "issue": stack.b }))
+        .await;
+    stack
+        .move_to(&human, &stack.a, "merged")
+        .await
+        .expect("A merges");
+
+    assert_eq!(stack.status(&stack.b).await, "todo");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_of_the_same_name_in_another_repository_does_not_satisfy_the_branch_rule() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    let other = Repository::new();
+    let worktree = other.worktree("parse");
+    other.commit(&worktree, "parser.rs", "Parse the headers elsewhere");
+    let stranger = other.agent(&worktree, "parse");
+
+    let ready = stack
+        .board
+        .ok(
+            &stranger,
+            "issue.ready",
+            json!({ "project": "ABC", "limit": 10 }),
+        )
+        .await;
+    assert!(!ids(&ready["items"]).contains(&stack.b), "{ready}");
+    let refused = stack
+        .board
+        .failure(&stranger, "issue.claim", json!({ "issue": stack.b }))
+        .await;
+    assert_eq!(refused["_tag"], "NotReady", "{refused}");
+    assert_eq!(refused["reasons"], json!(["stacked"]), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_branch_rule_starts_git_only_for_a_decision_about_a_base_in_review() {
+    let board = start().await;
+    let repository = Repository::new();
+    let human = repository.human();
+    board
+        .ok(
+            &human,
+            "project.create",
+            json!({ "key": "ABC", "name": "Project ABC", "defaultBranch": "main" }),
+        )
+        .await;
+    let a = create(&board, &human, "Parse the headers").await;
+    let b = create(&board, &human, "Cache the parsed headers").await;
+    let worktree = repository.worktree("parse");
+    let agent = repository.agent(&worktree, "parse");
+    board.look().await;
+    let checks = || branch_checks_in(&repository.common_dir());
+
+    board.ok(&agent, "project.list", json!({})).await;
+    board.ok(&agent, "issue.list", json!({})).await;
+    board.ok(&agent, "issue.ready", json!({})).await;
+    board.ok(&agent, "issue.get", json!({ "issue": b })).await;
+    board.ok(&agent, "issue.claim", json!({ "issue": a })).await;
+    assert_eq!(checks(), 0, "a board without stacked-on asks git nothing");
+
+    board
+        .ok(
+            &human,
+            "issue.link",
+            json!({ "issue": b, "kind": "stacked-on", "target": a }),
+        )
+        .await;
+    board.ok(&agent, "issue.ready", json!({})).await;
+    assert_eq!(checks(), 0, "a base before review asks git nothing");
+    repository.commit(&worktree, "parser.rs", "Parse the headers");
+    board
+        .ok(
+            &agent,
+            "issue.close",
+            json!({ "issue": a, "evidence": "done" }),
+        )
+        .await;
+    assert!(board.ready_ids(&agent, 10).await.contains(&b));
+    assert_eq!(
+        checks(),
+        1,
+        "a base in review asks git once for the caller's branch"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_on_link_from_an_issue_at_merge_to_an_unmerged_base_is_refused() {
+    let stack = Stack::new().await;
+    let human = stack.human();
+    let c = create(&stack.board, &human, "Document the cache").await;
+    for status in ["merged", "done"] {
+        stack.move_to(&human, &c, status).await.expect("C moves");
+        let refused = stack
+            .link("stacked-on", &c, &stack.a)
+            .await
+            .expect_err("C cannot be stacked on an unmerged A");
+        assert_eq!(
+            refused,
+            json!({ "_tag": "BaseNotMerged", "issue": c, "bases": [stack.a] })
+        );
+    }
+    stack
+        .move_to(&human, &stack.a, "merged")
+        .await
+        .expect("A merges");
+    stack
+        .link("stacked-on", &c, &stack.a)
+        .await
+        .expect("a merged base may be linked");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_added_to_a_claimed_issue_shows_stacked_only_while_the_base_is_before_review() {
+    let stack = Stack::new().await;
+    let human = stack.human();
+    let c = create(&stack.board, &human, "Document the cache").await;
+    let (unrelated, _) = stack.agent_from("docs", "main").await;
+    stack
+        .board
+        .ok(&unrelated, "issue.claim", json!({ "issue": c }))
+        .await;
+
+    stack
+        .link("stacked-on", &c, &stack.a)
+        .await
+        .expect("C on A");
+    assert_stacked_on(&stack.summary_for(&unrelated, &c).await, &stack.a);
+    stack.close_a().await;
+    let shown = stack.summary_for(&unrelated, &c).await;
+    assert!(!reasons(&shown["notReady"]).contains("stacked"), "{shown}");
+}
+
+fn workflow(order: &[&str]) -> Value {
+    let category = |key: &str| match key {
+        "backlog" => "backlog",
+        "todo" => "unstarted",
+        "done" => "completed",
+        "canceled" => "canceled",
+        _ => "started",
+    };
+    let statuses: Vec<Value> = order
+        .iter()
+        .map(|key| json!({ "key": key, "name": key, "category": category(key) }))
+        .collect();
+    json!({
+        "statuses": statuses,
+        "moves": { "claim": "in-progress", "review": "in-review", "merge": "merged", "release": "todo" },
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_that_puts_a_stacked_issue_at_merge_ahead_of_its_base_is_refused() {
+    let stack = Stack::new().await;
+    let human = stack.human();
+    let c = create(&stack.board, &human, "Name the headers").await;
+    let d = create(&stack.board, &human, "Index the named headers").await;
+    stack.link("stacked-on", &d, &c).await.expect("D on C");
+    stack
+        .move_to(&human, &d, "in-progress")
+        .await
+        .expect("D starts");
+
+    let refused = stack
+        .board
+        .failure(
+            &human,
+            "project.update",
+            json!({
+                "project": "ABC",
+                "workflow": workflow(&["backlog", "todo", "merged", "in-progress", "in-review", "done", "canceled"]),
+            }),
+        )
+        .await;
+    assert_eq!(
+        refused,
+        json!({ "_tag": "MergedBeforeBase", "issues": [d] })
+    );
+    let project = stack.board.ok(&human, "project.list", json!({})).await;
+    assert_eq!(
+        project["items"][0]["workflow"]["statuses"][2]["key"],
+        "in-progress"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_change_that_makes_every_base_merged_releases_a_held_landing() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    stack.hold_b().await;
+
+    stack
+        .board
+        .ok(
+            &stack.human(),
+            "project.update",
+            json!({
+                "project": "ABC",
+                "workflow": workflow(&["backlog", "todo", "in-progress", "merged", "in-review", "done", "canceled"]),
+            }),
+        )
+        .await;
+    assert_eq!(stack.status(&stack.b).await, "merged");
+}
+
+async fn import(stack: &Stack, findings: Value) -> Value {
+    stack
+        .board
+        .ok(
+            &stack.human(),
+            "findings.import",
+            json!({ "tool": "linter", "findings": findings }),
+        )
+        .await
+}
+
+fn finding(key: &str) -> Value {
+    json!({ "key": key, "title": format!("Finding {key}"), "description": "As reported." })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_does_not_finish_a_finding_stacked_on_an_unmerged_base_and_goes_on() {
+    let stack = Stack::new().await;
+    let first = import(&stack, json!([finding("stacked"), finding("plain")])).await;
+    let stacked = first["created"]["issues"][0]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let plain = first["created"]["issues"][1]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    stack
+        .link("stacked-on", &stacked, &stack.a)
+        .await
+        .expect("the finding is stacked on A");
+
+    let second = import(&stack, json!([])).await;
+    assert_eq!(second["finished"]["issues"], json!([plain]), "{second}");
+    assert_eq!(second["left"]["issues"], json!([stacked]), "{second}");
+    assert_eq!(stack.status(&stacked).await, "todo");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_that_finishes_a_base_releases_its_held_landing() {
+    let stack = Stack::new().await;
+    let first = import(&stack, json!([finding("base")])).await;
+    let base = first["created"]["issues"][0]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    stack
+        .board
+        .ok(
+            &stack.human(),
+            "issue.link",
+            json!({ "issue": stack.b, "kind": "stacked-on", "target": stack.a, "remove": true }),
+        )
+        .await;
+    stack
+        .link("stacked-on", &stack.b, &base)
+        .await
+        .expect("B on the finding");
+    stack.hold_b().await;
+
+    let second = import(&stack, json!([])).await;
+    assert_eq!(second["finished"]["issues"], json!([base]), "{second}");
+    assert_eq!(stack.status(&stack.b).await, "merged");
 }

@@ -19,6 +19,6 @@ pub use issue::{Assignee, Caller, Claim, HolderKey, Issue, IssueId, Project, Wor
 pub use lifecycle::{Change, ClaimAfter, Event, Landing, Outcome, create_status, decide};
 pub use project::check_project_update;
 pub use readiness::{Readiness, Wait, WaitKind, readiness};
-pub use stack::{Base, STACKED_ON, Stage, holding_back, may_reach};
+pub use stack::{Base, STACKED_ON, Stage, holding_back, may_reach, may_stack};
 pub use waits::{RelationChange, WaitGraph};
 pub use workflow::{Category, Move, Moves, Status, Workflow, WorkflowStatus};

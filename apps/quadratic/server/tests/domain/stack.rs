@@ -6,13 +6,14 @@ use quadratic_server::domain::{
     decide, readiness,
 };
 
-use super::support::{Board, agent, boards, claim_of, claimed, human};
+use super::support::{Board, DEMO_REPOSITORY, agent, boards, claim_of, claimed, human};
 
 fn base(stage: Stage, branch: Option<&str>) -> Base {
     Base {
         on: "DEM-1".into(),
         stage,
         branch: branch.map(Into::into),
+        repository: Some(DEMO_REPOSITORY.into()),
     }
 }
 
@@ -189,6 +190,7 @@ fn an_issue_stacked_on_two_issues_waits_for_both() {
             on: "DEM-2".into(),
             stage: Stage::BeforeReview,
             branch: None,
+            repository: Some(DEMO_REPOSITORY.into()),
         },
     ];
     let issue = stacked(board.issue("todo"), bases);
@@ -310,4 +312,45 @@ fn every_stacked_reason_names_its_base_in_blockers() {
             "{stage:?}"
         );
     }
+}
+
+fn claim_after_merge() -> Board {
+    let mut board = Board::default_workflow();
+    let statuses = &mut board.project.workflow.statuses;
+    let merged = statuses.remove(4);
+    statuses.insert(2, merged);
+    board
+}
+
+#[test]
+fn every_move_that_ends_at_or_after_the_merge_status_waits_for_the_bases() {
+    let board = claim_after_merge();
+    assert_eq!(board.project.workflow.validate(), Ok(()));
+    let holder = containing(agent(), &["parse"]);
+    let unclaimed = stacked(
+        board.issue("todo"),
+        vec![base(Stage::InReview, Some("parse"))],
+    );
+    let claim = Event::Claim {
+        waits: vec![],
+        at: "2026-11-24T10:00:00Z".into(),
+        worktree: None,
+    };
+    assert_eq!(
+        decide(&claim, &unclaimed, &holder, &board.project),
+        Err(base_not_merged(&["DEM-1"])),
+        "a claim into a status after the merge status"
+    );
+    let held = claimed(
+        stacked(
+            board.issue("in-progress"),
+            vec![base(Stage::InReview, Some("parse"))],
+        ),
+        claim_of(&holder),
+    );
+    assert_eq!(
+        decide(&Event::Close, &held, &holder, &board.project),
+        Err(base_not_merged(&["DEM-1"])),
+        "a close from a feature branch into a review status after the merge status"
+    );
 }

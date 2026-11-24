@@ -5,6 +5,8 @@ use quadratic_server::domain::{
     WorkflowStatus, WorkingCopy,
 };
 
+pub const DEMO_REPOSITORY: &str = "/home/sam/code/demo/.git";
+
 pub struct Board {
     pub label: &'static str,
     pub project: Project,
@@ -120,7 +122,7 @@ fn project(workflow: Workflow) -> Project {
     Project {
         workflow,
         default_branch: "main".into(),
-        repository: Some("/home/sam/code/demo/.git".into()),
+        repository: Some(DEMO_REPOSITORY.into()),
     }
 }
 
@@ -143,7 +145,7 @@ pub fn agent_in(worktree: &str, branch: &str) -> Caller {
     Caller {
         actor: actor(ActorKind::Agent, &format!("claude-code@{directory}"), None),
         working_copy: WorkingCopy {
-            repository: Some("/home/sam/code/demo/.git".into()),
+            repository: Some(DEMO_REPOSITORY.into()),
             worktree: Some(worktree.into()),
             branch: Some(branch.into()),
             contains: None,

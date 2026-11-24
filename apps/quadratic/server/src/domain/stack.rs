@@ -46,17 +46,32 @@ pub struct Base {
     pub stage: Stage,
     /// The branch of the base's claim, while it has one.
     pub branch: Option<String>,
+    /// The repository that the base's project is bound to.
+    pub repository: Option<String>,
 }
 
 impl Base {
-    /// The caller works from the base's branch: that branch is the caller's branch, or the
-    /// caller's branch contains its tip. A base with no claim, or a caller whose branches could
-    /// not be read, never counts as such.
+    /// The caller works from the base's branch: the caller is in the repository that the
+    /// base's project is bound to, and git verified there that the caller's branch is the base's
+    /// branch or contains its tip. A base with no claim or no repository, or a caller whose
+    /// branch was not verified, never counts as such.
     pub fn starts(&self, caller: &Caller) -> bool {
-        let (Some(branch), Some(contained)) = (&self.branch, &caller.working_copy.contains) else {
+        let copy = &caller.working_copy;
+        let (Some(branch), Some(repository), Some(contained)) =
+            (&self.branch, &self.repository, &copy.contains)
+        else {
             return false;
         };
-        contained.contains(branch)
+        copy.repository.as_ref() == Some(repository) && contained.contains(branch)
+    }
+
+    /// Whether `caller` can start the issue only once git confirms its branch: the base is in
+    /// review, has a branch, and its project's repository is the caller's.
+    pub fn asks_git(&self, caller: &Caller) -> bool {
+        self.stage == Stage::InReview
+            && self.branch.is_some()
+            && self.repository.is_some()
+            && self.repository == caller.working_copy.repository
     }
 
     /// Whether this base keeps `issue` from being ready, or, for an issue already held, whether
@@ -82,6 +97,24 @@ pub fn holding_back(issue: &Issue, caller: &Caller) -> Vec<IssueId> {
         .filter(|base| base.holds_back(issue, caller))
         .map(|base| base.on.clone())
         .collect()
+}
+
+/// A `stacked-on` link may not join an issue at the `merge` status or later to a base that is
+/// not merged.
+pub fn may_stack(
+    issue: &IssueId,
+    stage: Stage,
+    base: &IssueId,
+    base_stage: Stage,
+) -> Result<(), Failure> {
+    if stage == Stage::Merged && base_stage != Stage::Merged {
+        Err(Failure::BaseNotMerged {
+            issue: issue.clone(),
+            bases: vec![base.clone()],
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// An issue moves to the workflow's `merge` status, or a later status that is not canceled,

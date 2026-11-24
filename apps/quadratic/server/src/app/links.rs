@@ -2,12 +2,13 @@ use acid_cat_core::CapabilityDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::board::{Board, require_issue};
+use super::board::{self, Board, require_issue};
 use super::catalog::capability;
 use super::lifecycle::release_held;
 use super::model::{IssueSummary, Relation};
-use super::{Context, Refused, finish};
-use crate::domain::{RelationChange, STACKED_ON};
+use super::{Context, Refused, finish, model};
+use crate::domain::{RelationChange, STACKED_ON, Stage, may_stack};
+use crate::store::View;
 
 #[derive(Deserialize)]
 pub(super) struct LinkInput {
@@ -45,7 +46,16 @@ async fn link_issues(context: &Context, input: LinkInput) -> Result<Relations, R
             } else {
                 if let Some(change) = RelationChange::link(&input.issue, &input.kind, &input.target)
                 {
-                    Board::load(tx)?.check(&change)?;
+                    let board = Board::load(tx)?;
+                    board.check(&change)?;
+                    if input.kind == STACKED_ON {
+                        may_stack(
+                            &input.issue,
+                            stage_of(tx, &input.issue)?,
+                            &input.target,
+                            stage_of(tx, &input.target)?,
+                        )?;
+                    }
                 }
                 tx.add_relation(&input.issue, &input.kind, &input.target)?;
             }
@@ -58,4 +68,12 @@ async fn link_issues(context: &Context, input: LinkInput) -> Result<Relations, R
         })
         .await?;
     Ok(Relations { issue, relations })
+}
+
+fn stage_of(view: &View<'_>, id: &str) -> Result<Stage, Refused> {
+    let record = board::issue(view, id)?;
+    let project = board::project(view, &record.project)?;
+    let workflow = model::workflow(&project.workflow)?;
+    let category = record.category.as_deref().and_then(model::category);
+    Ok(Stage::of(&workflow, &record.status, category))
 }

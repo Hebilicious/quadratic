@@ -4,8 +4,9 @@ use acid_cat_core::{CapabilityDefinition, NoInput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::board::all_issues;
+use super::board::{Board, all_issues};
 use super::catalog::{capability, capability_without_input};
+use super::lifecycle::release_held;
 use super::model::{self, Project};
 use super::{Context, Refused, finish};
 use crate::domain::{Failure, Workflow, check_project_update};
@@ -152,10 +153,22 @@ async fn update_project(context: &Context, input: UpdateInput) -> Result<Project
         )?;
         if let Some(workflow) = &input.workflow {
             tx.replace_workflow(&current.key, &model::stored_workflow(workflow)?)?;
+            keep_stacks_in_order(tx)?;
         }
         Ok(current.key)
     })
     .await
+}
+
+/// Under a new workflow no stacked issue may count as merged ahead of a base, and a held
+/// landing whose bases now count as merged moves on.
+fn keep_stacks_in_order(tx: &mut Tx<'_>) -> Result<(), Refused> {
+    let issues = Board::load(tx)?.merged_before_base();
+    if !issues.is_empty() {
+        return Err(Failure::MergedBeforeBase { issues }.into());
+    }
+    let held = tx.held_merges()?;
+    release_held(tx, held)
 }
 
 async fn project_written<F>(
