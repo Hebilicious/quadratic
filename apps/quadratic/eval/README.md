@@ -117,51 +117,47 @@ cannot produce it again from here. Run the comparison to produce your own table.
 It was measured under these conditions:
 
 - lific v2.11.1 and Beads v1.3.4, the releases that the harness pins.
-- Quadratic built from an earlier version of this source. Its skill has changed since, so the
-  token rows of a new run differ.
+- Quadratic built from this source as it was when the table was saved. A later change to the
+  skill or to the catalog changes the token rows of a new run.
 - Every session ran Claude Opus 5.5 at medium effort, with the prompt above.
-- lific's and Beads' agent rows come from one run of three sessions each, and Quadratic's from two
-  runs of three sessions. The scripted rows come from one run of 50 rounds × 3 repeats.
-- The table was combined from those runs with `report --from`. Each cell lists each run's value.
+- Every row comes from one run: three sessions for each tracker, and the scripted measures at
+  50 rounds × 3 repeats. `report --run` wrote the table; each cell lists each session's or each
+  repeat's value.
 
 | Row | Quadratic | lific | Beads | Quadratic's result |
 |---|---|---|---|---|
-| Tasks completed (one value per run) | 3; 3 | 2 | 1 | won |
+| Tasks completed (one value per run) | 3 (3 of 3 sessions) | 1 (1 of 3 sessions) | 2 (3 of 3 sessions) | won |
 | Double claims, default identities (per repeat of 50) | 0; 0; 0 | 50; 50; 50 | 50; 50; 50 | won |
 | Double claims, one identity per agent (second row) | 0; 0; 0 | 50; 50; 50 | 0; 0; 0 | tied with Beads |
 | Double claims, lific passing `expected_seq` (second row) | – | 0; 0; 0 | – | – |
-| Lost updates, two appends (per repeat of 50 writes) | 0; 0; 0 (25 refused each) | 0; 0; 0 | 0; 0; 0 | tied |
-| Lost updates, two read-modify-writes | 0; 0; 0 (25 refused each) | 25; 25; 25 | 4; 6; 5 | won |
-| Lost updates, read-modify-write, lific passing `expected_seq` (second row) | – | 0; 0; 0 (25 refused each) | – | – |
-| Double claims in the agent runs | 0; 0 (record) | not established (transcripts: 1) | not established (transcripts: 2) | not compared |
-| Lost updates in the agent runs | 0 of 3; 0 of 3 checked | 0 of 3 | 2 of 3 | tied with lific |
-| Tracker instructions that reached each session | 875; 875; 875; 875; 1,510–1,640; 914 | 1,832 × 3 | 3,109 × 3 | won |
-| Tracker text at the first request (second row) | 39 × 6 | 698 × 3 | 2,159 × 3 | won |
-| First request's billed input (second row) | 8,131 × 3; 8,119 × 3 | 9,046 × 3 | 11,257 × 3 | won |
-| Whole MCP tool list (second row) | 6,431 | 5,783 | 13,522 | lost to lific |
-| Tracker tokens per distinct task (one range per run) | 2,030–2,376; 2,122–2,485 | 3,652 | 9,948–13,695 | won |
-| Tracker tokens per session (second row) | 1,780–2,098; 2,185–2,593; 2,125–2,437; 2,222–2,527; 2,303–2,769; 1,840–2,159 | 2,266; 2,713; 2,325 | 3,545–4,161; 3,168–4,735; 3,235–4,799 | tied with lific |
+| Lost updates, two appends (per repeat of 50 writes) | 0 (25 refused); 0 (25 refused); 0 (25 refused) | 0; 0; 0 | 0; 0; 0 | tied |
+| Lost updates, two read-modify-writes | 0 (25 refused); 0 (25 refused); 0 (25 refused) | 25; 25; 25 | 11; 14; 12 | won |
+| Lost updates, read-modify-write, lific passing `expected_seq` (second row) | – | 0 (25 refused); 0 (25 refused); 0 (25 refused) | – | – |
+| Double claims in the agent runs | 0 (transcripts: 0) | not established (transcripts: 2) | not established (transcripts: 1) | not compared |
+| Lost updates in the agent runs | 0 of 3 checked, 3 made | 0 of 3 checked, 3 made | 1 of 2 checked, 3 made | tied with lific |
+| Tracker instructions that reached each session | 1,023; 1,023; 1,023 | 1,832; 1,832; 1,832 | 3,109; 3,109; 3,109 | won |
+| Tracker text at the first request (second row) | 39; 39; 39 | 698; 698; 698 | 2,159; 2,159; 2,159 | won |
+| First request's billed input (second row) | 8,127; 8,127; 8,127 | 9,053; 9,053; 9,053 | 11,262; 11,262; 11,262 | won |
+| Whole MCP tool list (second row) | 6,734 (11 tools) | 5,783 (31 tools) | 13,522 (18 tools) | lost to lific |
+| Tracker tokens per distinct task (one range per run) | 2,371–2,702 | 7,709 | 5,002–7,404 | won |
+| Tracker tokens per session (second row) | 2,350–2,643; 2,296–2,624; 2,466–2,839 | 2,278; 2,720; 2,711 | 3,258–4,681; 3,288–4,970; 3,457–5,158 | tied with lific |
 | Setup steps | 2 | 5 | 1 | lost to Beads |
-| Files written into the repository | 2 | 2 | 19 | tied with lific |
+| Files written into the repository | 2 | 2 | 18 | tied with lific |
 | Lines added to `.git/config` | 0 | 0 | 3 | tied with lific |
 | Files written outside the repository (second row) | 6 | 7 | 1 | – |
-| The human's question on the command line: facts and steps (a proxy for the human's time) | 4 of 4 facts, 2 commands | 1 of 3, 3 commands | 1 of 3, 2 commands | won |
-| History questions, default identities | 10 right | 5 right, 3 wrong, 2 not possible | 5 right, 3 wrong, 2 not possible | won |
-| History questions, one identity per agent (second row) | 10 right | 8 right, 2 not possible | 8 right, 2 not possible | won |
-| A real merge, shown with no tracker command | right: `merged` on the first read | not possible (`done` since the agent's finish) | not possible (`closed`) | not compared |
-| Moving the issue on after a deploy | 2 commands (`show`, `issue update --status done`) | not possible | not possible | not compared |
-| A checker's run, then one finding gone | right: 1 import command per run | workaround: a script, 3 and 2 commands | workaround: a script, 3 and 2 commands | not compared |
-
-One Quadratic session ran `quadratic instructions | grep -A3 review` to find how to ask for a
-review. The answer is one line of JSON, so `grep` returned the whole reference: that is the
-session at 1,510–1,640 tokens of instructions.
+| The human's question on the command line: facts and steps (a proxy for the human's time) | 4 of 4 facts, 2 commands | 1 of 3 facts, 3 commands (not possible: t8 waits on the human (review)) | 1 of 3 facts, 2 commands (not possible: t8 waits on the human (review)) | won |
+| History questions, default identities | 10 right, 0 wrong, 0 not possible (2 commands) | 5 right, 3 wrong, 2 not possible (11 commands) | 5 right, 3 wrong, 2 not possible (12 commands) | won |
+| History questions, one identity per agent (second row) | 10 right, 0 wrong, 0 not possible (2 commands) | 8 right, 0 wrong, 2 not possible (11 commands) | 8 right, 0 wrong, 2 not possible (12 commands) | won |
+| A real merge, shown with no tracker command | right: `merged` (1 read; `in-review` before the merge) | not possible: `done` (1 read; `done` before the merge) | not possible: `closed` (1 read; `closed` before the merge) | not compared |
+| Moving the issue on after a deploy | 2 commands to `done` | not possible: shows `done` since the agent's finish | not possible: shows `closed` since the agent's finish | not compared |
+| A checker's run, then one finding gone | right: 1 and 1 commands, through its import | workaround: 3 and 2 commands, through a script around its own commands | workaround: 3 and 2 commands, through a script around its own commands | not compared |
 
 ### Where Quadratic loses or ties
 
 | Row | Why | What would move it |
 |---|---|---|
 | Setup steps (2 against Beads' 1) | `quadratic init` makes no commit by design: it prints the `git commit` for the person to run, and the harness counts that commit. `bd init` commits by itself | Let `init` commit its files |
-| Whole MCP tool list (6,431 against 5,783) | Each tool bundles the types it uses: `issue.list`, `issue.create` and `issue.update` are 3,629 of the 6,431, and `history.query` 650. The `Date` and `Time` types, whose patterns check real dates, are 145 and 192 tokens with their descriptions, and repeat in four tools | A shorter `Date` or `Time` pattern changes what the server accepts. The definitions a session fetches for the usual path (`ready`, `claim`, `close`, `update`, `get`, `list`) are 3,967 tokens (4,617 with `history.query`), against 1,081 for lific's five |
+| Whole MCP tool list (6,734 against 5,783) | Each tool bundles the types it uses, so the types of an issue repeat in `issue.list`, `issue.create` and `issue.update`, which are the largest tools. The `Date` and `Time` types, whose patterns check real dates, repeat in four tools | A shorter `Date` or `Time` pattern changes what the server accepts. A session fetches only the definitions of the tools it uses: the row of the tracker instructions that reached each session is won |
 | Tracker tokens per session (tied with lific) | The skill is the largest piece, then `claim` and `close`, which answer the whole issue. A refused claim answers the holder's claim with its worktree path; sessions that tried a held issue first paid that once or twice | A shorter skill; or answers that leave out empty arrays and the claim's worktree for the agent's route, which changes catalog types that the web app reads. More sessions per tracker would show whether the overlap is real |
 
 ### What each row measures
@@ -222,8 +218,8 @@ session at 1,510–1,640 tokens of instructions.
 
 - The races count outcomes, not times, but the load of the machine that runs them changes how
   often two writes meet.
-- The agent runs are one or two runs per tracker. With three sessions, one changed decision moves
-  a row by one.
+- The agent runs are one run per tracker. With three sessions, one changed decision moves a row
+  by one.
 - The human's question and the history questions use the tracker's command line. lific's and
   Quadratic's web UIs are not measured.
 - lific's human acts through its CLI, which its log names "system". The harness accepts that as
