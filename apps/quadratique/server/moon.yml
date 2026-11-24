@@ -38,6 +38,19 @@ tasks:
     options:
       cache: false
       runInCI: false
+  preflight:
+    description: "Before cargo publish: fail when a crate lacks the staged web app (or it is not the current build), the catalog JSON, the skill files or the licence, including a link that a checkout without symbolic links wrote as a plain file."
+    command: "sh preflight.sh"
+    deps: ["quadratique-web:build"]
+    options:
+      cache: false
+      runInCI: false
+  package-test:
+    description: "The preflight's cases, and how build.rs embeds the web app: in the repository with and without the feature, and in a packaged crate with and without the feature, next to an unrelated web folder, and without its staged web app."
+    command: "sh package-test.sh"
+    deps: ["quadratique-web:build"]
+    inputs: ["@group(sources)", "@group(workspace)", "preflight.sh", "package-test.sh", "/apps/quadratique/web/dist/**/*", "/apps/quadratique/cli/src/skill/*", "/apps/quadratique/cli/LICENSE", "/apps/quadratique/skill/quadratique/*.md", "/LICENSE"]
+    tags: ["candidate"]
   lint:
     command: "cargo clippy -p quadratique-server --all-targets -- -D warnings"
     inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]

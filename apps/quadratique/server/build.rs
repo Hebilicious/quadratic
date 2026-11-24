@@ -5,31 +5,38 @@ mod assets;
 
 const DIST_VARIABLE: &str = "QUADRATIQUE_WEB_DIST";
 const PACKAGED_DIST: &str = "web-dist";
+/// A file of this crate's folder in the repository that `include` keeps out of the package: only the repository has it.
+const REPOSITORY_MARKER: &str = "moon.yml";
 
-/// Embeds the built web app in two cases. With the feature `embedded-web`, as the release build does, it embeds
-/// `QUADRATIQUE_WEB_DIST`, else `../web/dist`. Without it, a crate packaged for crates.io, which has no source tree
-/// around it but carries a copy of the web app in `web-dist`, embeds that copy. A build in the source tree without the
-/// feature embeds nothing: it reads `../web/dist` at each request.
+/// In the repository, the built web app is embedded only with the feature `embedded-web`, as the release build asks:
+/// `QUADRATIQUE_WEB_DIST`, else `../web/dist`. Any other build there embeds nothing and reads `../web/dist` at each
+/// request. A packaged crate, as crates.io serves it, always embeds the copy it carries in `web-dist`, with or without
+/// the feature, and fails to build when that copy is missing.
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=src/assets.rs");
     println!("cargo::rustc-check-cfg=cfg(embedded_web)");
     println!("cargo::rerun-if-env-changed={DIST_VARIABLE}");
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
-    let source_tree = manifest.join("../web");
-    let packaged = manifest.join(PACKAGED_DIST);
-    if !source_tree.exists() {
-        println!("cargo::rerun-if-changed={}", packaged.display());
-    }
-    let dist = if std::env::var_os("CARGO_FEATURE_EMBEDDED_WEB").is_some() {
-        std::env::var_os(DIST_VARIABLE)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| source_tree.join("dist"))
-    } else if !source_tree.exists() && packaged.join("index.html").is_file() {
-        packaged
+    let chosen = std::env::var_os(DIST_VARIABLE)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let feature = std::env::var_os("CARGO_FEATURE_EMBEDDED_WEB").is_some();
+    let dist = if manifest.join(REPOSITORY_MARKER).is_file() {
+        if !feature {
+            return;
+        }
+        chosen.unwrap_or_else(|| manifest.join("../web/dist"))
     } else {
-        return;
+        let packaged = manifest.join(PACKAGED_DIST);
+        println!("cargo::rerun-if-changed={}", packaged.display());
+        if chosen.is_none() && !packaged.join("index.html").is_file() {
+            panic!(
+                "this quadratique-server crate was packaged without its web app: {} has no index.html. Run `moon run quadratique-server:stage-web` before `cargo package`",
+                packaged.display()
+            );
+        }
+        chosen.unwrap_or(packaged)
     };
     println!("cargo::rustc-cfg=embedded_web");
     println!("cargo::rerun-if-changed={}", dist.display());
