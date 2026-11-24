@@ -11,32 +11,32 @@ const REPOSITORY_MARKER: &str = "moon.yml";
 /// In the repository, the built web app is embedded only with the feature `embedded-web`, as the release build asks:
 /// `QUADRATIQUE_WEB_DIST`, else `../web/dist`. Any other build there embeds nothing and reads `../web/dist` at each
 /// request. A packaged crate, as crates.io serves it, always embeds the copy it carries in `web-dist`, with or without
-/// the feature, and fails to build when that copy is missing.
+/// the feature and whatever `QUADRATIQUE_WEB_DIST` says, and fails to build when that copy is missing.
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=src/assets.rs");
     println!("cargo::rustc-check-cfg=cfg(embedded_web)");
     println!("cargo::rerun-if-env-changed={DIST_VARIABLE}");
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
-    let chosen = std::env::var_os(DIST_VARIABLE)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
     let feature = std::env::var_os("CARGO_FEATURE_EMBEDDED_WEB").is_some();
     let dist = if manifest.join(REPOSITORY_MARKER).is_file() {
         if !feature {
             return;
         }
-        chosen.unwrap_or_else(|| manifest.join("../web/dist"))
+        std::env::var_os(DIST_VARIABLE)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| manifest.join("../web/dist"))
     } else {
         let packaged = manifest.join(PACKAGED_DIST);
         println!("cargo::rerun-if-changed={}", packaged.display());
-        if chosen.is_none() && !packaged.join("index.html").is_file() {
+        if !packaged.join("index.html").is_file() {
             panic!(
                 "this quadratique-server crate was packaged without its web app: {} has no index.html. Run `moon run quadratique-server:stage-web` before `cargo package`",
                 packaged.display()
             );
         }
-        chosen.unwrap_or(packaged)
+        packaged
     };
     println!("cargo::rustc-cfg=embedded_web");
     println!("cargo::rerun-if-changed={}", dist.display());

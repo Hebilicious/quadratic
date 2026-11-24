@@ -565,18 +565,21 @@ repository without asking:
 
 - A packaged crate, as crates.io serves it, embeds the copy of the built web app it carries in
   `server/web-dist` (ignored by git), which `moon run quadratique-server:stage-web` writes. Its
-  `build.rs` fails, and says to stage it, when that copy is missing. It tells a package from the
-  repository by `server/moon.yml`, which the package leaves out.
+  `build.rs` fails, and says to stage it, when that copy is missing, and ignores
+  `QUADRATIQUE_WEB_DIST`. It tells a package from the repository by `server/moon.yml`, which the
+  package leaves out.
 - In the repository, the release build (`install/build.sh`) asks for it with the feature
-  `embedded-web`, which embeds `web/dist`.
+  `embedded-web`, which embeds the folder that `QUADRATIQUE_WEB_DIST` names, else `web/dist`.
 - Any other build in the repository embeds nothing and reads `web/dist` at each request, as "See a
   change in the web app" describes.
 
-`moon run quadratique-server:preflight` fails when a crate lacks the staged web app (or it is not
-the current build of `web/dist`), the catalog JSON, a skill file or the licence. It also catches
-a checkout without symbolic links, where git writes each link as a plain file holding a path.
+`moon run quadratique-server:preflight` first builds the web app and stages it (it depends on
+`stage-web`), then fails when a crate lacks the staged web app (or it is not the current build of
+`web/dist`), the catalog JSON, a skill file or the licence. It also catches a checkout without
+symbolic links, where git writes each link as a plain file holding a path.
 `moon run quadratique-server:package-test` checks the preflight's cases and each case of
-`build.rs`.
+`build.rs`, on a copy of the crates that it stages and packages itself: it leaves this checkout's
+`server/web-dist` as it was.
 
 ## Releasing
 
@@ -598,8 +601,8 @@ To publish a release to crates.io (by hand: no workflow does it yet):
    request so that the tagged commit can be published. Do not delete the key: both crates
    inherit it (`publish.workspace = true`).
 2. Check out the tag: `git checkout refs/tags/v<version>`, then `pnpm install --frozen-lockfile`.
-3. Stage the web app and run the preflight:
-   `moon run quadratique-server:stage-web quadratique-server:preflight`.
+3. Stage the web app and check both crates: `moon run quadratique-server:preflight` (it stages
+   the web app first, then checks).
 4. From `apps/quadratique`, with a crates.io API token in `CARGO_REGISTRY_TOKEN`:
    `cargo publish --workspace --allow-dirty`. Cargo publishes `quadratique-server` first, then
    `quadratique`, which depends on it. (`--allow-dirty`: the staged `web-dist` is not in git.)

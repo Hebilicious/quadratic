@@ -39,9 +39,9 @@ tasks:
       cache: false
       runInCI: false
   preflight:
-    description: "Before cargo publish: fail when a crate lacks the staged web app (or it is not the current build), the catalog JSON, the skill files or the licence, including a link that a checkout without symbolic links wrote as a plain file."
+    description: "Before cargo publish: stage the web app (stage-web runs first), then fail when a crate lacks the staged web app (or it is not the current build), the catalog JSON, the skill files or the licence, including a link that a checkout without symbolic links wrote as a plain file."
     command: "sh preflight.sh"
-    deps: ["quadratique-web:build"]
+    deps: ["~:stage-web"]
     options:
       cache: false
       runInCI: false
