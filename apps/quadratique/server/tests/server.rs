@@ -11,6 +11,8 @@ mod changed;
 mod claims;
 #[path = "server/creation.rs"]
 mod creation;
+#[path = "server/ended_holder.rs"]
+mod ended_holder;
 #[path = "server/failures.rs"]
 mod failures;
 #[path = "server/findings.rs"]
