@@ -17,6 +17,7 @@ pub(crate) struct Board {
 /// What the `stacked-on` rules read of an issue at either end of such a link. Only those
 /// issues are read: a board without the link reads no project and no stage.
 struct Node {
+    project: String,
     stage: Stage,
     branch: Option<String>,
     repository: Option<String>,
@@ -74,6 +75,7 @@ impl Board {
                 stacked.insert(
                     node.id.clone(),
                     Node {
+                        project: node.project.clone(),
                         stage,
                         branch: node.claim_branch.clone(),
                         repository,
@@ -117,19 +119,26 @@ impl Board {
         branches
     }
 
-    /// The issues at the `merge` status or later that are stacked on an issue not yet merged.
-    pub(crate) fn merged_before_base(&self) -> Vec<IssueId> {
-        self.stacked
-            .iter()
-            .filter(|(id, node)| {
-                node.stage == Stage::Merged
-                    && self
-                        .bases(id)
-                        .iter()
-                        .any(|base| base.stage != Stage::Merged)
-            })
-            .map(|(id, _)| id.clone())
-            .collect()
+    /// The pairs (issue, base) with an end in `project` where the issue is at the `merge`
+    /// status or later and the base is not merged.
+    pub(crate) fn out_of_order(&self, project: &str) -> BTreeSet<(IssueId, IssueId)> {
+        let in_project = |id: &str| {
+            self.stacked
+                .get(id)
+                .is_some_and(|node| node.project == project)
+        };
+        let mut pairs = BTreeSet::new();
+        for (id, node) in &self.stacked {
+            if node.stage != Stage::Merged {
+                continue;
+            }
+            for base in self.bases(id) {
+                if base.stage != Stage::Merged && (in_project(id) || in_project(&base.on)) {
+                    pairs.insert((id.clone(), base.on));
+                }
+            }
+        }
+        pairs
     }
 
     pub(crate) fn waits(&self, id: &str) -> Vec<Wait> {

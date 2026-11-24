@@ -928,3 +928,79 @@ async fn an_import_that_finishes_a_base_releases_its_held_landing() {
     assert_eq!(second["finished"]["issues"], json!([base]), "{second}");
     assert_eq!(stack.status(&stack.b).await, "merged");
 }
+
+/// A merged, then B merged, then A moved back before the `merge` status by hand.
+async fn out_of_order(stack: &Stack) {
+    let human = stack.human();
+    stack.close_a().await;
+    stack
+        .move_to(&human, &stack.a, "merged")
+        .await
+        .expect("A merges");
+    stack
+        .move_to(&human, &stack.b, "merged")
+        .await
+        .expect("B merges");
+    stack
+        .move_to(&human, &stack.a, "in-review")
+        .await
+        .expect("A goes back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_change_is_refused_only_for_an_order_it_breaks() {
+    let stack = Stack::new().await;
+    out_of_order(&stack).await;
+    let human = stack.human();
+    let elsewhere = Who {
+        repository: None,
+        worktree: None,
+        branch: None,
+        ..human.clone()
+    };
+    stack
+        .board
+        .ok(
+            &elsewhere,
+            "project.create",
+            json!({ "key": "XYZ", "name": "Project XYZ" }),
+        )
+        .await;
+    let order = [
+        "backlog",
+        "todo",
+        "in-progress",
+        "in-review",
+        "merged",
+        "done",
+        "canceled",
+    ];
+
+    for project in ["XYZ", "ABC"] {
+        let updated = stack
+            .board
+            .call(
+                &human,
+                "project.update",
+                json!({ "project": project, "workflow": workflow(&order) }),
+            )
+            .await;
+        assert!(updated.is_ok(), "{project}: {updated:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_a_link_that_exists_changes_nothing_and_succeeds() {
+    let stack = Stack::new().await;
+    out_of_order(&stack).await;
+
+    let repeated = stack
+        .link("stacked-on", &stack.b, &stack.a)
+        .await
+        .expect("the link exists");
+    assert_eq!(
+        repeated["relations"].as_array().map(Vec::len),
+        Some(1),
+        "{repeated}"
+    );
+}

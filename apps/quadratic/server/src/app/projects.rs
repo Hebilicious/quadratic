@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use acid_cat_core::{CapabilityDefinition, NoInput};
@@ -152,18 +153,29 @@ async fn update_project(context: &Context, input: UpdateInput) -> Result<Project
             },
         )?;
         if let Some(workflow) = &input.workflow {
+            let before = Board::load(tx)?.out_of_order(&current.key);
             tx.replace_workflow(&current.key, &model::stored_workflow(workflow)?)?;
-            keep_stacks_in_order(tx)?;
+            keep_stacks_in_order(tx, &current.key, &before)?;
         }
         Ok(current.key)
     })
     .await
 }
 
-/// Under a new workflow no stacked issue may count as merged ahead of a base, and a held
-/// landing whose bases now count as merged moves on.
-fn keep_stacks_in_order(tx: &mut Tx<'_>) -> Result<(), Refused> {
-    let issues = Board::load(tx)?.merged_before_base();
+/// A new workflow may not put a stacked issue at the `merge` status or later ahead of a base
+/// where the current workflow had them in order; a pair already out of order stays allowed. A
+/// held landing whose bases now count as merged moves on.
+fn keep_stacks_in_order(
+    tx: &mut Tx<'_>,
+    project: &str,
+    before: &BTreeSet<(String, String)>,
+) -> Result<(), Refused> {
+    let after = Board::load(tx)?.out_of_order(project);
+    let mut issues: Vec<String> = after
+        .difference(before)
+        .map(|(issue, _)| issue.clone())
+        .collect();
+    issues.dedup();
     if !issues.is_empty() {
         return Err(Failure::MergedBeforeBase { issues }.into());
     }
