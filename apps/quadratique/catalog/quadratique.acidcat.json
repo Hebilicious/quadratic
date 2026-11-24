@@ -16,7 +16,7 @@
               "capability": "issue.claim"
             },
             "close": {
-              "capability": "issue.close"
+              "capability": "issues.close"
             },
             "create": {
               "capability": "issue.create"
@@ -299,7 +299,7 @@
       "type": "object"
     },
     "Claim": {
-      "description": "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time.",
+      "description": "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time. Its session is the holder's `harness` and `session`, not `hostThread`; a holder without both has none.",
       "properties": {
         "branch": {
           "description": "The git branch of the holder.",
@@ -2028,7 +2028,7 @@
             "type": "array"
           },
           "claim": {
-            "description": "`mine`: held by the caller, the same actor name in the same worktree. `any`: claimed by anyone. `none`: unclaimed.",
+            "description": "`mine`: held by the caller's session, or by its name in its worktree. `any`: claimed by anyone. `none`: unclaimed.",
             "enum": [
               "mine",
               "any",
@@ -2364,6 +2364,86 @@
         },
         "UnknownStatus": {
           "$ref": "#/$defs/UnknownStatus"
+        }
+      }
+    },
+    "issues.close": {
+      "description": "`issue.close` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.close`. All or nothing: when `issue.close` would fail on one issue, nothing changes and the call fails with `NotClosed`, naming that issue and giving its failure. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "description": "What was checked, and how: commands, results, links.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "issue": {
+            "description": "The issues to close: give the flag once per issue.",
+            "items": {
+              "$ref": "#/$defs/IssueId"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "issue",
+          "evidence"
+        ],
+        "title": "IssuesCloseInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "items": {
+            "description": "The issues as the call left them, in the order given.",
+            "items": {
+              "$ref": "#/$defs/IssueSummary"
+            },
+            "maxItems": 50,
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "IssuesCloseAnswer",
+        "type": "object"
+      },
+      "failures": {
+        "NotClosed": {
+          "properties": {
+            "_tag": {
+              "const": "NotClosed",
+              "type": "string"
+            },
+            "failure": {
+              "description": "The failure of `issue.close` on that issue.",
+              "properties": {
+                "_tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "_tag"
+              ],
+              "type": "object"
+            },
+            "issue": {
+              "$ref": "#/$defs/IssueId"
+            }
+          },
+          "required": [
+            "_tag",
+            "issue",
+            "failure"
+          ],
+          "type": "object"
         }
       }
     },

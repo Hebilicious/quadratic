@@ -18,9 +18,9 @@ pub use git::{ClaimStart, ClaimedWork, GitLanding, GitWatch, GitWork};
 pub use tx::Tx;
 pub use types::{
     AsOf, Author, Call, Change, Claim, ClaimFilter, Commit, Direction, FieldChange, FindingLink,
-    Graph, IssueCreated, IssueFields, IssueFilter, IssueRecord, KeyedIssue, Link, NewIssue,
-    NoteRecord, Page, Project, ProjectChanges, RelationRecord, SourceRecord, Subject, WaitNode,
-    Workflow, WorkflowStatus, Written,
+    Graph, HolderSession, IssueCreated, IssueFields, IssueFilter, IssueRecord, KeyedIssue, Link,
+    NewIssue, NoteRecord, Page, Project, ProjectChanges, RelationRecord, SourceRecord, Subject,
+    WaitNode, Workflow, WorkflowStatus, Written,
 };
 pub use view::View;
 
