@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use super::environment::{self, Configuration};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     RemoteHead,
@@ -31,7 +33,9 @@ pub fn named_by(repository: &Path) -> Option<(String, Source)> {
 }
 
 fn symbolic(repository: &Path, reference: &str, prefix: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    environment::prepare(&mut command, &Configuration::User);
+    let output = command
         .arg("--git-dir")
         .arg(repository)
         .args(["symbolic-ref", "--quiet", reference])

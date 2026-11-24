@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use acid_cat_core::CapabilityDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -250,21 +252,47 @@ async fn get_issue(context: &Context, input: GetInput) -> Result<IssueAnswer<Iss
     Ok(IssueAnswer { issue })
 }
 
-/// What the store knows of an issue's work in git, before the remote is read.
+/// What the store knows of an issue's work in git, before the repository is read.
 struct InGit {
-    branch: Option<String>,
+    branch: Option<Branch>,
     commits: Vec<String>,
     repository: Option<String>,
     default_branch: String,
 }
 
+struct Branch {
+    name: String,
+    /// Whether the claim or the landing that names the branch happened while the project was
+    /// bound to the repository it is bound to now.
+    of_this_repository: bool,
+}
+
 fn in_git(view: &View<'_>, issue: &Issue) -> Result<InGit, Refused> {
-    let landings = view.landings_of(&issue.summary.id)?;
-    let branch = match &issue.summary.claim {
-        Some(claim) => Some(claim.branch.clone()),
-        None => view
-            .last_claimed_branch(&issue.summary.id)?
-            .or_else(|| landings.iter().find_map(|landing| landing.branch.clone())),
+    let id = &issue.summary.id;
+    let landings = view.landings_of(id)?;
+    let bound_since = view.bound_since(&issue.summary.project)?;
+    let since_binding =
+        |seq: Option<i64>| matches!((seq, bound_since), (Some(seq), Some(since)) if seq >= since);
+    let last_claim = view.last_claim(id)?;
+    let branch = match (&issue.summary.claim, last_claim) {
+        (Some(claim), last) => Some(Branch {
+            of_this_repository: since_binding(
+                last.filter(|(name, _)| *name == claim.branch)
+                    .map(|(_, seq)| seq),
+            ),
+            name: claim.branch.clone(),
+        }),
+        (None, Some((name, seq))) => Some(Branch {
+            name,
+            of_this_repository: since_binding(Some(seq)),
+        }),
+        (None, None) => match landings.iter().find_map(|landing| landing.branch.clone()) {
+            Some(name) => Some(Branch {
+                name,
+                of_this_repository: since_binding(view.last_landing(id)?),
+            }),
+            None => None,
+        },
     };
     let project = board::project(view, &issue.summary.project)?;
     Ok(InGit {
@@ -279,20 +307,27 @@ fn in_git(view: &View<'_>, issue: &Issue) -> Result<InGit, Refused> {
 }
 
 impl InGit {
+    /// Runs git two times to read the remote, and once more for an issue with landed commits.
     async fn work(self) -> Option<Work> {
         if self.branch.is_none() && self.commits.is_empty() {
             return None;
         }
-        let address = match &self.repository {
+        let (address, present) = match &self.repository {
             Some(repository) => {
                 let repository = GitRepository::at(repository, GIT_LIMIT);
-                remote::web_address(&repository, &self.default_branch).await
+                match remote::web_address(&repository, &self.default_branch).await {
+                    Some(address) if self.commits.is_empty() => (Some(address), BTreeSet::new()),
+                    Some(address) => (Some(address), repository.present(&self.commits).await),
+                    None => (None, BTreeSet::new()),
+                }
             }
-            None => None,
+            None => (None, BTreeSet::new()),
         };
         let pull_request = match (&address, &self.branch) {
-            (Some(address), Some(branch)) if *branch != self.default_branch => {
-                Some(remote::pull_request(address, branch))
+            (Some(address), Some(branch))
+                if branch.of_this_repository && branch.name != self.default_branch =>
+            {
+                Some(remote::pull_request(address, &branch.name))
             }
             _ => None,
         };
@@ -304,11 +339,12 @@ impl InGit {
                 .map(|commit| LandedCommit {
                     url: address
                         .as_deref()
+                        .filter(|_| present.contains(&commit))
                         .map(|address| remote::commit(address, &commit)),
                     commit,
                 })
                 .collect(),
-            branch: self.branch,
+            branch: self.branch.map(|branch| branch.name),
         })
     }
 }
