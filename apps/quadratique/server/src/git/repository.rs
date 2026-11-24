@@ -267,6 +267,18 @@ impl Repository {
             .collect())
     }
 
+    /// The first line git prints for `args`, or `None` when git fails or prints nothing. What
+    /// git said on failure is dropped, so it reaches no error message and no log.
+    pub(super) async fn line(&self, args: &[&str]) -> Option<String> {
+        let output = self.run(args).await.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let line = text.lines().next()?.trim();
+        (!line.is_empty()).then(|| line.to_owned())
+    }
+
     async fn text(&self, args: &[&str]) -> Result<String, GitError> {
         let output = self.bytes(args).await?;
         String::from_utf8(output).map_err(|_| GitError::NotText(command_name(args)))

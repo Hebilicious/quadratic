@@ -42,6 +42,8 @@ const CLAIM_COLUMNS: [&str; 4] = [
     "claim_since",
 ];
 
+const CLAIM_OPERATION: &str = "issue.claim";
+
 const PROJECT_FIELDS: &[(&str, &str, Shape)] = &[
     ("name", "name", Shape::Text),
     ("repository", "repository", Shape::Text),
@@ -124,6 +126,38 @@ impl View<'_> {
             .map(|entry| self.change(entry))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Page { items, next_cursor })
+    }
+
+    /// The branch of the last claim on `issue`, in this view; it stays after the claim ends.
+    pub fn last_claimed_branch(&self, issue: &str) -> Result<Option<String>, StoreError> {
+        let mut sql = "SELECT c.hash, c.message FROM commit_subjects s \
+                       JOIN commit_index c ON c.seq = s.seq WHERE s.issue = ?"
+            .to_owned();
+        let mut params: Vec<Value> = vec![issue.into()];
+        if let Some(bound) = self.bound() {
+            sql.push_str(" AND s.seq <= ?");
+            params.push(bound.into());
+        }
+        sql.push_str(" ORDER BY s.seq DESC");
+        for row in self.rows(&sql, &params)? {
+            let cells = Cells(&row);
+            if Message::decode(&cells.text(1))?.operation != CLAIM_OPERATION {
+                continue;
+            }
+            let branch = self
+                .row(
+                    &format!(
+                        "SELECT claim_branch FROM dolt_at_issues('{}') WHERE id = ?",
+                        cells.text(0)
+                    ),
+                    &[issue.into()],
+                )?
+                .and_then(|row| Cells(&row).opt_text(0));
+            if branch.is_some() {
+                return Ok(branch);
+            }
+        }
+        Ok(None)
     }
 
     fn change(&self, entry: Entry) -> Result<Change, StoreError> {

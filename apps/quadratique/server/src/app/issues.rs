@@ -7,11 +7,15 @@ use super::board::{self, Board, all_issues, caller_project, require_issue};
 use super::catalog::capability;
 use super::cursor::Listing;
 use super::lifecycle::apply;
-use super::model::{self, Issue, IssueAnswer, IssueSummary, Note, Relation, Source};
+use super::model::{
+    self, Issue, IssueAnswer, IssueSummary, LandedCommit, Note, Relation, Source, Work,
+};
 use super::{Context, Refused, finish};
 use crate::domain::{
     Assignee, Caller, Category, Event, Link, Outcome, RelationChange, create_status, decide,
 };
+use crate::git::remote;
+use crate::git::repository::{GIT_LIMIT, Repository as GitRepository};
 use crate::store::{
     AsOf, ClaimFilter, HolderSession, IssueCreated, IssueFields, IssueFilter, NewIssue, View,
 };
@@ -235,12 +239,78 @@ async fn get_issue(context: &Context, input: GetInput) -> Result<IssueAnswer<Iss
         None => verified(context, Scope::Issue(input.issue.clone())).await?,
         Some(_) => context.caller.clone(),
     };
-    let issue = context
+    let (mut issue, git) = context
         .read(as_of(input.as_of), move |view| {
-            whole_issue(view, &input.issue, &caller)
+            let issue = whole_issue(view, &input.issue, &caller)?;
+            let git = in_git(view, &issue)?;
+            Ok((issue, git))
         })
         .await?;
+    issue.work = git.work().await;
     Ok(IssueAnswer { issue })
+}
+
+/// What the store knows of an issue's work in git, before the remote is read.
+struct InGit {
+    branch: Option<String>,
+    commits: Vec<String>,
+    repository: Option<String>,
+    default_branch: String,
+}
+
+fn in_git(view: &View<'_>, issue: &Issue) -> Result<InGit, Refused> {
+    let landings = view.landings_of(&issue.summary.id)?;
+    let branch = match &issue.summary.claim {
+        Some(claim) => Some(claim.branch.clone()),
+        None => view
+            .last_claimed_branch(&issue.summary.id)?
+            .or_else(|| landings.iter().find_map(|landing| landing.branch.clone())),
+    };
+    let project = board::project(view, &issue.summary.project)?;
+    Ok(InGit {
+        branch,
+        commits: landings
+            .into_iter()
+            .map(|landing| landing.git_commit)
+            .collect(),
+        repository: project.repository,
+        default_branch: project.default_branch,
+    })
+}
+
+impl InGit {
+    async fn work(self) -> Option<Work> {
+        if self.branch.is_none() && self.commits.is_empty() {
+            return None;
+        }
+        let address = match &self.repository {
+            Some(repository) => {
+                let repository = GitRepository::at(repository, GIT_LIMIT);
+                remote::web_address(&repository, &self.default_branch).await
+            }
+            None => None,
+        };
+        let pull_request = match (&address, &self.branch) {
+            (Some(address), Some(branch)) if *branch != self.default_branch => {
+                Some(remote::pull_request(address, branch))
+            }
+            _ => None,
+        };
+        Some(Work {
+            pull_request,
+            commits: self
+                .commits
+                .into_iter()
+                .map(|commit| LandedCommit {
+                    url: address
+                        .as_deref()
+                        .map(|address| remote::commit(address, &commit)),
+                    commit,
+                })
+                .collect(),
+            branch: self.branch,
+        })
+    }
 }
 
 async fn look_at_repository_of(context: &Context, id: &str) {
@@ -294,6 +364,7 @@ pub(super) fn whole_issue(view: &View<'_>, id: &str, caller: &Caller) -> Result<
                 id: link.id,
             })
             .collect(),
+        work: None,
     })
 }
 

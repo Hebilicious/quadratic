@@ -325,3 +325,63 @@ export function labelsOf(text: string): readonly string[] {
     ),
   ];
 }
+
+export type TextPart =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "link"; readonly text: string };
+
+const WEB_ADDRESS = /https?:\/\/[^\s<>"'`]+/gu;
+const CLOSING = { ")": "(", "]": "[", "}": "{" } as const;
+
+function trimmed(address: string): string {
+  let end = address.length;
+  for (;;) {
+    const last = address[end - 1];
+    if (last === undefined) {
+      return address.slice(0, end);
+    }
+    if (".,;:!?".includes(last)) {
+      end -= 1;
+      continue;
+    }
+    if (last === ")" || last === "]" || last === "}") {
+      const kept = address.slice(0, end);
+      const opened = kept.split(CLOSING[last]).length - 1;
+      const closed = kept.split(last).length - 1;
+      if (closed > opened) {
+        end -= 1;
+        continue;
+      }
+    }
+    return address.slice(0, end);
+  }
+}
+
+/**
+ * The text cut into plain text and web addresses, for a page that shows each address as a link. Every part is text
+ * to show as text: nothing in it is ever read as HTML.
+ */
+export function textParts(text: string): readonly TextPart[] {
+  const parts: TextPart[] = [];
+  let from = 0;
+  for (const match of text.matchAll(WEB_ADDRESS)) {
+    const address = trimmed(match[0]);
+    const at = match.index;
+    if (address.length <= "https://".length) {
+      continue;
+    }
+    if (at > from) {
+      parts.push({ kind: "text", text: text.slice(from, at) });
+    }
+    parts.push({ kind: "link", text: address });
+    from = at + address.length;
+  }
+  if (from < text.length) {
+    parts.push({ kind: "text", text: text.slice(from) });
+  }
+  return parts;
+}
+
+export function shortCommit(commit: string): string {
+  return commit.slice(0, 12);
+}

@@ -877,3 +877,180 @@ async fn a_pruned_kept_tip_with_a_new_upstream_records_no_landing_from_history()
     assert_eq!(space.status(&issue).await.0, "in-review");
     assert_eq!(space.merges(&issue).await, Vec::<Value>::new());
 }
+
+const MADE_UP_TOKEN: &str = "ghp_MadeUpToken0123456789";
+
+impl Workspace {
+    fn remote(&self, name: &str, url: &str) {
+        git(&self.repository.root, &["remote", "add", name, url]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merged_issue_shows_its_branch_pull_request_and_landed_commit_without_the_remotes_token()
+{
+    let space = Workspace::new("ABC").await;
+    space.remote(
+        "origin",
+        &format!("https://made-up-user:{MADE_UP_TOKEN}@github.com/Owner/repo.git"),
+    );
+    let issue = space.issue("Parse the headers").await;
+    let (agent, worktree) = space.agent_on("parse-headers").await;
+    space.claim(&agent, &issue).await;
+    space
+        .repository
+        .commit(&worktree, "parser.rs", "Parse the headers");
+    space.board.look().await;
+    space.close(&agent, &issue).await;
+
+    space.squash_with_refs("parse-headers", &issue).await;
+    let squashed = space.repository.tip(&space.repository.root, "main");
+    space.board.look().await;
+
+    let shown = space.board.get(&issue).await;
+    assert_eq!(shown["status"], "merged", "{shown}");
+    assert_eq!(shown.get("claim"), None, "{shown}");
+    assert_eq!(
+        shown["work"],
+        json!({
+            "branch": "parse-headers",
+            "pullRequest": "https://github.com/Owner/repo/pull/parse-headers",
+            "commits": [{
+                "commit": squashed,
+                "url": format!("https://github.com/Owner/repo/commit/{squashed}"),
+            }],
+        })
+    );
+    let history = space
+        .board
+        .ok(
+            &space.repository.human(),
+            "history.query",
+            json!({ "issue": issue }),
+        )
+        .await;
+    for answer in [&shown, &history] {
+        let text = answer.to_string();
+        assert!(!text.contains(MADE_UP_TOKEN), "{text}");
+        assert!(!text.contains("made-up-user"), "{text}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_issue_get_answers_the_work_and_list_claim_and_close_stay_as_they_were() {
+    let space = Workspace::new("ABC").await;
+    space.remote("origin", "git@github.com:Owner/repo.git");
+    let issue = space.issue("Parse the headers").await;
+    let (agent, worktree) = space.agent_on("parse-headers").await;
+    let claimed = space
+        .board
+        .ok(&agent, "issue.claim", json!({ "issue": issue }))
+        .await;
+    space
+        .repository
+        .commit(&worktree, "parser.rs", "Parse the headers");
+    let closed = space
+        .board
+        .ok(
+            &agent,
+            "issue.close",
+            json!({ "issue": issue, "evidence": "the tests pass" }),
+        )
+        .await;
+    let listed = space
+        .board
+        .ok(&space.repository.human(), "issue.list", json!({}))
+        .await;
+    let ready = space
+        .board
+        .ok(&space.repository.human(), "issue.ready", json!({}))
+        .await;
+
+    for answer in [&claimed, &closed, &listed, &ready] {
+        assert!(!answer.to_string().contains("\"work\""), "{answer}");
+    }
+    let shown = space.board.get(&issue).await;
+    assert_eq!(
+        shown["work"],
+        json!({
+            "branch": "parse-headers",
+            "pullRequest": "https://github.com/Owner/repo/pull/parse-headers",
+            "commits": [],
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_released_issue_that_never_landed_keeps_the_branch_of_its_last_claim() {
+    let space = Workspace::new("ABC").await;
+    space.remote("origin", "ssh://git@github.com/Owner/repo.git");
+    let issue = space.issue("Parse the headers").await;
+    let (agent, _) = space.agent_on("parse-headers").await;
+    space.claim(&agent, &issue).await;
+    space
+        .board
+        .ok(&agent, "issue.release", json!({ "issue": issue }))
+        .await;
+
+    let shown = space.board.get(&issue).await;
+    assert_eq!(shown.get("claim"), None, "{shown}");
+    assert_eq!(shown["work"]["branch"], "parse-headers", "{shown}");
+    assert_eq!(
+        shown["work"]["pullRequest"],
+        "https://github.com/Owner/repo/pull/parse-headers"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_remote_that_the_default_branch_tracks_gives_the_address_and_other_forges_give_none() {
+    let space = Workspace::new("ABC").await;
+    space.remote("origin", "https://gitlab.com/Owner/repo.git");
+    let issue = space.issue("Parse the headers").await;
+    let (agent, _) = space.agent_on("parse-headers").await;
+    space.claim(&agent, &issue).await;
+
+    let shown = space.board.get(&issue).await;
+    assert_eq!(
+        shown["work"],
+        json!({ "branch": "parse-headers", "commits": [] })
+    );
+
+    space.remote("upstream", "git@github.com:Owner/repo.git");
+    git(
+        &space.repository.root,
+        &["config", "branch.main.remote", "upstream"],
+    );
+    let shown = space.board.get(&issue).await;
+    assert_eq!(
+        shown["work"]["pullRequest"],
+        "https://github.com/Owner/repo/pull/parse-headers"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_issue_landed_by_its_refs_trailer_alone_without_a_remote_shows_its_commit_without_an_address()
+ {
+    let space = Workspace::looking_only_when_asked("ABC").await;
+    let issue = space.issue_in_review("Parse the headers").await;
+    space.board.look().await;
+    let root = &space.repository.root;
+    let landed = space.repository.commit(
+        root,
+        "parser.rs",
+        &format!("Parse the headers\n\nRefs: {issue}"),
+    );
+
+    let shown = space.board.get(&issue).await;
+    assert_eq!(shown["status"], "merged", "{shown}");
+    assert_eq!(shown["work"], json!({ "commits": [{ "commit": landed }] }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_issue_without_work_in_git_answers_no_work() {
+    let space = Workspace::new("ABC").await;
+    space.remote("origin", "git@github.com:Owner/repo.git");
+    let issue = space.issue("Parse the headers").await;
+
+    let shown = space.board.get(&issue).await;
+    assert_eq!(shown.get("work"), None, "{shown}");
+}
