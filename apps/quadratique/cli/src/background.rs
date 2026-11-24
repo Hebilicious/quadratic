@@ -125,6 +125,11 @@ impl LifeError {
                  If this session has no Quadratique MCP tools, tell the human that its harness must start \
                  `quadratique mcp` as an MCP server."
             ),
+            McpTool::OnePerIssue(tool) => format!(
+                "Nothing was started. To act on these issues together, all or none, run this command \
+                 outside the sandbox, or ask the human to. If separate writes are acceptable, call the \
+                 Quadratique MCP tool `{tool}` once for each issue, with the same other inputs."
+            ),
             McpTool::Absent => "Nothing was started. This command works only on the command line: \
                  run it outside the sandbox, or ask the human to."
                 .to_owned(),
