@@ -21,7 +21,7 @@ Issues
 Work
 - `quadratique claim --issue ABC-12`: atomic; prints the whole issue. `Held` (exit code 1): someone else holds it. `NotReady`: what it waits on.
 - `quadratique issue update --issue ABC-12 --revision <revision>` with `--notes` (added after the earlier notes), `--description` or `--acceptance` (replaced), `--status`, `--priority`. On `Stale`, `show` and write again.
-- `quadratique close --issue ABC-12 --evidence \"...\"`: on a feature branch the issue moves to review and stays yours until the merge. Commits end with `Refs: ABC-12`; Quadratique then sees the merge, even a squash, and moves the issue on.
+- `quadratique close --issue ABC-12 --evidence \"...\"`: on a feature branch the issue moves to review and stays yours until the merge. Repeat `--issue` to close several, all or none. It answers `items`, one summary per issue; a refusal is `NotClosed`, with the original under `failure`. `quadratique issue close` takes one issue and answers it whole. Commits end with `Refs: ABC-12`; Quadratique then sees the merge, even a squash, and moves the issue on.
 - `quadratique release --issue ABC-12 --reason \"...\"` gives a claim back.
 - An issue with a `source` is a finding of a tool: the tool's next complete run finishes it when the finding is gone, and reopens it when the finding comes back.
 
