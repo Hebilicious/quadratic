@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: full check
+    runs-on: ubuntu-latest
+    # Only stops a hang: a full check takes far less.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Moon compares a pull request with `main`, so it needs the history.
+        with:
+          fetch-depth: 0
+
+      # The store engine is compiled from C and links zlib; the tests call jq, curl and flock.
+      - name: Install the system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential zlib1g-dev jq curl util-linux
+
+      # Installs proto, then the tools that .prototools pins, and caches them.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - id: pnpm
+        run: echo "store=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools', 'pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools') }}-
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: apps/quadratic
+
+      - id: playwright
+        run: echo "version=$(pnpm --filter quadratic-web exec playwright --version)" >> "$GITHUB_OUTPUT"
+      - id: browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm --filter quadratic-web exec playwright install --with-deps chromium-headless-shell
+      - if: steps.browsers.outputs.cache-hit == 'true'
+        run: pnpm --filter quadratic-web exec playwright install-deps chromium-headless-shell
+
+      - name: Run the full check
+        run: >-
+          moon run
+          quadratic-cli:test quadratic-cli:lint quadratic-cli:fmt-check
+          quadratic-server:test quadratic-server:lint quadratic-server:fmt-check
+          quadratic-install:test
+          quadratic-eval:test
+          quadratic-catalog:check
+          quadratic-web:typecheck quadratic-web:lint quadratic-web:format-check quadratic-web:test quadratic-web:e2e

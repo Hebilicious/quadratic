@@ -371,6 +371,14 @@ Run every task through moon, for example `moon run quadratic-server:test`:
 | `quadratic-install:test` | Installs on a temporary home with no systemd, and checks the service's cases and the uninstall |
 | `quadratic-eval:test` | The evaluation harness's own tests |
 
+### Continuous integration
+
+The workflow [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs on every pull
+request and on every push to `main`. On `ubuntu-latest`, it installs the tools that `.prototools`
+pins, the JavaScript dependencies from the lockfile and Playwright's Chromium, then runs every
+task of the table above in one `moon run`. Nothing is left out: the runner has the commands that
+the tests call, and lets an unprivileged process create a user namespace.
+
 ### See a change in the web app
 
 The installed binary serves the copy of the web app embedded in it at build time, so it never
