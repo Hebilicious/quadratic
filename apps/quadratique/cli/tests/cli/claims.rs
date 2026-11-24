@@ -217,3 +217,66 @@ fn a_claim_on_the_command_line_names_the_worktree_it_runs_in_or_is_refused() {
     assert_eq!(held["branch"], "dem-12", "{claimed}");
     assert_eq!(held["holder"]["name"], "codex@dem-12", "{claimed}");
 }
+
+#[test]
+fn close_with_the_issue_flag_twice_closes_both_issues_with_the_same_evidence() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let worktree = repository.worktree("parser");
+    home.quadratique(&repository.root)
+        .args(["project", "create", "--key", "CLO", "--name", "Close"])
+        .run()
+        .ok();
+    for title in ["First", "Second"] {
+        home.quadratique(&repository.root)
+            .args(["create", "--title", title, "--acceptance", "It is done."])
+            .run()
+            .ok();
+        home.quadratique(&worktree)
+            .env("CLAUDECODE", "1")
+            .args([
+                "claim",
+                "--issue",
+                if title == "First" { "CLO-1" } else { "CLO-2" },
+            ])
+            .run()
+            .ok();
+    }
+
+    let closed = home
+        .quadratique(&worktree)
+        .env("CLAUDECODE", "1")
+        .args([
+            "close",
+            "--issue",
+            "CLO-1",
+            "--issue",
+            "CLO-2",
+            "--evidence",
+            "cargo test: 12 passed",
+        ])
+        .run()
+        .ok();
+
+    let statuses: Vec<_> = closed["items"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|item| (item["id"].clone(), item["status"].clone()))
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![
+            ("CLO-1".into(), "in-review".into()),
+            ("CLO-2".into(), "in-review".into()),
+        ]
+    );
+    for issue in ["CLO-1", "CLO-2"] {
+        let shown = home
+            .quadratique(&worktree)
+            .args(["show", "--issue", issue])
+            .run()
+            .ok();
+        assert_eq!(shown["issue"]["evidence"], "cargo test: 12 passed");
+    }
+}

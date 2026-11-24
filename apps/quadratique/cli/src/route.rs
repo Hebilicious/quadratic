@@ -96,9 +96,21 @@ impl Words {
         };
         match capability {
             Some(id) if self.mcp_tools.contains(&id) => McpTool::Offered(id),
+            Some(id) if self.mcp_tools.contains(&one_issue(&id)) => {
+                McpTool::Offered(one_issue(&id))
+            }
             Some(id) if self.commands.contains(&id) => McpTool::Absent,
             _ => McpTool::NotACommand,
         }
+    }
+}
+
+/// A command-line capability over several issues, such as `issues.close`, has an MCP tool for
+/// one issue in its place, such as `issue.close`.
+fn one_issue(id: &str) -> String {
+    match id.strip_prefix("issues.") {
+        Some(verb) => format!("issue.{verb}"),
+        None => id.to_owned(),
     }
 }
 

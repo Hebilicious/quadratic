@@ -9,6 +9,8 @@ mod advance;
 mod changed;
 #[path = "server/claims.rs"]
 mod claims;
+#[path = "server/close_several.rs"]
+mod close_several;
 #[path = "server/creation.rs"]
 mod creation;
 #[path = "server/failures.rs"]

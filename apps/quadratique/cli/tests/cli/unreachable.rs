@@ -136,10 +136,22 @@ fn in_a_sandbox_a_command_names_its_mcp_tool_or_says_it_works_only_on_the_comman
     let home = Home::new();
     let repository = Repository::new();
     let _sandboxed = ReadOnly::make(home.path());
-    let with_a_tool: [(&[&str], &str); 8] = [
+    let with_a_tool: [(&[&str], &str); 9] = [
         (&[], "issue.ready"),
         (&["--json"], "issue.ready"),
         (&["claim", "--issue", "DEM-1"], "issue.claim"),
+        (
+            &[
+                "close",
+                "--issue",
+                "DEM-1",
+                "--issue",
+                "DEM-2",
+                "--evidence",
+                "x",
+            ],
+            "issue.close",
+        ),
         (&["show", "--issue", "DEM-1"], "issue.get"),
         (&["instructions"], "workspace.instructions"),
         (&["issue", "list"], "issue.list"),
