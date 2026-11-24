@@ -11,12 +11,12 @@ name=quadratique-$version-$target
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
-mkdir "$stage/$name"
-cp "$binary" "$stage/$name/quadratique"
+mkdir -p "$stage/$name/bin"
+cp "$binary" "$stage/$name/bin/quadratique"
 cp "$here/install.sh" "$here/uninstall.sh" "$stage/$name/"
 cp "$here/../README.md" "$stage/$name/README.md"
 cp "$repository/LICENSE" "$stage/$name/LICENSE"
-chmod 755 "$stage/$name/quadratique" "$stage/$name/install.sh" "$stage/$name/uninstall.sh"
+chmod 755 "$stage/$name/bin/quadratique" "$stage/$name/install.sh" "$stage/$name/uninstall.sh"
 chmod 644 "$stage/$name/README.md" "$stage/$name/LICENSE"
 
 mkdir -p "$output"

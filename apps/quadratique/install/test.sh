@@ -215,14 +215,14 @@ archive=$(sh "$here/package.sh" "$scratch/quadratique-new" 9.8.7 "$target" "$scr
 [ "$archive" = "$scratch/release/quadratique-9.8.7-$target.tar.gz" ] || fail "package.sh names its archive $archive"
 (cd "$scratch/release" && sha256sum -c --quiet "quadratique-9.8.7-$target.tar.gz.sha256") \
   || fail "the archive does not match its SHA-256 file"
-[ "$(tar -tzf "$archive" | LC_ALL=C sort | tr '\n' ' ')" = "quadratique-9.8.7-$target/ quadratique-9.8.7-$target/LICENSE quadratique-9.8.7-$target/README.md quadratique-9.8.7-$target/install.sh quadratique-9.8.7-$target/quadratique quadratique-9.8.7-$target/uninstall.sh " ] \
+[ "$(tar -tzf "$archive" | LC_ALL=C sort | tr '\n' ' ')" = "quadratique-9.8.7-$target/ quadratique-9.8.7-$target/LICENSE quadratique-9.8.7-$target/README.md quadratique-9.8.7-$target/bin/ quadratique-9.8.7-$target/bin/quadratique quadratique-9.8.7-$target/install.sh quadratique-9.8.7-$target/uninstall.sh " ] \
   || fail "the archive holds $(tar -tzf "$archive" | tr '\n' ' ')"
 mkdir "$scratch/download"
 tar -xzf "$archive" -C "$scratch/download"
 release=$scratch/download/quadratique-9.8.7-$target
-cmp -s "$release/quadratique" "$scratch/quadratique-new" && [ -x "$release/quadratique" ] \
+cmp -s "$release/bin/quadratique" "$scratch/quadratique-new" && [ -x "$release/bin/quadratique" ] \
   || fail "the archive's quadratique is not the packaged binary, or is not executable"
-pass "package.sh makes one archive named for the version and the target, with its SHA-256 file, the binary and the install scripts"
+pass "package.sh makes one archive named for the version and the target, with its SHA-256 file, the binary alone in bin/ and the install scripts"
 
 cd "$scratch"
 sleep 600 &
@@ -311,7 +311,7 @@ on_machine "$quadratique" project create --key KEEP --name Kept > /dev/null
 on_machine "$quadratique" create --project KEEP --title "Before the upgrade" --acceptance "It is kept." > /dev/null
 old=$(service)
 rm -f "$scratch/cargo-called"
-on_machine env PATH="$scratch/fake-cargo:/usr/bin:/bin" sh "$release/install.sh" "$release/quadratique" > /dev/null 2>> "$scratch/install.log" \
+on_machine env PATH="$scratch/fake-cargo:/usr/bin:/bin" sh "$release/install.sh" "$release/bin/quadratique" > /dev/null 2>> "$scratch/install.log" \
   || fail "the archive's install.sh fails over a running server"
 [ ! -e "$scratch/cargo-called" ] || fail "the install from the archive called cargo"
 [ "$(owner)" = "$(service)" ] || fail "install.sh returned before the new server answered"
