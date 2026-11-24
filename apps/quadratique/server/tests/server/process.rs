@@ -357,13 +357,20 @@ async fn a_process_of_another_account_is_refused() {
     );
 }
 
-/// The churn opens thousands of loopback connections, and the kernel may drop the first SYN of a connection, for
-/// example while its connection-tracking table is full; the connection then opens on a later retransmission. The test
-/// asks the admission of each connection directly, so a slow handshake is not taken for a refusal.
+const OWNER_CONNECTIONS: usize = 1000;
+const CHURNING_THREADS: usize = 4;
+const PROBES_PER_CHURN: usize = 100;
+const OPENED_PER_CHURN: usize = 25;
+
+/// The churn follows the probes: each time they pass another `PROBES_PER_CHURN`, each churning thread opens and
+/// closes `OPENED_PER_CHURN` connections to another listener, so sockets open and close while the owner's connections
+/// are looked up. A run opens 2000 loopback connections: each stays in the kernel's connection-tracking table for
+/// minutes, and a full table drops new SYNs of every program. The test asks the admission of each connection directly,
+/// so a slow handshake is not taken for a refusal.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use quadratique_server::serve::Connection;
 
@@ -374,6 +381,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
         .expect("the server starts");
     let other = std::net::TcpListener::bind("127.0.0.1:0").expect("another listener");
     let other_address = other.local_addr().expect("its address");
+    let probed = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let accepting = std::thread::spawn(move || {
         for stream in other.incoming() {
@@ -382,12 +390,18 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
             }
         }
     });
-    let churning: Vec<_> = (0..4)
+    let churning: Vec<_> = (0..CHURNING_THREADS)
         .map(|_| {
-            let stop = stop.clone();
+            let (probed, stop) = (probed.clone(), stop.clone());
             std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    let opened: Vec<_> = (0..50)
+                for churn in 0..OWNER_CONNECTIONS / PROBES_PER_CHURN {
+                    while probed.load(Ordering::Relaxed) < churn * PROBES_PER_CHURN {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::yield_now();
+                    }
+                    let opened: Vec<_> = (0..OPENED_PER_CHURN)
                         .filter_map(|_| std::net::TcpStream::connect(other_address).ok())
                         .collect();
                     drop(opened);
@@ -397,10 +411,10 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
         .collect();
 
     let refused = within(
-        "2000 connections of the owner, each one admitted or refused",
+        "the owner's connections, each one admitted or refused",
         async {
             let mut refused = Vec::new();
-            for probe in 0..2000 {
+            for probe in 0..OWNER_CONNECTIONS {
                 let client = tokio::net::TcpStream::connect(running.address())
                     .await
                     .expect("a connection to the server");
@@ -411,6 +425,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
                 if !running.admits(own) {
                     refused.push(probe);
                 }
+                probed.store(probe + 1, Ordering::Relaxed);
             }
             refused
         },
@@ -425,7 +440,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
     running.shutdown().await;
     assert!(
         refused.is_empty(),
-        "{} of 2000 connections of the owner were refused: {:?}",
+        "{} of {OWNER_CONNECTIONS} connections of the owner were refused: {:?}",
         refused.len(),
         &refused[..refused.len().min(5)]
     );
