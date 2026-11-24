@@ -1,0 +1,134 @@
+name: Release
+
+# GitHub starts no workflows for tags that GITHUB_TOKEN makes, and holds the checks of pull requests that GITHUB_TOKEN
+# opens. So every step that writes to the repository uses a token of the release GitHub App.
+on:
+  push:
+    branches: [main]
+  # A pull request that changes how a release is built builds the archives, without releasing them.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - "apps/quadratic/install/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && 'main' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  release-please:
+    name: release-please
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          token: ${{ steps.app.outputs.token }}
+
+  binaries:
+    name: binary for ${{ matrix.target }}
+    needs: release-please
+    if: >-
+      !cancelled() && (
+        github.event_name == 'pull_request' ||
+        needs.release-please.outputs.release_created == 'true'
+      )
+    # The oldest hosted images, so that the binary needs glibc 2.35 at most.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    # Only stops a hang.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name || github.sha }}
+
+      # The store engine is compiled from C and links zlib.
+      - name: Install the system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential zlib1g-dev
+
+      # Installs proto, then the tools that .prototools pins, and caches them.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the host and the version
+        id: build
+        env:
+          RELEASED: ${{ needs.release-please.outputs.version }}
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          test "$host" = "${{ matrix.target }}"
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/quadratic/Cargo.toml)
+          if [ -n "$RELEASED" ]; then test "$version" = "$RELEASED"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the web app and the release binary with it inside
+        run: |
+          moon run quadratic-web:build
+          binary=$(sh apps/quadratic/install/build.sh apps/quadratic/web/dist apps/quadratic/target)
+          echo "BINARY=$binary" >> "$GITHUB_ENV"
+
+      - name: Show the newest glibc the binary needs
+        run: |
+          glibc=$(objdump -T "$BINARY" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          echo "The binary for ${{ matrix.target }} needs ${glibc#GLIBC_} or newer." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Check that the binary runs
+        run: |
+          export QUADRATIC_HOME="$RUNNER_TEMP/quadratic-home"
+          "$BINARY" --version
+
+      - name: Package the archive and its SHA-256 file
+        run: |
+          archive=$(sh apps/quadratic/install/package.sh "$BINARY" "${{ steps.build.outputs.version }}" "${{ matrix.target }}" "$RUNNER_TEMP/release")
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quadratic-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error
+
+      - if: needs.release-please.outputs.release_created == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Attach the archive to the release
+        if: needs.release-please.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --repo "$GITHUB_REPOSITORY"

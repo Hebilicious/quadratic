@@ -77,6 +77,60 @@ quadratic ui --open
 
 The port changes each time the server starts. `quadratic ui` prints the current address.
 
+## Install from a release
+
+Each [GitHub release](https://github.com/Hebilicious/quadratic/releases) has a prebuilt binary,
+with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.35 or newer
+(Ubuntu 22.04, Debian 12, Fedora 36 or later) and no other tool: no Rust, Node.js or proto.
+
+Each platform has one archive, named for the version and the target, and its SHA-256 file:
+
+| Platform | Archive |
+|---|---|
+| Linux x86-64 | `quadratic-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `quadratic-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+
+The archive has one folder, `quadratic-<version>-<target>/`, with the binary `quadratic`, the
+scripts `install.sh` and `uninstall.sh`, this file and the license. `install.sh` is the script
+that `moon run quadratic-install:install` runs, and does the steps 2 to 4 of "Install" with the
+binary you give it. Download, check and install a release (here 0.2.0 for x86-64; use
+`aarch64` for arm64):
+
+```sh
+version=0.2.0
+archive=quadratic-$version-x86_64-unknown-linux-gnu
+curl -fLO "https://github.com/Hebilicious/quadratic/releases/download/v$version/$archive.tar.gz"
+curl -fLO "https://github.com/Hebilicious/quadratic/releases/download/v$version/$archive.tar.gz.sha256"
+sha256sum -c "$archive.tar.gz.sha256"
+tar -xzf "$archive.tar.gz"
+sh "$archive/install.sh" "$archive/quadratic"
+```
+
+To upgrade, do the same with the new release. To uninstall, run `sh "$archive/uninstall.sh"`
+from any release: it removes the binary and the unit that the unit names.
+
+### With mise
+
+[mise](https://mise.jdx.dev) installs the binary from the GitHub releases. It picks the archive
+for your platform from its name, checks it against the SHA-256 file, and puts `quadratic` on your
+`PATH`:
+
+```sh
+mise use -g github:Hebilicious/quadratic
+```
+
+This installs only the binary. To run the server as a systemd user service, also run the
+`install.sh` of that release with the binary that mise installed:
+
+```sh
+sh "$(mise where github:Hebilicious/quadratic)/install.sh" "$(mise which quadratic)"
+```
+
+The install copies the binary to `~/.local/bin/quadratic`, so the service keeps the version you
+installed until you run `install.sh` again after `mise upgrade`. By default mise does not install a
+release published less than 24 hours ago (its setting `minimum_release_age`); name the version to
+install it earlier (`mise use -g github:Hebilicious/quadratic@0.2.0`).
+
 ## Set up a repository
 
 From inside a git repository:
@@ -399,6 +453,30 @@ the page to see each build. Stop the server with `target/debug/quadratic server 
 shell. A binary of any build serves another folder when the variable `QUADRATIC_WEB` names it in
 the environment of the command that starts the server. Give an absolute path: the server runs in
 its data folder and reads a relative path from there, so the page would answer 503.
+
+### Releases
+
+[release-please](https://github.com/googleapis/release-please) makes the releases, from the
+[Conventional Commits](https://www.conventionalcommits.org) on `main`: a `fix:` makes a patch
+release, a `feat:` a minor one (a major one while the version is below 1.0.0). Other commits
+make none. The workflow [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
+runs on every push to `main`:
+
+1. release-please opens or updates the release pull request. It sets the new version in
+   `Cargo.toml`, `Cargo.lock`, the three `package.json` files, `pyproject.toml` and `uv.lock`
+   together, and adds the changes to `CHANGELOG.md`.
+2. When that pull request is merged, release-please creates the tag `v<version>` and the GitHub
+   release.
+3. Then one job per platform builds the web app and the release binary with it inside, on the
+   oldest hosted Ubuntu (22.04, glibc 2.35), and attaches the archive and its SHA-256 file to the
+   release. `install/package.sh` makes the archive.
+
+The workflow writes with a token of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
+workflow for a tag that `GITHUB_TOKEN` pushes, and holds the checks of a pull request that it
+opens. It reads the App's client ID from the repository variable `RELEASE_APP_CLIENT_ID` and its
+private key from the secret `RELEASE_APP_PRIVATE_KEY`. A pull request that changes the release
+workflow, its configuration or `install/` builds the archives too, as workflow artifacts, and
+releases nothing.
 
 ## License
 

@@ -35,6 +35,9 @@ pnpm install                         # installs the JavaScript dependencies
 moon run quadratic-install:install   # builds the binary, installs it and starts the user service
 ```
 
+To install a prebuilt binary instead, with no toolchain, see "Install from a release" in
+[`apps/quadratic/README.md`](apps/quadratic/README.md).
+
 The install puts the binary in `~/.local/bin/quadratic` (or `$XDG_BIN_HOME/quadratic`): that
 folder must be on your `PATH`. Then, in the git repository where your agents work:
 

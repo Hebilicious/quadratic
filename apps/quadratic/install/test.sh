@@ -210,6 +210,20 @@ build new
   || fail "the test's build changed $install_build, which the install copies"
 pass "the test builds into its own target folder, and an inherited QUADRATIC_WEB_DIST does not choose the web app"
 
+target=$(rustc -vV | sed -n 's/^host: //p')
+archive=$(sh "$here/package.sh" "$scratch/quadratic-new" 9.8.7 "$target" "$scratch/release")
+[ "$archive" = "$scratch/release/quadratic-9.8.7-$target.tar.gz" ] || fail "package.sh names its archive $archive"
+(cd "$scratch/release" && sha256sum -c --quiet "quadratic-9.8.7-$target.tar.gz.sha256") \
+  || fail "the archive does not match its SHA-256 file"
+[ "$(tar -tzf "$archive" | sort | tr '\n' ' ')" = "quadratic-9.8.7-$target/ quadratic-9.8.7-$target/LICENSE quadratic-9.8.7-$target/README.md quadratic-9.8.7-$target/install.sh quadratic-9.8.7-$target/quadratic quadratic-9.8.7-$target/uninstall.sh " ] \
+  || fail "the archive holds $(tar -tzf "$archive" | tr '\n' ' ')"
+mkdir "$scratch/download"
+tar -xzf "$archive" -C "$scratch/download"
+release=$scratch/download/quadratic-9.8.7-$target
+cmp -s "$release/quadratic" "$scratch/quadratic-new" && [ -x "$release/quadratic" ] \
+  || fail "the archive's quadratic is not the packaged binary, or is not executable"
+pass "package.sh makes one archive named for the version and the target, with its SHA-256 file, the binary and the install scripts"
+
 cd "$scratch"
 sleep 600 &
 unrelated=$!
@@ -296,8 +310,10 @@ pass "a command uses the service's server and starts no other"
 on_machine "$quadratic" project create --key KEEP --name Kept > /dev/null
 on_machine "$quadratic" create --project KEEP --title "Before the upgrade" --acceptance "It is kept." > /dev/null
 old=$(service)
-on_machine sh "$here/install.sh" "$scratch/quadratic-new" > /dev/null 2>> "$scratch/install.log" \
-  || fail "install.sh fails over a running server"
+rm -f "$scratch/cargo-called"
+on_machine env PATH="$scratch/fake-cargo:/usr/bin:/bin" sh "$release/install.sh" "$release/quadratic" > /dev/null 2>> "$scratch/install.log" \
+  || fail "the archive's install.sh fails over a running server"
+[ ! -e "$scratch/cargo-called" ] || fail "the install from the archive called cargo"
 [ "$(owner)" = "$(service)" ] || fail "install.sh returned before the new server answered"
 [ "$(service)" != "$old" ] || fail "the old server $old still owns the home after the upgrade"
 [ "$(readlink "/proc/$(service)/exe")" = "$quadratic" ] || fail "the new server does not run $quadratic"
@@ -305,7 +321,7 @@ page > "$scratch/page.html"
 cmp -s "$scratch/page.html" "$scratch/index-new.html" || fail "the upgraded server does not serve the new build's page"
 [ "$(title_of "$quadratic" KEEP-1)" = "Before the upgrade" ] || fail "KEEP-1 is not in the store after the upgrade"
 await_servers 1 "after the upgrade"
-pass "an install of a new build over a running old one ends with the new build answering on the same store"
+pass "an install from a release archive, with no Rust toolchain on PATH, over a running old build ends with the new build answering on the same store"
 
 crashed=$(service)
 kill -KILL "$crashed"
@@ -372,7 +388,7 @@ pass "uninstall.sh without its binary says what it could not check, and fails wh
 
 on_machine "$scratch/systemctl" --user restart quadratic.service
 await_owner "$(service)"
-on_machine env XDG_DATA_HOME="$home/other" sh "$here/uninstall.sh" > /dev/null
+on_machine env XDG_DATA_HOME="$home/other" sh "$release/uninstall.sh" > /dev/null
 [ ! -e "$home/other" ] || fail "uninstall.sh wrote into the XDG_DATA_HOME of its own shell"
 [ ! -e "$quadratic" ] || fail "uninstall.sh left $quadratic"
 [ ! -e "$unit" ] || fail "uninstall.sh left $unit"

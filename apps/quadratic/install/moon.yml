@@ -38,8 +38,8 @@ tasks:
       cache: false
       runInCI: false
   test:
-    description: "Install on a temporary home with no systemd: the binary serves the web app with no source tree, the service's ownership cases, and an uninstall that keeps the store."
+    description: "Install on a temporary home with no systemd: the binary serves the web app with no source tree, a release archive installs with no Rust toolchain, the service's ownership cases, and an uninstall that keeps the store."
     command: "sh test.sh"
     deps: ["quadratic-web:build"]
-    inputs: ["@group(scripts)", "@group(rust)", "/apps/quadratic/web/dist/**/*"]
+    inputs: ["@group(scripts)", "@group(rust)", "/apps/quadratic/web/dist/**/*", "/apps/quadratic/README.md", "/LICENSE"]
     tags: ["candidate"]
