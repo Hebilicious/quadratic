@@ -43,6 +43,10 @@ impl Repository {
     }
 
     pub fn worktree(&self, branch: &str) -> PathBuf {
+        self.worktree_from(branch, "HEAD")
+    }
+
+    pub fn worktree_from(&self, branch: &str, start: &str) -> PathBuf {
         let path = self.parent.join(branch);
         git(
             &self.root,
@@ -53,6 +57,7 @@ impl Repository {
                 "-b",
                 branch,
                 &path.display().to_string(),
+                start,
             ],
         );
         path

@@ -138,6 +138,14 @@ impl View<'_> {
             })
             .collect())
     }
+
+    pub fn held_merges(&self) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .rows("SELECT issue FROM held_merges ORDER BY issue", &[])?
+            .iter()
+            .map(|row| Cells(row).text(0))
+            .collect())
+    }
 }
 
 impl Tx<'_> {
@@ -215,6 +223,23 @@ impl Tx<'_> {
                 text_param(landing.branch.as_deref()),
                 landing.landed_in.as_str().into(),
             ],
+        )? == 1)
+    }
+
+    pub fn hold_merge(&mut self, issue: &str) -> Result<bool, StoreError> {
+        self.require_issue(issue)?;
+        Ok(execute(
+            self.connection,
+            "INSERT OR IGNORE INTO held_merges (issue) VALUES (?)",
+            &[issue.into()],
+        )? == 1)
+    }
+
+    pub fn end_held_merge(&mut self, issue: &str) -> Result<bool, StoreError> {
+        Ok(execute(
+            self.connection,
+            "DELETE FROM held_merges WHERE issue = ?",
+            &[issue.into()],
         )? == 1)
     }
 }

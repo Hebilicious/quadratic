@@ -1,5 +1,6 @@
 use super::failure::NotReadyReason;
 use super::issue::{Caller, Issue, IssueId};
+use super::stack::holding_back;
 use super::workflow::Category;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,10 @@ pub fn readiness(issue: &Issue, waits: &[Wait], caller: &Caller) -> Readiness {
     if unresolved.iter().any(|wait| wait.kind == WaitKind::Child) {
         reasons.push(NotReadyReason::Children);
     }
+    let bases = holding_back(issue, caller);
+    if !bases.is_empty() {
+        reasons.push(NotReadyReason::Stacked);
+    }
     if issue
         .assignee
         .as_ref()
@@ -68,9 +73,9 @@ pub fn readiness(issue: &Issue, waits: &[Wait], caller: &Caller) -> Readiness {
         return Readiness::Ready;
     }
     let mut blockers: Vec<IssueId> = Vec::new();
-    for wait in unresolved {
-        if !blockers.contains(&wait.on) {
-            blockers.push(wait.on.clone());
+    for on in unresolved.into_iter().map(|wait| &wait.on).chain(&bases) {
+        if !blockers.contains(on) {
+            blockers.push(on.clone());
         }
     }
     Readiness::NotReady { reasons, blockers }

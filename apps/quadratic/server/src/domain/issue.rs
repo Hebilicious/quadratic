@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::actor::{Actor, ActorKind};
+use super::stack::Base;
 use super::workflow::{Category, Status, Workflow};
 
 pub type IssueId = String;
@@ -55,6 +58,9 @@ pub struct WorkingCopy {
     pub repository: Option<String>,
     pub worktree: Option<String>,
     pub branch: Option<String>,
+    /// The base branches that git verified `branch` contains, in `repository`; `None` when no
+    /// decision asked git.
+    pub contains: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +94,8 @@ pub struct Issue {
     pub revision: u64,
     pub claim: Option<Claim>,
     pub assignee: Option<Assignee>,
+    /// The issues this one is stacked on.
+    pub bases: Vec<Base>,
 }
 
 impl Issue {

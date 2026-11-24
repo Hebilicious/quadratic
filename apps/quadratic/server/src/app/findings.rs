@@ -4,13 +4,14 @@ use acid_cat_core::CapabilityDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::board::{Board, caller_project};
+use super::board::{self, Board, caller_project};
 use super::catalog::capability;
+use super::lifecycle::release_held_on;
 use super::model::IssueIds;
 use super::{Context, Refused, finish, model};
 use crate::domain::{
-    Category, Finding, MAX_BLOCKS_CYCLE_CHECKED_IN_ONE_WRITE, RelationChange, Sourced, Step,
-    Workflow, create_status, decision_blocks, step,
+    Category, Failure, Finding, MAX_BLOCKS_CYCLE_CHECKED_IN_ONE_WRITE, RelationChange, Sourced,
+    Step, Workflow, create_status, decision_blocks, may_reach, step,
 };
 use crate::store::{FindingLink, IssueFields, NewIssue, SourceRecord, Tx};
 
@@ -137,15 +138,16 @@ impl Run {
             .iter()
             .map(|finding| finding.key.as_str())
             .collect();
+        let mut gone = Vec::new();
         for (key, issue) in &existing {
             if reported.contains(key.as_str()) {
                 continue;
             }
             if step(Some(category(issue)?), false, complete) == Step::Finish {
-                self.finish(tx, &issue.issue)?;
-                outcomes.finished.push(issue.issue.clone());
+                gone.push(issue.issue.clone());
             }
         }
+        self.finish_gone(tx, gone, &mut outcomes)?;
         self.keep_decision_blocks(tx)?;
         Ok(outcomes)
     }
@@ -206,12 +208,48 @@ impl Run {
         Ok(changed)
     }
 
-    fn finish(&self, tx: &mut Tx<'_>, id: &str) -> Result<(), Refused> {
-        let Some(completed) = self.workflow.first_of(Category::Completed) else {
+    /// Finishes the issues of the findings the run lacks, each only once every issue it is
+    /// stacked on is merged: finishing one may let another finish, so it tries again until
+    /// nothing more finishes. The issues still refused are left as they are.
+    fn finish_gone(
+        &self,
+        tx: &mut Tx<'_>,
+        mut pending: Vec<String>,
+        outcomes: &mut Outcomes,
+    ) -> Result<(), Refused> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let Some(completed) = self.workflow.first_of(Category::Completed).cloned() else {
             return Err(Refused::Failure(
                 json!({ "_tag": "NoCompletedStatus", "project": self.project }),
             ));
         };
+        loop {
+            let board = Board::load(tx)?;
+            let tried = pending.len();
+            let mut refused = Vec::new();
+            for id in pending {
+                let issue = board.issue(&board::issue(tx, &id)?)?;
+                match may_reach(&issue, &self.workflow, &completed) {
+                    Ok(()) => {
+                        self.finish(tx, &id, &completed)?;
+                        outcomes.finished.push(id);
+                    }
+                    Err(Failure::BaseNotMerged { .. }) => refused.push(id),
+                    Err(failure) => return Err(failure.into()),
+                }
+            }
+            let finished_any = refused.len() < tried;
+            pending = refused;
+            if pending.is_empty() || !finished_any {
+                outcomes.left.extend(pending);
+                return Ok(());
+            }
+        }
+    }
+
+    fn finish(&self, tx: &mut Tx<'_>, id: &str, completed: &str) -> Result<(), Refused> {
         let evidence = format!(
             "The complete run of {} imported at {} by {} no longer reports this finding.",
             self.tool,
@@ -220,6 +258,7 @@ impl Run {
         );
         tx.set_status(id, completed)?;
         tx.clear_claim(id)?;
+        tx.end_held_merge(id)?;
         tx.update_fields(
             id,
             &IssueFields {
@@ -228,7 +267,7 @@ impl Run {
             },
         )?;
         tx.set_finished_evidence(id, Some(&evidence))?;
-        Ok(())
+        release_held_on(tx, id)
     }
 
     fn keep_decision_blocks(&self, tx: &mut Tx<'_>) -> Result<(), Refused> {

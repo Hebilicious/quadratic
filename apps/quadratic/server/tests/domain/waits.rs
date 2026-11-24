@@ -19,6 +19,13 @@ fn blocks(blocker: &str, blocked: &str) -> RelationChange {
     }
 }
 
+fn stacked_on(stacked: &str, base: &str) -> RelationChange {
+    RelationChange::StackedOn {
+        stacked: stacked.into(),
+        base: base.into(),
+    }
+}
+
 fn relations(changes: &[RelationChange]) -> WaitGraph {
     let mut graph = WaitGraph::default();
     for change in changes {
@@ -31,6 +38,7 @@ fn relations(changes: &[RelationChange]) -> WaitGraph {
 struct Relations {
     parents: BTreeMap<String, String>,
     blocks: BTreeSet<(String, String)>,
+    stacks: BTreeSet<(String, String)>,
 }
 
 impl Relations {
@@ -43,6 +51,9 @@ impl Relations {
                 }
                 RelationChange::Blocks { blocker, blocked } => {
                     relations.blocks.insert((blocker, blocked));
+                }
+                RelationChange::StackedOn { stacked, base } => {
+                    relations.stacks.insert((stacked, base));
                 }
             }
         }
@@ -91,12 +102,10 @@ fn changes_that_close_no_cycle_are_accepted() {
 
 fn change() -> impl Strategy<Value = RelationChange> {
     let issue = prop::sample::select(vec!["A", "B", "C", "D", "E", "F"]);
-    (any::<bool>(), issue.clone(), issue).prop_map(|(is_parent, from, to)| {
-        if is_parent {
-            parent(from, to)
-        } else {
-            blocks(from, to)
-        }
+    (0..3_u8, issue.clone(), issue).prop_map(|(kind, from, to)| match kind {
+        0 => parent(from, to),
+        1 => blocks(from, to),
+        _ => stacked_on(from, to),
     })
 }
 
@@ -115,7 +124,10 @@ fn waits_on(relations: &Relations, waiter: &str, target: &str) -> bool {
         .iter()
         .any(|(blocker, blocked)| blocker == target && ancestors.contains(blocked));
     let child_is_target = relations.parents.get(target).map(String::as_str) == Some(waiter);
-    blocked_by_target || child_is_target
+    let stacked_on_target = relations
+        .stacks
+        .contains(&(waiter.to_string(), target.to_string()));
+    blocked_by_target || child_is_target || stacked_on_target
 }
 
 fn has_cycle(relations: &Relations) -> bool {

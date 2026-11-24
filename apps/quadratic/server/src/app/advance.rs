@@ -4,7 +4,7 @@ use acid_cat_core::CapabilityDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::board::{self, caller_project};
+use super::board::{self, Board, caller_project};
 use super::catalog::capability;
 use super::lifecycle::apply;
 use super::model::{self, IssueIds};
@@ -77,8 +77,9 @@ async fn advance_to(context: &Context, input: AdvanceInput) -> Result<Advanced, 
                 status: input.status.clone(),
             };
             let (mut moved, mut left) = (Vec::new(), Vec::new());
+            let board = Board::load(tx)?;
             for (id, every_landing_deployed) in landed_up_to {
-                let issue = model::domain_issue(&board::issue(tx, &id)?)?;
+                let issue = board.issue(&board::issue(tx, &id)?)?;
                 if issue.category.is_resolved() || !workflow.is_before(&issue.status, &input.status)
                 {
                     continue;
@@ -93,7 +94,10 @@ async fn advance_to(context: &Context, input: AdvanceInput) -> Result<Advanced, 
                         apply(tx, &id, &change, None)?;
                         moved.push(id);
                     }
-                    Ok(Outcome::Unchanged) | Err(Failure::HumanOnly | Failure::Held { .. }) => {
+                    Ok(Outcome::Unchanged)
+                    | Err(
+                        Failure::HumanOnly | Failure::Held { .. } | Failure::BaseNotMerged { .. },
+                    ) => {
                         left.push(id);
                     }
                     Err(failure) => return Err(failure.into()),

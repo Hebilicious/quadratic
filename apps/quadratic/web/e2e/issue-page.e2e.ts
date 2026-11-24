@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { expect, test } from "./workspace.ts";
 
@@ -124,6 +126,82 @@ test("the human edits an issue, relates it, and loses nothing typed when the iss
       title: "Publish the guide on the website",
       description: "Publish it on the website.",
     },
+  });
+});
+
+test("an issue stacked on another names it both ways, and its page shows why while the base went back to work", async ({
+  page,
+  workspace,
+}) => {
+  const { repository } = workspace;
+  const issue = page.getByRole("article");
+
+  await test.step("an agent finishes DEM-1 on its branch, and DEM-2 is stacked on it", async () => {
+    workspace.quadratic("human", repository, "project", "create", "--key", "DEM", "--name", "Demo");
+    for (const title of ["Write the guide", "Translate the guide"]) {
+      workspace.quadratic("human", repository, "create", "--title", title, "--acceptance", "Done.");
+    }
+    const base = await workspace.worktree("agent-1", "guide");
+    workspace.quadratic("agent", base, "claim", "--issue", "DEM-1");
+    await writeFile(join(base, "guide.md"), "# The guide\n");
+    await workspace.git(base, "add", "guide.md");
+    await workspace.git(base, "commit", "--quiet", "--message", "Write the guide");
+    workspace.quadratic("agent", base, "close", "--issue", "DEM-1", "--evidence", "written");
+    workspace.quadratic(
+      "human",
+      repository,
+      "issue",
+      "link",
+      "--issue",
+      "DEM-2",
+      "--kind",
+      "stacked-on",
+      "--target",
+      "DEM-1",
+    );
+    const stacked = join(workspace.root, "agent-2");
+    await workspace.git(
+      repository,
+      "worktree",
+      "add",
+      "--quiet",
+      "-b",
+      "translation",
+      stacked,
+      "guide",
+    );
+    workspace.quadratic("agent", stacked, "claim", "--issue", "DEM-2");
+    workspace.quadratic(
+      "agent",
+      base,
+      "issue",
+      "update",
+      "--issue",
+      "DEM-1",
+      "--revision",
+      workspace.revision("DEM-1"),
+      "--status",
+      "in-progress",
+    );
+  });
+
+  await test.step("DEM-2, in progress, says it is stacked on DEM-1 and waits on it", async () => {
+    await page.goto(workspace.url("/issues/DEM-2"));
+    const relations = issue.getByRole("region", { name: "Relations" });
+    await expect(relations).toContainText("Stacked on");
+    await expect(relations.getByRole("link", { name: "DEM-1" })).toBeVisible();
+    const why = issue.getByRole("region", { name: "Why it is not ready" });
+    await expect(why.getByRole("listitem")).toHaveText([
+      "An issue it is stacked on is not in review, or your branch does not start from that issue's branch.",
+    ]);
+    await expect(why.getByRole("link", { name: "DEM-1" })).toBeVisible();
+  });
+
+  await test.step("DEM-1 says it is the base of DEM-2", async () => {
+    await page.goto(workspace.url("/issues/DEM-1"));
+    const relations = issue.getByRole("region", { name: "Relations" });
+    await expect(relations).toContainText("Base of");
+    await expect(relations.getByRole("link", { name: "DEM-2" })).toBeVisible();
   });
 });
 

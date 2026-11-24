@@ -49,6 +49,19 @@ impl Session {
             .clone()
     }
 
+    /// The caller of a call. For the calls where the branch decides whether an issue can be
+    /// started, its branch is the one its worktree has now: the worktree may have switched
+    /// branch since the session started.
+    fn caller_for(&self, id: &str) -> Caller {
+        let mut caller = self.caller();
+        if matches!(id, "issue.ready" | "issue.claim")
+            && let Some(worktree) = &caller.working_copy.worktree
+        {
+            caller.working_copy.branch = caller::branch_in(std::path::Path::new(worktree));
+        }
+        caller
+    }
+
     async fn claim_from<Sent>(
         &self,
         from: Caller,
@@ -103,7 +116,7 @@ impl Upstream {
                     )
                     .await
             }
-            _ => self.send(&self.session.caller(), id, input).await,
+            _ => self.send(&self.session.caller_for(id), id, input).await,
         }
     }
 
@@ -250,8 +263,51 @@ mod tests {
                 repository: Some("/demo/.git".into()),
                 worktree: Some(worktree.into()),
                 branch: Some(worktree.into()),
+                contains: None,
             },
         }
+    }
+
+    fn git(directory: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(args)
+            .current_dir(directory)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn ready_and_claim_act_from_the_branch_the_worktree_has_at_the_call() {
+        let folder = tempfile::tempdir().expect("a temporary folder");
+        let worktree = folder.path();
+        git(worktree, &["init", "--quiet", "--initial-branch=parse"]);
+        git(
+            worktree,
+            &["commit", "--quiet", "--allow-empty", "--message", "init"],
+        );
+        let session = Session::new(caller_in(&worktree.display().to_string()));
+
+        git(worktree, &["switch", "--quiet", "--create", "docs"]);
+        let branch = |id: &str| session.caller_for(id).working_copy.branch;
+        assert_eq!(branch("issue.ready").as_deref(), Some("docs"));
+        assert_eq!(branch("issue.claim").as_deref(), Some("docs"));
+        git(worktree, &["switch", "--quiet", "--detach"]);
+        assert_eq!(branch("issue.ready"), None);
+        assert_eq!(
+            branch("issue.list").as_deref(),
+            Some(worktree.display().to_string().as_str()),
+            "other calls keep the branch read at the start"
+        );
     }
 
     async fn let_every_ready_task_run() {

@@ -36,6 +36,7 @@ export const NotReadyReasonSchema = Schema.Literals([
   "category",
   "blocked",
   "children",
+  "stacked",
   "assigned",
   "claimed",
   "mine",
@@ -71,6 +72,7 @@ export const RelationKindSchema = Schema.Literals([
   "related",
   "duplicate",
   "discovered-from",
+  "stacked-on",
 ]);
 export type RelationKind = typeof RelationKindSchema.Type;
 

@@ -4,7 +4,7 @@ import { computed } from "vue";
 import type { DetailActor } from "../board/detail.machine.ts";
 import { rolesOf } from "../board/issues.ts";
 import type { Assignee, Issue } from "../board/model.ts";
-import { closeChanges, explainsNotReady } from "../board/lifecycle.ts";
+import { closeChanges, explainsNotReady, notReadyShown } from "../board/lifecycle.ts";
 import ChoiceField from "../edit/choice-field.vue";
 import CloseForm from "../edit/close-form.vue";
 import { issueEditor } from "../edit/issue-editor.ts";
@@ -171,14 +171,10 @@ function follow(event: MouseEvent): void {
         <button class="link-button" type="button" @click="detail.send({ type: 'retry' })">Load it again</button>
       </p>
 
-      <section
-        v-if="explainsNotReady(issue) && issue.notReady !== undefined"
-        class="readiness"
-        aria-label="Why it is not ready"
-      >
+      <section v-if="explainsNotReady(issue)" class="readiness" aria-label="Why it is not ready">
         <h3 class="field-label">Not ready</h3>
         <ul class="reasons">
-          <li v-for="reason in issue.notReady" :key="reason">{{ notReadyText(reason) }}</li>
+          <li v-for="reason in notReadyShown(issue)" :key="reason">{{ notReadyText(reason) }}</li>
         </ul>
         <p v-if="issue.blockedBy.length > 0" class="blocked-by">
           Waits on

@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::failure::Failure;
 use super::issue::IssueId;
 use super::readiness::{Wait, WaitKind};
+use super::stack::STACKED_ON;
 use super::workflow::Category;
 
 const WAITING_KIND: &str = "blocks";
@@ -11,14 +12,22 @@ const WAITING_KIND: &str = "blocks";
 pub enum RelationChange {
     Parent { child: IssueId, parent: IssueId },
     Blocks { blocker: IssueId, blocked: IssueId },
+    StackedOn { stacked: IssueId, base: IssueId },
 }
 
 impl RelationChange {
     pub fn link(source: &str, kind: &str, target: &str) -> Option<RelationChange> {
-        (kind == WAITING_KIND).then(|| RelationChange::Blocks {
-            blocker: source.to_owned(),
-            blocked: target.to_owned(),
-        })
+        match kind {
+            WAITING_KIND => Some(RelationChange::Blocks {
+                blocker: source.to_owned(),
+                blocked: target.to_owned(),
+            }),
+            STACKED_ON => Some(RelationChange::StackedOn {
+                stacked: source.to_owned(),
+                base: target.to_owned(),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -28,6 +37,7 @@ pub struct WaitGraph {
     parents: BTreeMap<IssueId, IssueId>,
     children: BTreeMap<IssueId, BTreeSet<IssueId>>,
     blockers: BTreeMap<IssueId, BTreeSet<IssueId>>,
+    bases: BTreeMap<IssueId, BTreeSet<IssueId>>,
 }
 
 impl WaitGraph {
@@ -48,7 +58,22 @@ impl WaitGraph {
             RelationChange::Blocks { blocker, blocked } => {
                 self.blockers.entry(blocked).or_default().insert(blocker);
             }
+            RelationChange::StackedOn { stacked, base } => {
+                self.bases.entry(stacked).or_default().insert(base);
+            }
         }
+    }
+
+    pub fn bases(&self, id: &str) -> Vec<IssueId> {
+        self.bases.get(id).into_iter().flatten().cloned().collect()
+    }
+
+    pub fn stacked_on(&self, base: &str) -> Vec<IssueId> {
+        self.bases
+            .iter()
+            .filter(|(_, bases)| bases.contains(base))
+            .map(|(stacked, _)| stacked.clone())
+            .collect()
     }
 
     pub fn waits(&self, id: &str) -> Vec<Wait> {
@@ -87,8 +112,15 @@ impl WaitGraph {
         }
     }
 
+    /// The edges a cycle may not close: every wait, and every base. A stacked issue does not
+    /// wait for its bases to be resolved, but its branch starts from theirs, so a loop through
+    /// `stacked-on` and `blocks` together could never be worked through either.
     fn waited_on(&self, id: &str) -> BTreeSet<IssueId> {
-        self.waits(id).into_iter().map(|wait| wait.on).collect()
+        self.waits(id)
+            .into_iter()
+            .map(|wait| wait.on)
+            .chain(self.bases(id))
+            .collect()
     }
 
     fn find_cycle(&self) -> Option<Vec<IssueId>> {
@@ -98,6 +130,7 @@ impl WaitGraph {
             .chain(self.parents.keys())
             .chain(self.children.keys())
             .chain(self.blockers.keys())
+            .chain(self.bases.keys())
             .collect();
         let mut done: BTreeSet<IssueId> = BTreeSet::new();
         for start in issues {

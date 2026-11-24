@@ -2,6 +2,7 @@ use acid_cat_core::CapabilityDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::ancestry::{Scope, verified};
 use super::board::{self, Board, all_issues, caller_project, require_issue};
 use super::catalog::capability;
 use super::cursor::Listing;
@@ -45,7 +46,7 @@ pub(super) fn ready() -> CapabilityDefinition<Context, ReadyInput, Items, Value>
 }
 
 async fn ready_issues(context: &Context, input: ReadyInput) -> Result<Items, Refused> {
-    let caller = context.caller.clone();
+    let caller = verified(context, Scope::Every).await?;
     context
         .read(AsOf::Now, move |view| {
             let project = caller_project(view, input.project.as_deref(), &caller)?;
@@ -113,7 +114,10 @@ pub(super) fn list() -> CapabilityDefinition<Context, ListInput, IssuePage, Valu
 }
 
 async fn list_issues(context: &Context, input: ListInput) -> Result<IssuePage, Refused> {
-    let caller = context.caller.clone();
+    let caller = match input.as_of {
+        None => verified(context, Scope::Every).await?,
+        Some(_) => context.caller.clone(),
+    };
     let mine = ClaimFilter::HeldBy(caller.holder_key().as_str().to_owned());
     let claim = match input.claim.as_deref() {
         Some("mine") => Some(mine),
@@ -217,7 +221,10 @@ async fn get_issue(context: &Context, input: GetInput) -> Result<IssueAnswer<Iss
     if input.as_of.is_none() {
         look_at_repository_of(context, &input.issue).await;
     }
-    let caller = context.caller.clone();
+    let caller = match input.as_of {
+        None => verified(context, Scope::Issue(input.issue.clone())).await?,
+        Some(_) => context.caller.clone(),
+    };
     let issue = context
         .read(as_of(input.as_of), move |view| {
             whole_issue(view, &input.issue, &caller)
@@ -433,7 +440,7 @@ async fn update_issue(
         .write_issue("issue.update", reason, move |tx| {
             let record = board::issue(tx, &input.issue)?;
             let project = model::domain_project(&board::project(tx, &record.project)?)?;
-            let issue = model::domain_issue(&record)?;
+            let issue = Board::load(tx)?.issue(&record)?;
             let assignee = input.given_or_cleared("assignee", &input.assignee);
             let event = Event::Update {
                 revision: input.revision,

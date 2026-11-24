@@ -69,27 +69,39 @@ pub fn client(caller: &Caller, url: &str) -> Result<HttpClient, String> {
 }
 
 fn working_copy(directory: &Path) -> WorkingCopy {
-    let git = |args: &[&str]| -> Option<String> {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(directory)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        let text = String::from_utf8(output.stdout).ok()?;
-        let text = text.trim_end_matches(['\n', '\r']);
-        (output.status.success() && !text.is_empty()).then(|| text.to_owned())
-    };
-    let branch = match git(&["rev-parse", "--abbrev-ref", "HEAD"]).as_deref() {
+    WorkingCopy {
+        repository: git_in(
+            directory,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ),
+        worktree: git_in(
+            directory,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        ),
+        branch: branch_in(directory),
+        contains: None,
+    }
+}
+
+/// The branch checked out in `directory` now; `None` on a detached `HEAD` or outside git.
+pub fn branch_in(directory: &Path) -> Option<String> {
+    match git_in(directory, &["rev-parse", "--abbrev-ref", "HEAD"]).as_deref() {
         Some("HEAD") => None,
         Some(branch) => Some(branch.to_owned()),
         // `rev-parse --abbrev-ref HEAD` fails on a branch with no commit yet; `symbolic-ref` still names it.
-        None => git(&["symbolic-ref", "--short", "--quiet", "HEAD"]),
-    };
-    WorkingCopy {
-        repository: git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]),
-        worktree: git(&["rev-parse", "--path-format=absolute", "--show-toplevel"]),
-        branch,
+        None => git_in(directory, &["symbolic-ref", "--short", "--quiet", "HEAD"]),
     }
+}
+
+fn git_in(directory: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(directory)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim_end_matches(['\n', '\r']);
+    (output.status.success() && !text.is_empty()).then(|| text.to_owned())
 }

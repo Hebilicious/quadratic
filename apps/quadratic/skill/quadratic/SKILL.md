@@ -26,11 +26,12 @@ Read [`planning.md`](planning.md) before you turn a plan or a PRD into issues.
 3. Commit with `Refs: ABC-12` as the last line. A pull request's body carries the same line: a squash merge may keep only that body.
 4. `quadratic close --issue ABC-12 --evidence "..."`: per acceptance criterion the command and what it printed, and the commit. The issue is now in review and still yours.
 5. Ask for the review as `AGENTS.md` says, with the issue, the branch and the evidence.
+6. While it waits, you may go on with the next issue on a branch from this one: `quadratic issue link --issue ABC-13 --kind stacked-on --target ABC-12`, then claim ABC-13 from that branch. If ABC-12 goes back to work, keep your claim on ABC-13 and merge ABC-12's new commits into your branch before you go on.
 
 ## After the review
 
 - Changes requested: first `quadratic issue update --issue ABC-12 --revision <revision> --status in-progress`, so the board shows you at work. Then change, commit, `close` with the new evidence, and ask again.
-- Accepted: merge as `AGENTS.md` says; after a merge on GitHub, `git fetch`. Quadratic sees the merge and moves the issue to `merged`, which gives it a new `revision`. `quadratic show --issue ABC-12` waits up to 2 seconds for the repository: while it still says review, run it again; if it stays there, the commit on the default branch lacks `Refs: ABC-12` or landed before the `close`: tell the human. When the default branch's checks pass, or at once when it has none: `quadratic issue update --issue ABC-12 --revision <revision from that show> --status done`.
+- Accepted: merge as `AGENTS.md` says; after a merge on GitHub, `git fetch`. Quadratic sees the merge and moves the issue to `merged`, which gives it a new `revision`. `quadratic show --issue ABC-12` waits up to 2 seconds for the repository: while it still says review, run it again; if it stays there, it waits for an issue it is stacked on to merge (nothing to do), or the commit on the default branch lacks `Refs: ABC-12` or landed before the `close`: tell the human. When the default branch's checks pass, or at once when it has none: `quadratic issue update --issue ABC-12 --revision <revision from that show> --status done`.
 
 ## Blocked
 

@@ -1,4 +1,4 @@
-import type { IssueSummary, Project } from "./model.ts";
+import type { IssueSummary, NotReadyReason, Project } from "./model.ts";
 import { isResolved } from "./now.ts";
 
 export function closeChanges(
@@ -12,6 +12,17 @@ export function closeChanges(
   );
 }
 
-export function explainsNotReady(issue: Pick<IssueSummary, "ready" | "category">): boolean {
-  return !issue.ready && (issue.category === "backlog" || issue.category === "unstarted");
+type Readiness = Pick<IssueSummary, "ready" | "category" | "notReady">;
+
+export function notReadyShown(issue: Readiness): readonly NotReadyReason[] {
+  if (issue.ready) {
+    return [];
+  }
+  const reasons = issue.notReady ?? [];
+  const unstarted = issue.category === "backlog" || issue.category === "unstarted";
+  return unstarted ? reasons : reasons.filter((reason) => reason === "stacked");
+}
+
+export function explainsNotReady(issue: Readiness): boolean {
+  return notReadyShown(issue).length > 0;
 }

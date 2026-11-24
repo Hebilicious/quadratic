@@ -27,6 +27,7 @@ pub fn caller_of(headers: &HeaderMap) -> Result<Caller, Refusal> {
             repository: header(headers, REPOSITORY_HEADER)?,
             worktree: header(headers, WORKTREE_HEADER)?,
             branch: header(headers, BRANCH_HEADER)?,
+            contains: None,
         },
     })
 }
