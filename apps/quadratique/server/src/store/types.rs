@@ -225,9 +225,20 @@ pub struct IssueFields {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimFilter {
-    HeldBy(String),
+    /// Claims with this holder key, and the claims of this session when there is one.
+    Mine {
+        key: String,
+        session: Option<HolderSession>,
+    },
     Any,
     Unclaimed,
+}
+
+/// A harness's session id, which is only unique within that harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HolderSession {
+    pub harness: Option<String>,
+    pub session: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

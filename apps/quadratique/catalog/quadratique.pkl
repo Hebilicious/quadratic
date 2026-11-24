@@ -337,7 +337,7 @@ types {
   }
   ["Claim"] {
     type = "object"
-    description = "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time."
+    description = "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time. Its session is the holder's `harness` and `session`, not `hostThread`; a holder without `session` has none."
     properties {
       holder = module.ref("Actor")
       branch = text("The git branch of the holder.")
@@ -706,7 +706,7 @@ capabilities {
         claim {
           type = "string"
           enum { "mine"; "any"; "none" }
-          description = "`mine`: held by the caller, the same actor name in the same worktree. `any`: claimed by anyone. `none`: unclaimed."
+          description = "`mine`: held by the caller's session, or by its name in its worktree. `any`: claimed by anyone. `none`: unclaimed."
         }
         ready { type = "boolean" }
         parent = module.ref("IssueId")

@@ -12,7 +12,9 @@ use super::{Context, Refused, finish};
 use crate::domain::{
     Assignee, Caller, Category, Event, Link, Outcome, RelationChange, create_status, decide,
 };
-use crate::store::{AsOf, ClaimFilter, IssueCreated, IssueFields, IssueFilter, NewIssue, View};
+use crate::store::{
+    AsOf, ClaimFilter, HolderSession, IssueCreated, IssueFields, IssueFilter, NewIssue, View,
+};
 
 pub(super) fn as_of(text: Option<String>) -> AsOf {
     match text {
@@ -118,7 +120,13 @@ async fn list_issues(context: &Context, input: ListInput) -> Result<IssuePage, R
         None => verified(context, Scope::Every).await?,
         Some(_) => context.caller.clone(),
     };
-    let mine = ClaimFilter::HeldBy(caller.holder_key().as_str().to_owned());
+    let mine = ClaimFilter::Mine {
+        key: caller.holder_key().as_str().to_owned(),
+        session: caller.actor.session.clone().map(|session| HolderSession {
+            harness: caller.actor.harness.clone(),
+            session,
+        }),
+    };
     let claim = match input.claim.as_deref() {
         Some("mine") => Some(mine),
         Some("any") => Some(ClaimFilter::Any),
