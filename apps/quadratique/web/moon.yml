@@ -1,0 +1,83 @@
+id: "quadratique-web"
+language: "typescript"
+layer: "application"
+tags: ["quadratique"]
+
+project:
+  title: "Quadratique web app"
+  description: "The human's live view of the board: Vue Vapor, Effect, XState and cssforge, served by the Quadratique server."
+
+toolchains:
+  default: ["javascript", "node", "pnpm"]
+  typescript:
+    syncProjectReferences: false
+
+fileGroups:
+  sources:
+    - "src/**/*"
+    - "public/**/*"
+    - "index.html"
+    - "cssforge.config.ts"
+    - "vite.config.ts"
+    - "vize.config.ts"
+    - "tsconfig.json"
+    - "/tsconfig.base.json"
+    - "package.json"
+    - "/apps/quadratique/catalog/quadratique.acidcat.json"
+    - "/apps/quadratique/catalog/package.json"
+  e2e:
+    - "e2e/**/*"
+
+tasks:
+  build:
+    description: "Build the app into dist, which the Quadratique server serves."
+    command: "vite build"
+    inputs: ["@group(sources)"]
+    outputs: ["dist/**/*"]
+
+  dev:
+    description: "Rebuild the app into dist whenever a source changes; the running server serves each new build."
+    command: "vite build --watch"
+    preset: "server"
+
+  typecheck:
+    description: "Type-check the components, the sources and the Journey with vize."
+    command: "vize check --tsconfig tsconfig.json src e2e"
+    inputs: ["@group(sources)", "@group(e2e)"]
+
+  lint:
+    description: "Lint the components with vize and the TypeScript with oxlint, denying warnings."
+    script: "vize lint --max-warnings 0 src && oxlint --deny-warnings ."
+    inputs: ["@group(sources)", "@group(e2e)"]
+
+  format:
+    description: "Format the TypeScript with oxfmt and the components with vize."
+    script: "oxfmt . && vize fmt --write 'src/**/*.vue'"
+    options:
+      cache: false
+
+  format-check:
+    description: "Check the formatting of the TypeScript and the components."
+    script: "oxfmt --check . && vize fmt --check 'src/**/*.vue'"
+    inputs: ["@group(sources)", "@group(e2e)", ".oxfmtrc.json"]
+
+  test:
+    description: "The headless proofs: the core's parity with the shared catalog, the board's live recovery, the keyboard, the now view, commands and edits."
+    command: "vitest run"
+    inputs: ["@group(sources)", "vitest.config.ts"]
+    tags: ["candidate"]
+
+  e2e:
+    description: "The Journeys in Chromium, against the real quadratique binary on a temporary home."
+    command: "playwright test -c e2e/playwright.config.ts"
+    deps:
+      - target: "~:build"
+      - target: "quadratique-cli:build"
+    inputs:
+      [
+        "@group(e2e)",
+        "dist/**/*",
+        "/apps/quadratique/target/debug/quadratique",
+        "/apps/quadratique/server/tests/fixtures/findings/site.json",
+      ]
+    tags: ["candidate"]

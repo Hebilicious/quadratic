@@ -1,6 +1,6 @@
-# Each folder of apps/quadratic/ that has a moon.yml is a moon project.
+# Each folder of apps/quadratique/ that has a moon.yml is a moon project.
 projects:
-  - "apps/quadratic/*/moon.yml"
+  - "apps/quadratique/*/moon.yml"
 
 telemetry: false
 

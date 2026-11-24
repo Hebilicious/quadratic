@@ -1,0 +1,37 @@
+id: "quadratique-eval"
+language: "python"
+tags: ["quadratique"]
+
+fileGroups:
+  harness:
+    - "harness/qeval/**/*.py"
+    - "harness/pyproject.toml"
+    - "harness/uv.lock"
+    - "harness/fixtures/**/*"
+
+tasks:
+  test:
+    command: "uv run --directory harness python -W error::ResourceWarning -m unittest"
+    inputs: ["@group(harness)", "harness/tests/**/*.py", "seed-tally.sh"]
+  scripted:
+    command: "uv run --directory harness qeval scripted"
+    inputs: ["@group(harness)"]
+    options:
+      cache: false
+      runInCI: false
+  agents:
+    command: "uv run --directory harness qeval agents"
+    inputs: ["@group(harness)"]
+    options:
+      cache: false
+      runInCI: false
+  report:
+    command: "uv run --directory harness qeval report"
+    options:
+      cache: false
+      runInCI: false
+  check-home:
+    command: "uv run --directory harness qeval check-home"
+    options:
+      cache: false
+      runInCI: false

@@ -12,13 +12,13 @@ until the first one is resolved, which is after the merge, and no link said that
 branch starts from the first one.
 
 Waiting for a review is not a hard blocker. The agent can keep going on a branch that starts
-from the branch under review, as long as Quadratic knows how the two branches relate: who may
+from the branch under review, as long as Quadratique knows how the two branches relate: who may
 start the next issue, what happens when the review sends the first issue back, and in what
 order the two may merge.
 
 ## Decision
 
-Quadratic has a link kind `stacked-on`. `B stacked-on A` means that B's branch starts from A's
+Quadratique has a link kind `stacked-on`. `B stacked-on A` means that B's branch starts from A's
 branch. A is a *base* of B. The domain rules live in `server/src/domain/stack.rs`; the state of
 each base comes from `Board::load` in `server/src/app/board.rs`, which reads the projects and
 the stages only of the issues at either end of a `stacked-on` link.
@@ -81,7 +81,7 @@ earlier build is recreated.
     claim that already exists. A link added to a B that someone holds follows the same checks
     as any new link (rule 17 and the cycle check, rule 21); once added, B shows `stacked` while
     a base is before review or canceled, and no reason from the branch rule.
-12. **The MCP server.** `quadratic mcp` reads the branch that the session's worktree has at
+12. **The MCP server.** `quadratique mcp` reads the branch that the session's worktree has at
     each `issue.ready` and `issue.claim`, so a worktree switched to another branch, or
     detached, after the session started counts as it is now. Other calls send the branch read
     when the session started, or when its last claim that named a worktree was taken.
@@ -142,7 +142,7 @@ earlier build is recreated.
     put in the table `held_merges`. (`app/landings.rs`.)
 19. **When a hold is assessed again.** After every move of an issue, after each issue an
     import finishes, after a `stacked-on` link is removed and after a workflow change,
-    Quadratic decides again for each held issue concerned. B moves to the `merge` status once
+    Quadratique decides again for each held issue concerned. B moves to the `merge` status once
     the guard allows it, and the hold ends; B's move is part of the same store commit as the
     move that released it, with that commit's author and operation. When B is already resolved
     or at the `merge` status, the hold is discarded and B does not move. (`release_held` in
@@ -220,7 +220,7 @@ session test in `cli/src/mcp.rs`.
   that this link removes.
 - **Hold B's landing by ignoring it, as for a trailer landing before `close`.** B would then
   stay in review after its bases merge, and someone would have to move it by hand. A held
-  landing is known to be B's, so Quadratic moves B itself.
+  landing is known to be B's, so Quadratique moves B itself.
 - **At most one base for each issue.** The rules generalise to several bases without new
   states, so the limit would only refuse a valid plan.
 - **Offer B to every caller while a base is in review.** An agent on an unrelated branch would
