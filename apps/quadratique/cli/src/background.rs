@@ -458,18 +458,18 @@ impl Home {
         self.runtime_file().map(|runtime| runtime.pid)
     }
 
-    /// A process that may not write the home can still ask: `flock` takes a lock on a read-only descriptor, and a
-    /// missing lock file means that no server ever held the home.
+    /// Asking creates nothing, so that a command that only looks (`status`, `init --dry-run`, `upgrade --skills`)
+    /// writes nothing in the home. `flock` takes a lock on a read-only descriptor, so a process that may not write the
+    /// home can still ask, and a missing lock file means that no server ever held the home.
     pub fn held(&self) -> std::io::Result<bool> {
-        let lock = match self.open_lock(&self.prepared.lock()) {
+        let lock = match File::open(self.prepared.lock()) {
             Ok(lock) => lock,
-            Err(error) if cannot_write(&error) => match File::open(self.prepared.lock()) {
-                Ok(lock) => lock,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(error),
-            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error),
         };
+        if !lock.metadata()?.is_file() {
+            return Err(std::io::Error::other("it is not a regular file"));
+        }
         match lock.try_lock() {
             Ok(()) => Ok(false),
             Err(TryLockError::WouldBlock) => Ok(true),

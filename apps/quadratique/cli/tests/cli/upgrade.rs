@@ -554,6 +554,10 @@ fn check_and_skills_change_nothing_and_start_no_server() {
     assert!(installed.home.servers().is_empty());
     assert!(!installed.store().exists());
     assert!(!installed.home.path().join("server.json").exists());
+    assert!(
+        !installed.home.path().join("server.lock").exists(),
+        "looking at the home created its lock file"
+    );
 }
 
 #[test]
