@@ -299,7 +299,7 @@
       "type": "object"
     },
     "Claim": {
-      "description": "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree: one agent per worktree at a time. Its session is the holder's `harness` and `session`, not `hostThread`; a holder without both has none.",
+      "description": "Who holds the issue, and where the work happens. The holder is this actor's name in this worktree, or, from any worktree, an agent with the holder's session: the holder's `harness` and `session`, not `hostThread`, both given and not blank, the holder an agent. A holder without both has none. One agent per worktree at a time; acting from another worktree changes neither `branch` nor `worktree`.",
       "properties": {
         "branch": {
           "description": "The git branch of the holder.",
@@ -906,7 +906,7 @@
       "type": "object"
     },
     "NotReadyReason": {
-      "description": "`category`: the status is not of the unstarted category. `blocked`: a blocker of the issue or of an ancestor is unresolved. `children`: a child is unresolved. `stacked`: the unresolved issue is stacked on an issue that is before the workflow's `review` status or canceled, or, when nobody holds it, on an issue in review whose branch the caller's branch does not contain. `assigned`: the issue is assigned, and not to the caller. `claimed`: someone else holds it. `mine`: the caller holds it, the same actor name in the same worktree.",
+      "description": "`category`: the status is not of the unstarted category. `blocked`: a blocker of the issue or of an ancestor is unresolved. `children`: a child is unresolved. `stacked`: the unresolved issue is stacked on an issue that is before the workflow's `review` status or canceled, or, when nobody holds it, on an issue in review whose branch the caller's branch does not contain. `assigned`: the issue is assigned, and not to the caller. `claimed`: someone else holds it. `mine`: the caller holds it, as `Claim` defines the holder: the same actor name in the same worktree, or the holder's session from any worktree.",
       "enum": [
         "category",
         "blocked",
@@ -1634,7 +1634,7 @@
       }
     },
     "issue.claim": {
-      "description": "Take a ready issue, atomically: no two callers can hold it. The only way to start a claim. Records the caller, its branch and its worktree, and moves the issue to the workflow's `claim` status. The holder is the same actor name in the same worktree, or, from any worktree, an actor with the holder's `harness` and `session`, both given; its repeated call changes nothing and keeps the claim's branch and worktree. Fails with `Held`, naming the holder, when someone else holds it; with `NotReady`, giving the reasons and the unresolved blockers, when it is not ready; and with `NoWorkingCopy` when the caller is not in a git worktree on a branch, or not in `worktree` of the project. Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "Take a ready issue, atomically: no two callers can hold it. The only way to start a claim. Records the caller, its branch and its worktree, and moves the issue to the workflow's `claim` status. The holder is as `Claim` defines it, from any worktree of its session; its repeated call changes nothing and keeps the claim's branch and worktree. Fails with `Held`, naming the holder, when someone else holds it; with `NotReady`, giving the reasons and the unresolved blockers, when it is not ready; and with `NoWorkingCopy` when the caller is not in a git worktree on a branch, or not in `worktree` of the project. Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
       "audience": [
         "cli",
         "mcp"
@@ -2074,7 +2074,7 @@
             "type": "array"
           },
           "claim": {
-            "description": "`mine`: held by the caller's session, or by its name in its worktree. `any`: claimed by anyone. `none`: unclaimed.",
+            "description": "`mine`: held by the caller's session (an agent's `harness` and `session`), or by its name in its worktree. `any`: claimed by anyone. `none`: unclaimed.",
             "enum": [
               "mine",
               "any",
