@@ -80,16 +80,23 @@ mod macos {
         pub environment: Vec<Vec<u8>>,
     }
 
-    /// The process ids of this account; a `ps` that fails fails the test.
-    pub fn pids() -> Vec<u32> {
+    /// The process ids of this account whose command line and environment, as `ps -E` flattens them into one
+    /// line, contain `text`. A process that holds `text` in one of its strings holds it in that line too, so this
+    /// finds every such process, and some more, which `arguments` then tells apart; reading the arguments of every
+    /// process instead would cost a megabyte each (`ARG_MAX`). A `ps` that fails fails the test.
+    pub fn pids_mentioning(text: &str) -> Vec<u32> {
         let listed = Command::new("ps")
-            .args(["-x", "-o", "pid="])
+            .args(["-E", "-ww", "-x", "-o", "pid=", "-o", "command="])
             .output()
             .expect("ps runs");
         assert!(listed.status.success(), "ps fails: {listed:?}");
         String::from_utf8_lossy(&listed.stdout)
             .lines()
-            .map(|line| line.trim().parse().expect("a process id"))
+            .filter(|line| line.contains(text))
+            .map(|line| {
+                let pid = line.split_whitespace().next().unwrap_or_default();
+                pid.parse().expect("a process id")
+            })
             .collect()
     }
 
@@ -214,7 +221,7 @@ impl Home {
 
     #[cfg(target_os = "macos")]
     pub fn processes(&self) -> Vec<u32> {
-        macos::pids()
+        macos::pids_mentioning(&self.marker())
             .into_iter()
             .filter(|pid| self.is_ours(*pid))
             .collect()
