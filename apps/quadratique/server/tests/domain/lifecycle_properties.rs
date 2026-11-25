@@ -316,6 +316,18 @@ fn no_sequence_of_events_leaves_a_claim_outside_the_started_category_and_a_ready
                         Some(*claim)
                     }
                     ClaimAfter::Ended => None,
+                    ClaimAfter::Freed(former) => {
+                        prop_assert!(
+                            matches!(event, Event::Release)
+                                && issue.claim.as_ref() == Some(&*former)
+                                && change.status == issue.status,
+                            "{:?} freed {:?} and moved to {}",
+                            event,
+                            former,
+                            change.status
+                        );
+                        None
+                    }
                 };
                 issue.status = change.status;
                 issue.category = category.expect("checked above");

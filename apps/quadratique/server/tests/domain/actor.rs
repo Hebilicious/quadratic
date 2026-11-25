@@ -265,3 +265,65 @@ fn the_longest_name_fits_its_bound() {
     );
     assert_eq!(actor.name.chars().count(), 420);
 }
+
+#[test]
+fn a_blank_session_is_no_session_and_a_valid_one_is_kept_exactly() {
+    let from_variable = detect(
+        &[("CLAUDECODE", "1"), ("CLAUDE_CODE_SESSION_ID", " \t")],
+        Binding::Cli,
+        FIX_LOGIN,
+    );
+    let from_override = detect(
+        &[
+            ("CLAUDECODE", "1"),
+            ("QUADRATIQUE_ACTOR_FIELDS", r#"{"session":"  "}"#),
+        ],
+        Binding::Cli,
+        FIX_LOGIN,
+    );
+    let padded = detect(
+        &[
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_SESSION_ID", " session-1"),
+        ],
+        Binding::Cli,
+        FIX_LOGIN,
+    );
+
+    assert_eq!(from_variable.session, None);
+    assert_eq!(from_override.session, None);
+    assert_eq!(padded.session.as_deref(), Some(" session-1"));
+    assert_eq!(padded.agent_session(), Some(("claude-code", " session-1")));
+}
+
+#[test]
+fn the_session_of_an_agent_needs_a_harness_and_a_session_that_are_not_blank() {
+    let agent = |harness: Option<&str>, session: Option<&str>| Actor {
+        harness: harness.map(Into::into),
+        session: session.map(Into::into),
+        ..detect(&[("CLAUDECODE", "1")], Binding::Cli, FIX_LOGIN)
+    };
+
+    assert_eq!(
+        agent(Some("claude-code"), Some("session-1")).agent_session(),
+        Some(("claude-code", "session-1"))
+    );
+    assert_eq!(agent(Some("claude-code"), Some(" ")).agent_session(), None);
+    assert_eq!(agent(Some(" "), Some("session-1")).agent_session(), None);
+    assert_eq!(agent(None, Some("session-1")).agent_session(), None);
+}
+
+#[test]
+fn a_human_has_no_agent_session_whatever_fields_it_declares() {
+    let human = detect(
+        &[(
+            "QUADRATIQUE_ACTOR_FIELDS",
+            r#"{"harness":"claude-code","session":"session-1"}"#,
+        )],
+        Binding::Cli,
+        FIX_LOGIN,
+    );
+
+    assert_eq!(human.kind, ActorKind::Human);
+    assert_eq!(human.agent_session(), None);
+}

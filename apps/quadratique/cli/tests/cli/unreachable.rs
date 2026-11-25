@@ -262,6 +262,26 @@ fn a_stale_runtime_file_that_names_a_server_of_another_account_does_not_stop_a_s
 
 /// The home and the files in it stay read-only for this test's process, as on a read-only file system, until the
 /// guard is dropped.
+#[test]
+fn in_a_sandbox_init_prints_the_build_text_of_a_skill_file_without_a_server() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let _sandboxed = ReadOnly::make(home.path());
+
+    let printed = home
+        .quadratique(elsewhere.path())
+        .args(["init", "--print", "SKILL.md"])
+        .run();
+
+    assert_eq!(printed.code, 0, "{printed:?}");
+    assert_eq!(
+        printed.stdout,
+        include_str!("../../../skill/quadratique/SKILL.md")
+    );
+    assert!(home.servers().is_empty());
+    assert_eq!(entries(home.path()), Vec::<String>::new());
+}
+
 struct ReadOnly(PathBuf);
 
 impl ReadOnly {

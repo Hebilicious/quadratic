@@ -1,9 +1,11 @@
+mod agents_line;
 mod background;
 mod caller;
 mod commands;
 mod init;
 mod mcp;
 mod route;
+mod shipped;
 
 use std::sync::Arc;
 
