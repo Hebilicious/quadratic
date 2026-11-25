@@ -1207,5 +1207,4 @@ mod tests {
         assert_eq!(new_file, None);
         assert!(existing.is_some_and(|reason| reason.contains("SKILL.md")));
     }
-
 }
