@@ -431,21 +431,25 @@ When the release is newer, it:
 
 1. checks that the store can be opened by the release (see below), that the binary is not inside
    a git working tree, and that no other account can replace files in its folder: the folder and
-   every folder above it belong to you or to root, and only you can write the folder (a folder
-   above it may be writable by others only when it is sticky, as `/tmp` is; a group that is your
-   own private group counts as you);
-2. takes a lock in that folder, so that one upgrade at a time replaces the binary;
+   every folder above it belong to you or to root, no group and no other account can write the
+   folder, and a folder above it may be writable by a group or by others only when it is sticky,
+   as `/tmp` is;
+2. takes a lock in that folder (`.quadratique-upgrade.lock`), held until the server is restarted
+   and the repositories are reported, so that one upgrade at a time works on the binary;
 3. downloads the archive for this platform from github.com, which redirects to
    `release-assets.githubusercontent.com` (or `objects.githubusercontent.com`,
    `github-releases.githubusercontent.com`); no other host is reached, and only over HTTPS;
 4. checks the archive against the SHA-256 that the GitHub API gives for it (`digest`);
-5. writes the new binary into a private folder beside the running one, runs it with `--version`
-   in an empty environment from `/`, and renames it over the running binary.
+5. writes the new binary into a private folder beside the running one, runs that very file (on
+   Linux through its open descriptor) with `--version` in an empty environment from `/`, checks
+   the store schema again, and renames the binary over the running one.
 
-Then it brings the server of this home to the new build. When `quadratique.service` runs the
-server of this home, it restarts the service and waits, as `install.sh` does, until the new build
-serves this home. Without the service, it stops the server, so that the next command starts the
-new build. Its answer says the version it left (`from`), the one it reached (`to`), and in
+Then it brings the server of this home to the new build. It acts only on a server that runs the
+replaced file, told by the device and inode of the file the process runs (Linux). When
+`quadratique.service` runs that server, it restarts the service and waits, as `install.sh` does,
+until the new build serves this home. Without the service, it stops that server through a pidfd,
+so that the next command starts the new build. When it cannot tell what the server runs, or
+`systemctl` fails, it stops nothing and says what to run. Its answer says the version it left (`from`), the one it reached (`to`), and in
 `server` what it did. Run again, it answers `"upToDate": true` and changes nothing; when an earlier
 run was stopped after the rename and the server still runs the earlier build, it restarts that
 server. `quadratique upgrade --check` says the installed and the latest version and changes
@@ -458,8 +462,9 @@ not run or says another version. `upgrade` never installs an older release than 
 unless you pass `--allow-downgrade`, and does not run as root.
 
 Each binary knows the store schema it opens. A newer release opens every schema the running build
-knows. An older release is known to open only the schema of the first release, so a downgrade is
-refused when the store has a newer one: its server could not start.
+knows. For an older release, the binary keeps a table of the first release of each schema; a
+downgrade is refused when the store has a schema the release does not know: its server could not
+start. The schema comes from the home's server when one runs, else from the store file.
 
 When mise or cargo installed the binary, `upgrade` replaces nothing. It answers that manager's
 command in `run` (`mise upgrade --bump github:Hebilicious/quadratique`, or
@@ -469,8 +474,10 @@ them from where the binary is: inside a mise `installs/<tool>/<version>/` folder
 lists the `quadratique` package. When a sign of a manager does not hold up (a marker that cannot be
 read or names another tool), it replaces nothing and says why.
 
-The digest comes from the GitHub API, not from the place that serves the archive. What is still
-trusted: GitHub, and whoever can publish a release of `Hebilicious/quadratique`.
+`upgrade` defends against other accounts on the machine and against the network. A process of
+your own account already holds your files and is outside what it defends against. The digest
+comes from the GitHub API, not from the place that serves the archive. What is still trusted:
+GitHub, and whoever can publish a release of `Hebilicious/quadratique`.
 
 The first start of a new binary upgrades the store to that binary's schema, one commit per
 step. A binary refuses a store newer than the schema it knows. Back up the store (see "Backups") before you upgrade, so that you can go back to the older binary
@@ -479,9 +486,11 @@ with the store as it was.
 ### The repositories after an upgrade
 
 `upgrade` writes into no repository, because a repository may take changes only through a branch
-and a pull request. Its answer has a `skills` report, which the new binary makes. It reads the
-projects from the store, read-only, without starting a server, and the main checkout of each
-project's repository, as `quadratique init --dry-run` does. It lists
+and a pull request. Its answer has a `skills` report, which the new binary makes. It starts no
+server: when one runs for the home, the server lists the projects; otherwise, when a store
+exists, the command reads it once, read-only, and the store engine may leave its lock file
+(`.workspace.db-lock`) beside it, which the engine creates for any reader. Then it reads the main
+checkout of each project's repository, as `quadratique init --dry-run` does. It lists
 
 - `current`: the repositories whose skill is this build's;
 - `older`: each repository whose skill holds an earlier build's text, with the command to run
