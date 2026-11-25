@@ -248,7 +248,7 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
         .try_clone_to_owned()
         .expect("a second descriptor of the listener");
     let socket = file.path().to_path_buf();
-    let served = serve::serve_socket(listener, file, Vec::new());
+    let served = serve::serve_socket(listener, file, Vec::new(), &serve::Gate::default());
     let other_name = home.path().join("same-socket");
     std::fs::hard_link(&socket, &other_name).expect("a hard link to the socket");
     std::os::unix::net::UnixStream::connect(&other_name).expect("the link reaches the socket");
@@ -541,4 +541,138 @@ async fn a_socket_or_a_link_of_another_account_is_refused_before_the_lock_as_ano
         matches!(&refusal, HomeError::ForeignLink { .. }),
         "{refusal}"
     );
+}
+
+/// A stop names the generation it means. Another generation gets `409` with the serving one, and the server keeps
+/// serving on both listeners. Its own generation gets `202`: the client reads the whole answer, both listeners refuse
+/// new connections from then on, and only then does the server ask to shut down.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_its_own_gets_202() {
+    use futures::FutureExt;
+    use server::StopAnswer;
+
+    let home = crate::support::private_home();
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let running = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts");
+    let prepared = prepared_at(home.path());
+    let socket = prepared.socket();
+    let generation = server::identity_over_socket(&prepared)
+        .await
+        .expect("the server answers")
+        .generation
+        .expect("a generation");
+    let stale = if generation.starts_with('0') {
+        "1"
+    } else {
+        "0"
+    }
+    .repeat(32);
+
+    let refused = within(
+        "a stop of another generation",
+        server::stop_over_socket(&prepared, &stale, server::PROBE_LIMIT),
+    )
+    .await
+    .expect("an answer");
+
+    assert_eq!(
+        refused,
+        StopAnswer::OtherGeneration(Some(generation.clone()))
+    );
+    assert!(running.stop_requested().now_or_never().is_none());
+    let still = server::identity_over_socket(&prepared)
+        .await
+        .expect("the socket still answers");
+    assert_eq!(still.generation.as_deref(), Some(generation.as_str()));
+    server::identity(running.address())
+        .await
+        .expect("TCP still answers");
+
+    let accepted = within(
+        "a stop of this generation",
+        server::stop_over_socket(&prepared, &generation, server::PROBE_LIMIT),
+    )
+    .await
+    .expect("an answer");
+
+    assert_eq!(accepted, StopAnswer::Accepted);
+    within("the server's own stop", running.stop_requested()).await;
+    let socket_after = std::os::unix::net::UnixStream::connect(&socket);
+    assert_eq!(
+        socket_after.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::ConnectionRefused),
+        "{socket_after:?}"
+    );
+    let tcp_after = std::net::TcpStream::connect(running.address());
+    assert_eq!(
+        tcp_after.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::ConnectionRefused),
+        "{tcp_after:?}"
+    );
+    within(
+        "the shutdown after the stop",
+        running.shutdown_draining(server::DRAIN),
+    )
+    .await;
+    assert!(!socket.exists(), "the socket outlived its server");
+    assert!(
+        !paths.runtime.exists(),
+        "the runtime file outlived its server"
+    );
+}
+
+/// A client that sends part of a request, its head or its body, is cut off within the socket's request limit, and the
+/// server stops nothing and goes on answering.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_control_request_is_cut_off_within_the_limit_and_stops_nothing() {
+    use futures::FutureExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let home = crate::support::private_home();
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let running = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts");
+    let prepared = prepared_at(home.path());
+    let generation = server::identity_over_socket(&prepared)
+        .await
+        .expect("the server answers")
+        .generation
+        .expect("a generation");
+    let partial_head = "POST /server/stop HTTP/1.1\r\nHost: quadratique.invalid\r\n".to_owned();
+    let partial_body = format!(
+        "POST /server/stop HTTP/1.1\r\nHost: quadratique.invalid\r\nContent-Length: 200\r\n\r\n{{\"generation\":\"{generation}\""
+    );
+
+    for partial in [partial_head, partial_body] {
+        let mut stream = tokio::net::UnixStream::connect(prepared.socket())
+            .await
+            .expect("a connection");
+        stream
+            .write_all(partial.as_bytes())
+            .await
+            .expect("part of a request");
+        let started = std::time::Instant::now();
+        let mut rest = Vec::new();
+        within(
+            "the end of a partial request's connection",
+            stream.read_to_end(&mut rest),
+        )
+        .await
+        .expect("the server closes the connection");
+        assert!(
+            started.elapsed() < serve::SOCKET_REQUEST_LIMIT * 2,
+            "{partial:?}: closed after {:?}",
+            started.elapsed()
+        );
+    }
+
+    assert!(running.stop_requested().now_or_never().is_none());
+    let still = server::identity_over_socket(&prepared)
+        .await
+        .expect("the socket still answers");
+    assert_eq!(still.generation, Some(generation));
+    running.shutdown().await;
 }

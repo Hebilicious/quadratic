@@ -29,9 +29,12 @@ mod closing;
 pub const TARGET: &str = "cli";
 pub const BASE: &str = "/cli";
 pub const IDENTITY: &str = "/server";
-/// The version of the control protocol: `GET /server`, and later `POST /server/stop`. A build keeps answering every
-/// version it ever served.
+pub const STOP: &str = "/server/stop";
+/// The version of the control protocol, which the socket serves: `GET /server` and `POST /server/stop`
+/// (apps/quadratique/README.md, "The control protocol"). A build keeps answering every version it ever served, and
+/// lists them in `controls`.
 pub const CONTROL: u32 = 1;
+pub const CONTROLS: &[u32] = &[CONTROL];
 /// The authority that a request on the Unix socket names: the socket, not a host, decides where it goes.
 pub const SOCKET_AUTHORITY: &str = "quadratique.invalid";
 pub(crate) const DATABASE_FILE: &str = "workspace.db";
@@ -42,6 +45,11 @@ const DIRECTORY: &str = "quadratique";
 /// this long for a holder of the lock that is not a server to let go.
 pub const START_LIMIT: Duration = Duration::from_secs(30);
 pub const PROBE_LIMIT: Duration = Duration::from_secs(5);
+/// How long a stopping server lets its open connections finish before it closes them.
+pub const DRAIN: Duration = Duration::from_secs(2);
+/// The longest body of a stop request.
+#[cfg(unix)]
+const STOP_REQUEST_LIMIT: usize = 1024;
 const POLL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Copy, Debug)]
@@ -151,6 +159,10 @@ pub struct RuntimeFile {
     pub address: SocketAddr,
     pub url: String,
     pub database: PathBuf,
+    /// The control version of a server that also listens on the socket. A runtime file without it was written by a
+    /// build before the socket, which only TCP reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +182,9 @@ pub struct Identity {
     pub generation: Option<String>,
     #[serde(default)]
     pub control: Option<u32>,
+    /// Every control version this server answers; absent before `POST /server/stop`.
+    #[serde(default)]
+    pub controls: Option<Vec<u32>>,
     #[serde(default)]
     pub executable: Option<Executable>,
     #[serde(default)]
@@ -245,9 +260,104 @@ impl Handler for Identify {
     }
 }
 
+/// The socket's control routes: the identity, and the stop of this generation.
+#[cfg(unix)]
+struct Control {
+    identify: Arc<dyn Handler>,
+    generation: String,
+    gate: serve::Gate,
+}
+
+#[cfg(unix)]
+#[derive(Deserialize)]
+struct StopRequest {
+    generation: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StopAnswerBody {
+    pub generation: String,
+}
+
+#[cfg(unix)]
+impl Handler for Control {
+    fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
+        if request.uri().path() != STOP {
+            return self.identify.handle(request);
+        }
+        if request.method() != Method::POST {
+            return Box::pin(std::future::ready(json_answer(
+                StatusCode::METHOD_NOT_ALLOWED,
+                Bytes::new(),
+            )));
+        }
+        let generation = self.generation.clone();
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            let stop_after = request
+                .extensions()
+                .get::<serve::StopAfterAnswer>()
+                .cloned();
+            let Some(asked) = read_bounded(request.into_body(), STOP_REQUEST_LIMIT)
+                .await
+                .and_then(|body| serde_json::from_slice::<StopRequest>(&body).ok())
+            else {
+                return json_answer(StatusCode::BAD_REQUEST, Bytes::new());
+            };
+            let answer = Bytes::from(
+                serde_json::to_vec(&StopAnswerBody {
+                    generation: generation.clone(),
+                })
+                .unwrap_or_default(),
+            );
+            if asked.generation != generation {
+                return json_answer(StatusCode::CONFLICT, answer);
+            }
+            match stop_after {
+                Some(stop_after) => stop_after.set(),
+                None => gate.request_stop(),
+            }
+            gate.close();
+            let mut response = json_answer(StatusCode::ACCEPTED, answer);
+            response.headers_mut().insert(
+                header::CONNECTION,
+                header::HeaderValue::from_static("close"),
+            );
+            response
+        })
+    }
+}
+
+/// The body, or nothing when it fails or is longer than `limit`.
+#[cfg(unix)]
+async fn read_bounded(mut body: RequestBody, limit: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.ok()?.into_data() {
+            if data.len() > limit - bytes.len() {
+                return None;
+            }
+            bytes.extend_from_slice(&data);
+        }
+    }
+    Some(bytes)
+}
+
+#[cfg(unix)]
+fn json_answer(status: StatusCode, body: Bytes) -> Response<ResponseBody> {
+    let mut response = Response::new(Full::new(body).boxed_unsync());
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
 pub struct Server {
     admit: Admit,
     credentials: Credentials,
+    gate: serve::Gate,
     #[cfg(unix)]
     socket: serve::ServedSocket,
     served: serve::Served,
@@ -288,11 +398,25 @@ impl Server {
         self.watcher.look().await;
     }
 
+    /// Resolves when a `POST /server/stop` of this generation has been answered.
+    pub async fn stop_requested(&self) {
+        self.gate.stop_requested().await;
+    }
+
     pub async fn shutdown(self) {
         self.watcher.stop().await;
         #[cfg(unix)]
         self.socket.close().await;
         self.served.close().await;
+    }
+
+    /// Stops accepting on both listeners, lets open connections finish for up to `within`, then shuts down.
+    pub async fn shutdown_draining(mut self, within: Duration) {
+        #[cfg(unix)]
+        tokio::join!(self.socket.drain(within), self.served.drain(within));
+        #[cfg(not(unix))]
+        self.served.drain(within).await;
+        self.shutdown().await;
     }
 }
 
@@ -323,6 +447,29 @@ pub async fn start_by(
         WebApp::from_env(),
         watcher::EVERY,
         Waits::default(),
+        started,
+    )
+    .await
+}
+
+/// As [`start_by`], within what is left of the caller's deadline: a take-over passes the rest of its own, so that the
+/// whole command keeps one deadline.
+pub async fn start_by_within(
+    home: &Prepared,
+    address: SocketAddr,
+    started: Started,
+    left: Duration,
+) -> Result<Server, ServerError> {
+    let waits = Waits {
+        start: left,
+        probe: PROBE_LIMIT.min(left),
+    };
+    start_prepared(
+        home,
+        address,
+        WebApp::from_env(),
+        watcher::EVERY,
+        waits,
         started,
     )
     .await
@@ -415,6 +562,7 @@ async fn start_checked(
         schema: Some(crate::store::SCHEMA_VERSION),
         generation: Some(generation()?),
         control: Some(CONTROL),
+        controls: Some(CONTROLS.to_vec()),
         executable: Executable::of_this_process(),
         started: Some(started),
         url: None,
@@ -462,11 +610,14 @@ async fn start_checked(
         }
     };
     origin.set(served.address);
+    let gate = serve::Gate::default();
+    served.close_with(&gate);
     let runtime = RuntimeFile {
         pid: std::process::id(),
         address: served.address,
         url: format!("{}{BASE}", served.url()),
         database,
+        control: Some(CONTROL),
     };
     identity.url = Some(runtime.url.clone());
     let _ = answer.set(Bytes::from(
@@ -478,12 +629,21 @@ async fn start_checked(
         return Err(error.into());
     }
     #[cfg(unix)]
-    let socket = serve::serve_socket(
-        socket_listener,
-        socket_file,
-        vec![(IDENTITY.into(), identify)],
-    );
+    let socket = {
+        let control: Arc<dyn Handler> = Arc::new(Control {
+            identify,
+            generation: identity.generation.clone().unwrap_or_default(),
+            gate: gate.clone(),
+        });
+        serve::serve_socket(
+            socket_listener,
+            socket_file,
+            vec![(IDENTITY.into(), control)],
+            &gate,
+        )
+    };
     Ok(Server {
+        gate,
         #[cfg(unix)]
         socket,
         served,
@@ -608,6 +768,27 @@ pub enum Unanswered {
 }
 
 impl Unanswered {
+    /// A connection that the server closed or reset is nobody listening; any other failure is not an answer.
+    fn of_write(error: std::io::Error) -> Unanswered {
+        match error.kind() {
+            std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted => Unanswered::NotListening(error),
+            _ => Unanswered::Malformed(format!("the connection failed: {error}")),
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Unanswered::NotListening(error)
+            | Unanswered::NotPermitted(error)
+            | Unanswered::PathError(error) => error.to_string(),
+            Unanswered::NotReady(why) | Unanswered::Malformed(why) => why.clone(),
+            Unanswered::OwnerOnly => OWNER_ONLY.to_owned(),
+            Unanswered::Stalled => "no full answer".to_owned(),
+        }
+    }
+
     pub fn of_connect(error: std::io::Error) -> Unanswered {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             Unanswered::NotPermitted(error)
@@ -662,6 +843,90 @@ pub async fn identity_over_socket_within(
     home: &Prepared,
     limit: Duration,
 ) -> Result<Identity, Unanswered> {
+    let asking = async {
+        let stream = connect_socket(home).await?;
+        ask_identity_on(stream, SOCKET_AUTHORITY).await
+    };
+    tokio::time::timeout(limit, asking)
+        .await
+        .unwrap_or(Err(Unanswered::Stalled))
+}
+
+/// What a server answered to `POST /server/stop`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StopAnswer {
+    /// `202`: the server closed its listeners and shuts down once the answer is flushed.
+    Accepted,
+    /// `409`: another generation serves, and nothing was stopped. Its generation, when the answer names one.
+    OtherGeneration(Option<String>),
+    /// Any other status: a server that does not serve the stop request.
+    Refused(String),
+    /// The whole request was sent and no answer came back: the server may have accepted the stop and failed to write
+    /// its answer, or never read the request. Why.
+    Unconfirmed(String),
+}
+
+/// Asks the server on the socket of `home` to stop, if it is still the generation `generation`, within `limit`. The
+/// socket is checked as for [`identity_over_socket`]. Before the request is sent, the errors are those of an identity
+/// probe; after it, any failure, a timeout included, is [`StopAnswer::Unconfirmed`].
+#[cfg(unix)]
+pub async fn stop_over_socket(
+    home: &Prepared,
+    generation: &str,
+    limit: Duration,
+) -> Result<StopAnswer, Unanswered> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let body = serde_json::json!({ "generation": generation }).to_string();
+    let request = format!(
+        "POST {STOP} HTTP/1.1\r\nHost: {SOCKET_AUTHORITY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let sent = AtomicBool::new(false);
+    let asking = async {
+        let mut stream = connect_socket(home).await?;
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(Unanswered::of_write)?;
+        sent.store(true, Ordering::SeqCst);
+        let (status, body) = match read_answer(stream).await {
+            Ok(answer) => answer,
+            Err(unanswered) => {
+                return Ok(StopAnswer::Unconfirmed(format!(
+                    "the request was sent and the answer was lost ({})",
+                    unanswered.describe()
+                )));
+            }
+        };
+        let named = || {
+            serde_json::from_str::<StopAnswerBody>(&body)
+                .ok()
+                .map(|answer| answer.generation)
+        };
+        Ok(match status.as_str() {
+            "202" if named().as_deref() == Some(generation) => StopAnswer::Accepted,
+            "202" => {
+                return Err(Unanswered::Malformed(
+                    "the stop was accepted for another generation".to_owned(),
+                ));
+            }
+            "409" => StopAnswer::OtherGeneration(named()),
+            other => StopAnswer::Refused(format!("the stop request got status {other}")),
+        })
+    };
+    match tokio::time::timeout(limit, asking).await {
+        Ok(answer) => answer,
+        Err(_) if sent.load(Ordering::SeqCst) => Ok(StopAnswer::Unconfirmed(format!(
+            "the request was sent and no answer came within {limit:?}"
+        ))),
+        Err(_) => Err(Unanswered::Stalled),
+    }
+}
+
+/// A connection to the socket of `home`, trusted only as a socket of this account with mode 0600. `EINTR` and `EAGAIN`
+/// at `connect` are tried again; the caller bounds the time.
+#[cfg(unix)]
+async fn connect_socket(home: &Prepared) -> Result<tokio::net::UnixStream, Unanswered> {
     let socket = home.socket();
     match home::socket_entry(&socket) {
         home::Entry::Ready => {}
@@ -674,48 +939,58 @@ pub async fn identity_over_socket_within(
         home::Entry::Untrusted(why) => return Err(Unanswered::NotReady(why)),
         home::Entry::PathError(error) => return Err(Unanswered::PathError(error)),
     }
-    let asking = async {
-        let stream = loop {
-            match tokio::net::UnixStream::connect(&socket).await {
-                Ok(stream) => break stream,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    tokio::time::sleep(POLL).await;
-                }
-                Err(error) => return Err(Unanswered::of_socket_connect(error)),
+    loop {
+        match tokio::net::UnixStream::connect(&socket).await {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                tokio::time::sleep(POLL).await;
             }
-        };
-        ask_identity_on(stream, SOCKET_AUTHORITY).await
-    };
-    tokio::time::timeout(limit, asking)
-        .await
-        .unwrap_or(Err(Unanswered::Stalled))
+            Err(error) => return Err(Unanswered::of_socket_connect(error)),
+        }
+    }
 }
 
-/// The one reader of an identity answer, for both transports: it reads at most `IDENTITY_LIMIT` bytes and one more,
-/// and refuses a longer answer before it parses anything.
 async fn ask_identity_on(
-    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
     host: &str,
 ) -> Result<Identity, Unanswered> {
-    let gone = |error: std::io::Error| match error.kind() {
-        std::io::ErrorKind::ConnectionReset
-        | std::io::ErrorKind::BrokenPipe
-        | std::io::ErrorKind::ConnectionAborted => Unanswered::NotListening(error),
-        _ => Unanswered::Malformed(format!("the connection failed: {error}")),
-    };
     let request = format!("GET {IDENTITY} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).await.map_err(gone)?;
+    let (status, body) = exchange(stream, &request).await?;
+    match status.as_str() {
+        "200" => serde_json::from_str(&body)
+            .map_err(|error| Unanswered::Malformed(format!("the identity is not valid: {error}"))),
+        "403" if body == OWNER_ONLY => Err(Unanswered::OwnerOnly),
+        status => Err(Unanswered::Malformed(format!(
+            "the answer has status {status}"
+        ))),
+    }
+}
+
+/// The one reader of a control answer, for both transports: it reads at most `IDENTITY_LIMIT` bytes and one more,
+/// and refuses a longer answer before it parses anything. Returns the status code and the body.
+async fn exchange(
+    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    request: &str,
+) -> Result<(String, String), Unanswered> {
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(Unanswered::of_write)?;
+    read_answer(stream).await
+}
+
+async fn read_answer(mut stream: impl AsyncRead + Unpin) -> Result<(String, String), Unanswered> {
     let mut answer = Vec::new();
     (&mut stream)
         .take(IDENTITY_LIMIT as u64 + 1)
         .read_to_end(&mut answer)
         .await
-        .map_err(gone)?;
+        .map_err(Unanswered::of_write)?;
     if answer.is_empty() {
         return Err(Unanswered::NotListening(
             std::io::ErrorKind::UnexpectedEof.into(),
@@ -732,12 +1007,7 @@ async fn ask_identity_on(
         .split_once("\r\n\r\n")
         .ok_or_else(|| malformed("the answer is not HTTP"))?;
     match head.split_whitespace().nth(1) {
-        Some("200") => serde_json::from_str(body)
-            .map_err(|error| Unanswered::Malformed(format!("the identity is not valid: {error}"))),
-        Some("403") if body == OWNER_ONLY => Err(Unanswered::OwnerOnly),
-        Some(status) => Err(Unanswered::Malformed(format!(
-            "the answer has status {status}"
-        ))),
+        Some(status) => Ok((status.to_owned(), body.to_owned())),
         None => Err(malformed("the answer has no status")),
     }
 }
@@ -757,10 +1027,14 @@ pub async fn run(paths: &Paths, address: SocketAddr) -> Result<(), ServerError> 
     Ok(())
 }
 
-/// Serves until SIGINT or SIGTERM, then shuts the server down.
+/// Serves until SIGINT, SIGTERM or an answered `POST /server/stop`, then lets open connections finish within
+/// [`DRAIN`] and shuts the server down.
 pub async fn until_stopped(server: Server) {
-    stopped().await;
-    server.shutdown().await;
+    tokio::select! {
+        () = stopped() => {}
+        () = server.stop_requested() => {}
+    }
+    server.shutdown_draining(DRAIN).await;
 }
 
 async fn stopped() {

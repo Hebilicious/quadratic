@@ -267,7 +267,42 @@ The server also listens on the Unix socket `server.sock` in the data folder, wit
 `server status` asks it there first, and reports one state: `running`, `starting` (a server holds
 the folder and does not answer yet), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
 command line), `reachable: false` with the reason, or `legacy: true` for a server of an earlier
-build, which only TCP reaches. The other commands still use the TCP listener.
+build, which only TCP reaches. `server stop` and `serve --take-over` ask the server on the socket to
+stop, and never signal it. A server of an earlier build, which has no socket, is still stopped with
+SIGTERM as before. The other commands still use the TCP listener.
+
+### The control protocol
+
+The socket serves two requests, with any `Host` (use `quadratique.invalid`). Each server start has a
+**generation**, 32 hexadecimal digits that are new at each start. The protocol has a version,
+`control`, apart from the interface of the commands. A server keeps answering every control version
+it ever served, and lists them in `controls`. Two fields keep their meaning in every version:
+`generation` and `database`. A command line checks them before it looks at the control versions, so
+it stops a newer server only in its own folder and only by its generation. This is version 1:
+
+| Request | Answer |
+| --- | --- |
+| `GET /server` | `200` and the identity: `pid`, `database`, `interface`, `schema`, `generation`, `control`, `controls`, `executable` (`path`, `device`, `inode`), `started` (`on-demand` or `serve`), `url` (the TCP address of the command line's routes). |
+| `POST /server/stop` with `{"generation": "<generation>"}` | `202 {"generation": …}` if it names this server's generation: the server has closed its listeners, and starts to shut down once this answer is sent. Open connections get up to 2 seconds, then the server closes its store and frees the folder. `409 {"generation": <the serving one>}` for any other generation: nothing stops. `400` for a body that is not that JSON. |
+
+```sh
+curl --unix-socket "$QUADRATIQUE_HOME/server.sock" http://quadratique.invalid/server
+curl --unix-socket "$QUADRATIQUE_HOME/server.sock" -X POST \
+  -d '{"generation":"<generation>"}' http://quadratique.invalid/server/stop
+```
+
+`server stop` reads the generation, asks that generation to stop, and waits up to 30 seconds for
+the folder to be free. It answers `"stopped": true` with the `pid` and the `generation` it stopped.
+The generation it reads first is the one it stops. If it must wait for `start.lock` and another
+generation serves when it gets the lock, it stops nothing and names both. If the first look found a
+server that was still starting, it stops the first generation that becomes ready. If the stop
+request was sent and its answer was lost, `server stop` says the stop is not confirmed and whether
+the folder's lock is still held. Run `server status` to see what serves then.
+A server that does not answer, or does not let go in time, is never signalled: the message names
+the folder, the log and the last known pid, and says how to end it yourself. Every start and every
+stop holds `start.lock` in the data folder, so no command starts a server between a stop and the
+start that follows it. A command never replaces a server that stalls, answers something malformed,
+serves another database or speaks a newer control version: each has its own message.
 
 If a user service runs the server, a refusal stops it: the unit does not restart a server that
 exits with status 5 (`RestartPreventExitStatus`). Fix the cause, then

@@ -385,3 +385,45 @@ fn a_missing_default_home_is_made_private_with_the_folders_above_it() {
         assert_eq!(mode, 0o700, "{}", folder.display());
     }
 }
+
+/// The control protocol adds a way to stop the server; it takes none away. A person stops `quadratique serve` with
+/// Ctrl-C in its terminal, and a supervisor with SIGTERM.
+#[test]
+fn sigterm_and_sigint_still_stop_a_server_started_with_serve() {
+    use rustix::process::{Pid, Signal, kill_process};
+
+    use crate::support::{Step, Watch};
+
+    for signal in [Signal::TERM, Signal::INT] {
+        let home = Home::new();
+        let elsewhere = outside();
+        let mut watch = Watch::of(&home);
+        let mut server = home.quadratique(elsewhere.path()).args(["serve"]).spawn();
+        let pid = server.id();
+        watch.await_steps(&[Step::Published("server.json")]);
+        assert_eq!(
+            home.quadratique(elsewhere.path())
+                .args(["server", "status"])
+                .run()
+                .ok()["pid"],
+            pid
+        );
+
+        kill_process(
+            Pid::from_raw(i32::try_from(pid).expect("a pid")).expect("a pid"),
+            signal,
+        )
+        .expect("the signal is sent");
+        let ended = server.finish();
+
+        assert_eq!(ended.code, 0, "{signal:?}: {ended:?}");
+        assert!(!home.path().join("server.sock").exists(), "{signal:?}");
+        assert!(home.runtime().is_none(), "{signal:?}");
+        let status = home
+            .quadratique(elsewhere.path())
+            .args(["server", "status"])
+            .run()
+            .ok();
+        assert_eq!(status["running"], false, "{signal:?}: {status}");
+    }
+}

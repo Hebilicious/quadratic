@@ -140,6 +140,9 @@ fn a_command_that_meets_a_server_of_another_interface_fails_says_how_to_recover_
     }
 }
 
+/// The row of the record's state table (docs/decisions/0004-…, §2) for a server of a build before the socket: the
+/// lock held, no socket, and a runtime file without a control version. Until QUA-55, status, stop and take-over reach it
+/// as release 0.1 did, over TCP and with SIGTERM.
 #[test]
 fn server_status_and_stop_reach_a_server_of_another_interface_and_the_next_command_starts_this_build()
  {
@@ -150,6 +153,7 @@ fn server_status_and_stop_reach_a_server_of_another_interface_and_the_next_comma
 
     let status = run(&["server", "status"]).ok();
     assert_eq!(status["running"], true, "{status}");
+    assert_eq!(status["legacy"], true, "{status}");
     assert_eq!(status["pid"], other.pid, "{status}");
     assert_eq!(status["sameInterface"], false, "{status}");
 

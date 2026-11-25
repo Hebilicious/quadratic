@@ -6,20 +6,26 @@ use std::time::{Duration, Instant};
 use quadratique_server::app::interface;
 use quadratique_server::home::{self, Prepared};
 #[cfg(unix)]
-use quadratique_server::server::{CONTROL, Identity, PROBE_LIMIT, identity_over_socket_within};
+use quadratique_server::server::{
+    CONTROL, Identity, PROBE_LIMIT, StopAnswer, identity_over_socket_within, stop_over_socket,
+};
 use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered, identity};
 use quadratique_server::store::canonical_folder;
 
-use crate::process::{alive, ask_to_stop, detach};
+use crate::process::detach;
 use crate::route::McpTool;
 
-const STOP_LIMIT: Duration = Duration::from_secs(30);
+mod legacy;
+
+pub const STOP_LIMIT: Duration = Duration::from_secs(30);
 /// Set in the environment of a server that a command starts, so that its identity says it was started on demand.
 pub const STARTED_VARIABLE: &str = "QUADRATIQUE_STARTED";
 pub const ON_DEMAND: &str = "on-demand";
 const POLL: Duration = Duration::from_millis(20);
 const LOG_TAIL: usize = 2000;
 
+/// Windows has no socket yet (QUA-61), so the rows that only the socket shows never happen there.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug)]
 pub enum LifeError {
     Io(std::io::Error),
@@ -46,6 +52,57 @@ pub enum LifeError {
     UnreachableToStop {
         reason: String,
     },
+    /// A server holds the home past the operation's deadline: it never became ready, or never let go.
+    Hung {
+        hang: Hang,
+        home: PathBuf,
+        log: PathBuf,
+        pid: Option<u32>,
+        attempt: Attempt,
+    },
+    /// The socket accepted a connection and gave no full answer within the probe limit.
+    Stalled {
+        socket: PathBuf,
+        log: PathBuf,
+        pid: Option<u32>,
+        attempt: Attempt,
+    },
+    Malformed {
+        socket: PathBuf,
+        reason: String,
+        attempt: Attempt,
+    },
+    ServesOtherDatabase {
+        socket: PathBuf,
+        database: PathBuf,
+        attempt: Attempt,
+    },
+    Newer {
+        control: u32,
+        attempt: Attempt,
+    },
+    /// The server answered `409`: it is not the generation this command asked to stop.
+    OtherGeneration {
+        asked: String,
+        serving: Option<String>,
+    },
+    /// The server does not serve the stop request.
+    CannotStop {
+        reason: String,
+    },
+    /// The whole stop request was sent and its answer was lost: the server may or may not be stopping.
+    StopUnconfirmed {
+        generation: String,
+        reason: String,
+        lock: String,
+    },
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hang {
+    NotReady,
+    NotStopped,
 }
 
 #[derive(Debug)]
@@ -112,8 +169,110 @@ impl std::fmt::Display for LifeError {
             LifeError::UnreachableToStop { reason } => {
                 formatter.write_str(&cannot_reach(reason, "Nothing was stopped."))
             }
+            LifeError::Hung {
+                hang,
+                home,
+                log,
+                pid,
+                attempt,
+            } => {
+                let what = match hang {
+                    Hang::NotReady => "did not become ready",
+                    Hang::NotStopped => "did not let go of it",
+                };
+                write!(
+                    formatter,
+                    "a Quadratique server holds {} and {what} within the time allowed; its log is {}. {} {}",
+                    home.display(),
+                    log.display(),
+                    attempt.outcome(),
+                    recovery(*pid)
+                )
+            }
+            LifeError::Stalled {
+                socket,
+                log,
+                pid,
+                attempt,
+            } => write!(
+                formatter,
+                "the Quadratique server on {} accepted a connection and gave no full answer within {:?}; its log is {}. {} {}",
+                socket.display(),
+                PROBE,
+                log.display(),
+                attempt.outcome(),
+                recovery(*pid)
+            ),
+            LifeError::Malformed {
+                socket,
+                reason,
+                attempt,
+            } => write!(
+                formatter,
+                "what answers on {} is not a Quadratique server that this command line can use: {reason}. {} See what listens there with `quadratique server status`.",
+                socket.display(),
+                attempt.outcome()
+            ),
+            LifeError::ServesOtherDatabase {
+                socket,
+                database,
+                attempt,
+            } => write!(
+                formatter,
+                "the server on {} serves another database, {}. {} Set QUADRATIQUE_HOME to the home of that database, or stop that server from its own home.",
+                socket.display(),
+                database.display(),
+                attempt.outcome()
+            ),
+            LifeError::Newer { control, attempt } => write!(
+                formatter,
+                "the server of this home speaks control version {control}, which this command line does not know. {} Upgrade this command line.",
+                attempt.outcome()
+            ),
+            LifeError::OtherGeneration { asked, serving } => {
+                let serving = serving
+                    .as_deref()
+                    .map_or_else(String::new, |serving| format!(" ({serving})"));
+                write!(
+                    formatter,
+                    "the server of this home is no longer generation {asked}, which this command asked to stop: another generation{serving} serves now. Nothing was stopped."
+                )
+            }
+            LifeError::StopUnconfirmed {
+                generation,
+                reason,
+                lock,
+            } => write!(
+                formatter,
+                "the stop of generation {generation} is not confirmed: {reason}. The home's lock is {lock}. Run `quadratique server status` to see what serves now."
+            ),
+            LifeError::CannotStop { reason } => {
+                write!(
+                    formatter,
+                    "the server of this home cannot be stopped from here: {reason}. Nothing was stopped."
+                )
+            }
         }
     }
+}
+
+#[cfg(unix)]
+const PROBE: Duration = PROBE_LIMIT;
+#[cfg(not(unix))]
+const PROBE: Duration = quadratique_server::server::PROBE_LIMIT;
+
+/// What a person does about a server that this command line will not signal: the process number comes from the
+/// server's last answer or its runtime file, and nothing has verified it.
+fn recovery(pid: Option<u32>) -> String {
+    let check = match pid {
+        Some(pid) => format!(
+            "its process number was last given as {pid}, unverified: check it with `ps -p {pid} -o args` before you end it"
+        ),
+        None => "find its process first".to_owned(),
+    };
+    format!(
+        "To recover: press Ctrl-C in the terminal that runs `quadratique serve`, stop it with the supervisor that started it, or end the process ({check})."
+    )
 }
 
 impl LifeError {
@@ -214,6 +373,19 @@ impl Home {
         serde_json::from_slice(&text).ok()
     }
 
+    /// A runtime file without a control version was written by a build before the socket. A missing, malformed or
+    /// newer runtime file is no hint.
+    #[cfg(unix)]
+    fn legacy_hint(&self) -> bool {
+        self.runtime_file()
+            .is_some_and(|runtime| runtime.control.is_none())
+    }
+
+    /// For a message only: nothing has verified it.
+    fn pid_hint(&self) -> Option<u32> {
+        self.runtime_file().map(|runtime| runtime.pid)
+    }
+
     /// A process that may not write the home can still ask: `flock` takes a lock on a read-only descriptor, and a
     /// missing lock file means that no server ever held the home.
     pub fn held(&self) -> std::io::Result<bool> {
@@ -234,10 +406,19 @@ impl Home {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attempt {
     Start,
     Stop,
+}
+
+impl Attempt {
+    fn outcome(self) -> &'static str {
+        match self {
+            Attempt::Start => "Nothing was started.",
+            Attempt::Stop => "Nothing was stopped.",
+        }
+    }
 }
 
 impl Home {
@@ -323,6 +504,7 @@ pub async fn find(home: &Home) -> Result<Found, LifeError> {
         Ok(identity) if identity.database == database => {
             let runtime = RuntimeFile {
                 pid: identity.pid,
+                control: identity.control,
                 ..runtime
             };
             match identity.interface {
@@ -362,11 +544,6 @@ pub enum OnSocket {
 }
 
 #[cfg(unix)]
-pub async fn on_socket(home: &Home) -> OnSocket {
-    on_socket_within(home, PROBE_LIMIT).await
-}
-
-#[cfg(unix)]
 async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
     let socket = home.prepared.socket();
     let identity = match identity_over_socket_within(&home.prepared, limit).await {
@@ -388,275 +565,613 @@ async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
             return OnSocket::Malformed("the socket answered as a TCP listener does".to_owned());
         }
     };
+    // The generation and the database keep their meaning in every control version, so they are checked first: a newer
+    // server is stopped only by its generation, and only in its own home.
+    let generation_is_valid = identity.generation.as_deref().is_some_and(|generation| {
+        generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if !generation_is_valid {
+        return OnSocket::Malformed("the identity lacks a valid generation".to_owned());
+    }
+    if identity.database != home.database() {
+        return OnSocket::OtherDatabase(identity);
+    }
     match identity.control {
         None => return OnSocket::Malformed("the identity has no control version".to_owned()),
         Some(control) if control != CONTROL => return OnSocket::Newer(identity),
         Some(_) => {}
     }
-    let generation_is_valid = identity.generation.as_deref().is_some_and(|generation| {
-        generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit())
-    });
-    if !generation_is_valid || identity.started.is_none() || identity.url.is_none() {
-        return OnSocket::Malformed(
-            "the identity lacks a valid generation, its start or its url".to_owned(),
-        );
-    }
-    if identity.database != home.database() {
-        return OnSocket::OtherDatabase(identity);
+    if identity.started.is_none() || identity.url.is_none() {
+        return OnSocket::Malformed("the identity lacks its start or its url".to_owned());
     }
     OnSocket::Serving(identity)
+}
+
+/// One row of the record's state table (docs/decisions/0004-…, §2): what the socket shows, and behind a socket that is
+/// absent or refuses, the home's lock and the runtime file. `status`, `ensure`, `stop` and `serve --take-over` each act
+/// on it.
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum Observed {
+    /// A server of this home's database and of this build's control version. Its interface may be another build's.
+    Serving {
+        identity: Identity,
+        runtime: RuntimeFile,
+    },
+    Newer(Identity),
+    OtherDatabase(Identity),
+    Malformed(String),
+    Stalled,
+    /// `EACCES`, `EPERM` or a path error on the socket or the lock.
+    Unreachable(String),
+    /// The lock is held and the socket does not answer yet, or no longer: a server that has not bound its socket, or
+    /// one that is stopping.
+    Starting {
+        reason: Option<String>,
+    },
+    /// The lock is held, no socket answers, and a runtime file of a build before the socket names a TCP address.
+    Legacy,
+    /// The lock is free, and the socket is absent or refuses.
+    Free,
+}
+
+#[cfg(unix)]
+pub async fn observe(home: &Home) -> Result<Observed, LifeError> {
+    observe_within(home, PROBE_LIMIT).await
+}
+
+#[cfg(unix)]
+async fn observe_within(home: &Home, limit: Duration) -> Result<Observed, LifeError> {
+    Ok(match on_socket_within(home, limit).await {
+        OnSocket::Serving(identity) => match runtime_of(&identity) {
+            Some(runtime) => Observed::Serving { identity, runtime },
+            None => Observed::Malformed(
+                "the identity's url names no loopback address of the command line".to_owned(),
+            ),
+        },
+        OnSocket::OtherDatabase(identity) => Observed::OtherDatabase(identity),
+        OnSocket::Newer(identity) => Observed::Newer(identity),
+        OnSocket::Malformed(why) => Observed::Malformed(why),
+        OnSocket::Stalled => Observed::Stalled,
+        OnSocket::Denied(reason) | OnSocket::PathError(reason) => Observed::Unreachable(reason),
+        OnSocket::NotReady(why) => behind_the_socket(home, Some(why), false),
+        OnSocket::Absent => behind_the_socket(home, None, true),
+    })
+}
+
+/// One deadline for one operation (record 0004, §2). Each probe gets what is left of it, at most the probe limit,
+/// and nothing new begins once it has passed.
+#[derive(Clone, Copy, Debug)]
+pub struct Deadline(Instant);
+
+impl Deadline {
+    pub fn after(limit: Duration) -> Deadline {
+        Deadline(Instant::now() + limit)
+    }
+
+    /// What is left, or nothing once the deadline has passed.
+    pub fn left(self) -> Option<Duration> {
+        Some(self.0.checked_duration_since(Instant::now())?).filter(|left| !left.is_zero())
+    }
+
+    /// Waits one poll, cut to what is left. False once the deadline has passed.
+    async fn pause(self) -> bool {
+        match self.left() {
+            Some(left) => {
+                tokio::time::sleep(POLL.min(left)).await;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// An observation within what is left of `deadline`, or nothing once it has passed. A probe that the deadline cut
+/// short is the deadline, not a stalled server.
+#[cfg(unix)]
+async fn observe_by(home: &Home, deadline: Deadline) -> Result<Option<Observed>, LifeError> {
+    let Some(left) = deadline.left() else {
+        return Ok(None);
+    };
+    let limit = PROBE_LIMIT.min(left);
+    match observe_within(home, limit).await? {
+        Observed::Stalled if limit < PROBE_LIMIT => Ok(None),
+        observed => Ok(Some(observed)),
+    }
+}
+
+/// A build before the socket never makes one, so only a missing socket can hide a legacy server. A lock that cannot
+/// be looked at is a path the command cannot use, as a socket that cannot be reached is.
+#[cfg(unix)]
+fn behind_the_socket(home: &Home, reason: Option<String>, no_socket: bool) -> Observed {
+    match home.held() {
+        Ok(false) => Observed::Free,
+        Ok(true) if no_socket && home.legacy_hint() => Observed::Legacy,
+        Ok(true) => Observed::Starting { reason },
+        Err(error) if cannot_write(&error) => match home.unusable(error, Attempt::Start) {
+            LifeError::Unreachable { reason } => Observed::Unreachable(reason),
+            other => Observed::Unreachable(other.to_string()),
+        },
+        Err(error) => Observed::Unreachable(format!(
+            "{} cannot be used: {error}",
+            home.prepared.lock().display()
+        )),
+    }
+}
+
+/// The TCP address of the command line's routes, which the generated client still uses (QUA-53 moves it to the
+/// socket), from the identity's `url`: `http://127.0.0.1:<port>/cli`.
+#[cfg(unix)]
+fn runtime_of(identity: &Identity) -> Option<RuntimeFile> {
+    let url = identity.url.as_deref()?;
+    let (authority, path) = url.strip_prefix("http://")?.split_once('/')?;
+    let address: std::net::SocketAddr = authority.parse().ok()?;
+    (address.ip().is_loopback() && path == "cli").then(|| RuntimeFile {
+        pid: identity.pid,
+        address,
+        url: url.to_owned(),
+        database: identity.database.clone(),
+        control: identity.control,
+    })
+}
+
+#[cfg(unix)]
+fn lists_this_control(identity: &Identity) -> bool {
+    identity
+        .controls
+        .as_deref()
+        .is_some_and(|controls| controls.contains(&CONTROL))
+}
+
+#[cfg(unix)]
+fn other_interface(identity: &Identity) -> Option<LifeError> {
+    let theirs = match &identity.interface {
+        Some(theirs) if *theirs == interface() => return None,
+        Some(theirs) => TheirInterface::Named(theirs.clone()),
+        None => TheirInterface::FromABuildBeforeInterfaces,
+    };
+    Some(LifeError::OtherInterface {
+        pid: identity.pid,
+        theirs,
+    })
+}
+
+/// The outcome of a row in which nothing may be started or stopped.
+#[cfg(unix)]
+fn refusal(home: &Home, observed: Observed, attempt: Attempt) -> LifeError {
+    let socket = home.prepared.socket();
+    match observed {
+        Observed::Stalled => LifeError::Stalled {
+            socket,
+            log: home.log(),
+            pid: home.pid_hint(),
+            attempt,
+        },
+        Observed::Malformed(reason) => LifeError::Malformed {
+            socket,
+            reason,
+            attempt,
+        },
+        Observed::OtherDatabase(identity) => LifeError::ServesOtherDatabase {
+            socket,
+            database: identity.database,
+            attempt,
+        },
+        Observed::Newer(identity) => LifeError::Newer {
+            control: identity.control.unwrap_or_default(),
+            attempt,
+        },
+        Observed::Unreachable(reason) => match attempt {
+            Attempt::Start => LifeError::Unreachable { reason },
+            Attempt::Stop => LifeError::UnreachableToStop { reason },
+        },
+        Observed::Serving { .. }
+        | Observed::Starting { .. }
+        | Observed::Legacy
+        | Observed::Free => LifeError::Io(std::io::Error::other(format!(
+            "{observed:?} is not a refusal"
+        ))),
+    }
 }
 
 pub async fn ensure(home: &Home) -> Result<RuntimeFile, LifeError> {
     ensure_within(home, START_LIMIT).await
 }
 
+/// Finds this home's server, or starts one. A start happens only under `start.lock`, after a second observation that
+/// finds the home free; the lock is held until the child answers or exits. A stalled, malformed, foreign or newer
+/// server is never replaced. The only process this may end is its own child, through its `Child` handle, when the
+/// child is not ready by the deadline.
+#[cfg(unix)]
 async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
-    match drive(home, Phase::Finding, limit).await? {
-        Settled::Running(runtime) => Ok(runtime),
-        Settled::NotRunning | Settled::Stopped { .. } | Settled::Closing { .. } => {
-            Err(LifeError::NoAnswer {
-                pid: None,
-                log: home.log(),
-            })
-        }
-    }
-}
-
-pub struct StartLockHeld {
-    _start_lock: File,
-}
-
-pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
-    let start_lock = await_start_lock(home, START_LIMIT).await?;
-    stop(home).await?;
-    Ok(StartLockHeld {
-        _start_lock: start_lock,
-    })
-}
-
-async fn await_start_lock(home: &Home, limit: Duration) -> Result<File, LifeError> {
-    let deadline = Instant::now() + limit;
-    let start_lock = home
-        .open_lock(&home.start_lock())
-        .map_err(|error| home.unusable(error, Attempt::Start))?;
+    let deadline = Deadline::after(limit);
+    let mut start_lock: Option<File> = None;
+    let mut child: Option<OwnedChild> = None;
     loop {
-        match start_lock.try_lock() {
-            Ok(()) => return Ok(start_lock),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
-        if Instant::now() > deadline {
-            return Err(LifeError::NoAnswer {
-                pid: home.runtime_file().map(|runtime| runtime.pid),
-                log: home.log(),
-            });
-        }
-        tokio::time::sleep(POLL).await;
-    }
-}
-
-pub enum Stopped {
-    NotRunning,
-    Ended { pid: u32 },
-    Closing { pid: Option<u32> },
-}
-
-pub async fn stop(home: &Home) -> Result<Stopped, LifeError> {
-    stop_within(home, STOP_LIMIT).await
-}
-
-async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
-    match drive(home, Phase::FindingToStop, limit).await? {
-        Settled::Stopped { pid } => Ok(Stopped::Ended { pid }),
-        Settled::Closing { pid } => Ok(Stopped::Closing { pid }),
-        Settled::NotRunning | Settled::Running(_) => Ok(Stopped::NotRunning),
-    }
-}
-
-enum Phase {
-    Finding,
-    AwaitingStartLock,
-    Rechecking { start_lock: File },
-    Starting { start_lock: File, child: OwnedChild },
-    FindingToStop,
-    Stopping { pid: u32 },
-}
-
-enum Settled {
-    Running(RuntimeFile),
-    NotRunning,
-    Stopped { pid: u32 },
-    Closing { pid: Option<u32> },
-}
-
-enum Next {
-    Now(Phase),
-    AfterPoll(Phase),
-    Settled(Settled),
-}
-
-async fn drive(home: &Home, first: Phase, limit: Duration) -> Result<Settled, LifeError> {
-    let deadline = Instant::now() + limit;
-    let mut phase = first;
-    loop {
-        phase = match step(home, phase).await? {
-            Next::Settled(settled) => return Ok(settled),
-            Next::Now(next) => next,
-            Next::AfterPoll(next) => {
-                if Instant::now() > deadline {
-                    if let Some(stopping) = next.still_stopping(home)? {
-                        return Ok(stopping);
-                    }
-                    return Err(LifeError::NoAnswer {
-                        pid: next
-                            .pid()
-                            .or_else(|| home.runtime_file().map(|runtime| runtime.pid)),
-                        log: home.log(),
-                    });
-                }
-                tokio::time::sleep(POLL).await;
-                next
-            }
+        let Some(observed) = observe_by(home, deadline).await? else {
+            return Err(not_ready_by_the_deadline(
+                home,
+                child.as_ref(),
+                start_lock.is_some(),
+            ));
         };
-    }
-}
-
-async fn step(home: &Home, phase: Phase) -> Result<Next, LifeError> {
-    Ok(match phase {
-        Phase::Finding => match find(home).await? {
-            Found::Ours(runtime) => Next::Settled(Settled::Running(runtime)),
-            Found::OtherInterface { runtime, theirs } => {
-                return Err(Found::refusal(&runtime, theirs));
-            }
-            Found::Refused { reason } => {
-                unreachable_if_held(home, reason)?;
-                Next::Now(Phase::AwaitingStartLock)
-            }
-            Found::Nobody => Next::Now(Phase::AwaitingStartLock),
-        },
-        Phase::AwaitingStartLock => {
-            let start_lock = home
-                .open_lock(&home.start_lock())
-                .map_err(|error| home.unusable(error, Attempt::Start))?;
-            match start_lock.try_lock() {
-                Ok(()) => Next::Now(Phase::Rechecking { start_lock }),
-                Err(TryLockError::WouldBlock) => Next::AfterPoll(Phase::AwaitingStartLock),
-                Err(TryLockError::Error(error)) => return Err(error.into()),
-            }
-        }
-        Phase::Rechecking { start_lock } => match find(home).await? {
-            Found::Ours(runtime) => Next::Settled(Settled::Running(runtime)),
-            Found::OtherInterface { runtime, theirs } => {
-                return Err(Found::refusal(&runtime, theirs));
-            }
-            Found::Refused { reason } => {
-                unreachable_if_held(home, reason)?;
-                Next::AfterPoll(Phase::Starting {
-                    start_lock,
-                    child: OwnedChild::spawn(home)
-                        .map_err(|error| home.unusable(error, Attempt::Start))?,
-                })
-            }
-            Found::Nobody => Next::AfterPoll(Phase::Starting {
-                start_lock,
-                child: OwnedChild::spawn(home)
-                    .map_err(|error| home.unusable(error, Attempt::Start))?,
-            }),
-        },
-        Phase::Starting {
-            start_lock,
-            mut child,
-        } => match find(home).await? {
-            Found::Ours(runtime) => {
-                if runtime.pid == child.id() {
+        match observed {
+            Observed::Serving { identity, runtime } => {
+                if let Some(child) = child.take()
+                    && child.id() == identity.pid
+                {
                     child.hand_off();
                 }
-                Next::Settled(Settled::Running(runtime))
+                return match other_interface(&identity) {
+                    Some(refused) => Err(refused),
+                    None => Ok(runtime),
+                };
             }
-            Found::OtherInterface { runtime, theirs } => {
-                return Err(Found::refusal(&runtime, theirs));
+            Observed::Legacy => {
+                drop(child);
+                drop(start_lock);
+                let left = deadline.left().unwrap_or_default();
+                return legacy::ensure(home, left).await;
             }
-            Found::Refused { .. } | Found::Nobody => match child.try_wait()? {
-                Some(status) => match find(home).await? {
-                    Found::Ours(runtime) => Next::Settled(Settled::Running(runtime)),
-                    Found::OtherInterface { runtime, theirs } => {
-                        return Err(Found::refusal(&runtime, theirs));
+            Observed::Free if start_lock.is_none() => {
+                let lock = home
+                    .open_lock(&home.start_lock())
+                    .map_err(|error| home.unusable(error, Attempt::Start))?;
+                match lock.try_lock() {
+                    Ok(()) => {
+                        start_lock = Some(lock);
+                        continue;
                     }
-                    Found::Refused { .. } | Found::Nobody => {
+                    Err(TryLockError::WouldBlock) => {}
+                    Err(TryLockError::Error(error)) => return Err(error.into()),
+                }
+            }
+            observed @ (Observed::Free | Observed::Starting { .. }) => match child.as_mut() {
+                Some(running) => {
+                    if let Some(status) = running.try_wait()? {
                         return Err(LifeError::Exited {
                             status,
                             log: home.log(),
                             tail: log_tail(&home.log()),
                         });
                     }
-                },
-                None => Next::AfterPoll(Phase::Starting { start_lock, child }),
-            },
-        },
-        Phase::FindingToStop => {
-            if !home
-                .held()
-                .map_err(|error| home.unusable(error, Attempt::Stop))?
-            {
-                remove_runtime(home, None);
-                return Ok(Next::Settled(Settled::NotRunning));
-            }
-            match find(home).await? {
-                Found::Ours(runtime) | Found::OtherInterface { runtime, .. } => {
-                    ask_to_stop(runtime.pid)?;
-                    Next::AfterPoll(Phase::Stopping { pid: runtime.pid })
                 }
-                Found::Refused { reason } => return Err(LifeError::UnreachableToStop { reason }),
-                Found::Nobody => Next::AfterPoll(Phase::FindingToStop),
-            }
+                None if matches!(observed, Observed::Free) && deadline.left().is_some() => {
+                    child = Some(
+                        OwnedChild::spawn(home)
+                            .map_err(|error| home.unusable(error, Attempt::Start))?,
+                    );
+                }
+                None => {}
+            },
+            refused => return Err(refusal(home, refused, Attempt::Start)),
         }
-        Phase::Stopping { pid } => {
-            if home
-                .held()
-                .map_err(|error| home.unusable(error, Attempt::Stop))?
-            {
-                Next::AfterPoll(Phase::Stopping { pid })
-            } else {
-                remove_runtime(home, Some(pid));
-                Next::Settled(Settled::Stopped { pid })
-            }
+        if !deadline.pause().await {
+            return Err(not_ready_by_the_deadline(
+                home,
+                child.as_ref(),
+                start_lock.is_some(),
+            ));
         }
+    }
+}
+
+/// Another starter that never lets go of `start.lock` is `NoAnswer`; anything else that is not ready is `Hung`.
+#[cfg(unix)]
+fn not_ready_by_the_deadline(
+    home: &Home,
+    child: Option<&OwnedChild>,
+    holds_start_lock: bool,
+) -> LifeError {
+    if child.is_none() && !holds_start_lock && !home.held().unwrap_or(true) {
+        return LifeError::NoAnswer {
+            pid: home.pid_hint(),
+            log: home.log(),
+        };
+    }
+    LifeError::Hung {
+        hang: Hang::NotReady,
+        home: home.prepared.folder().to_path_buf(),
+        log: home.log(),
+        pid: child.map(OwnedChild::id).or_else(|| home.pid_hint()),
+        attempt: Attempt::Start,
+    }
+}
+
+#[cfg(not(unix))]
+async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
+    legacy::ensure(home, limit).await
+}
+
+/// `start.lock`, held: no command starts a server while its holder starts, stops or hands off one. It carries the
+/// deadline of the command that took it, which the server's start then uses.
+pub struct StartLockHeld {
+    _start_lock: File,
+    deadline: Deadline,
+}
+
+impl StartLockHeld {
+    /// What is left of the command's deadline for its own server's start.
+    pub fn left(&self) -> Duration {
+        self.deadline.left().unwrap_or_default()
+    }
+}
+
+/// `quadratique serve` holds `start.lock` while its server starts, as every start does.
+pub async fn reserve_start(home: &Home) -> Result<StartLockHeld, LifeError> {
+    let deadline = Deadline::after(START_LIMIT);
+    let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
+    Ok(StartLockHeld {
+        _start_lock: start_lock,
+        deadline,
     })
 }
 
-fn unreachable_if_held(home: &Home, reason: String) -> Result<(), LifeError> {
-    if home
-        .held()
-        .map_err(|error| home.unusable(error, Attempt::Start))?
+/// Stops the server of this home, of any build that serves this control version, and keeps `start.lock` until the
+/// caller's own server is ready, within one deadline for the whole command. A server that does not let go by the
+/// deadline ends the take-over: nothing is served.
+#[cfg(unix)]
+pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
+    let deadline = Deadline::after(START_LIMIT);
+    let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
+    if let Stopped::Closing { pid, .. } = stop_holding(home, deadline, Attempt::Start, None).await?
     {
-        return Err(LifeError::Unreachable { reason });
+        return Err(LifeError::Hung {
+            hang: Hang::NotStopped,
+            home: home.prepared.folder().to_path_buf(),
+            log: home.log(),
+            pid,
+            attempt: Attempt::Start,
+        });
     }
-    Ok(())
+    Ok(StartLockHeld {
+        _start_lock: start_lock,
+        deadline,
+    })
 }
 
-impl Phase {
-    fn still_stopping(&self, home: &Home) -> Result<Option<Settled>, LifeError> {
-        let pid = match self {
-            Phase::FindingToStop => None,
-            Phase::Stopping { pid } => Some(*pid),
-            _ => return Ok(None),
-        };
-        Ok(home
-            .held()
-            .map_err(|error| home.unusable(error, Attempt::Stop))?
-            .then_some(Settled::Closing { pid }))
-    }
+#[cfg(not(unix))]
+pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
+    let deadline = Deadline::after(START_LIMIT);
+    let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
+    legacy::stop(home, deadline.left().unwrap_or_default(), false).await?;
+    Ok(StartLockHeld {
+        _start_lock: start_lock,
+        deadline,
+    })
+}
 
-    fn pid(&self) -> Option<u32> {
-        match self {
-            Phase::Starting { child, .. } => Some(child.id()),
-            Phase::Stopping { pid } => Some(*pid),
-            Phase::Finding
-            | Phase::AwaitingStartLock
-            | Phase::Rechecking { .. }
-            | Phase::FindingToStop => None,
+/// Tries the lock only while the deadline has not passed.
+async fn await_start_lock(
+    home: &Home,
+    deadline: Deadline,
+    attempt: Attempt,
+) -> Result<File, LifeError> {
+    let start_lock = home
+        .open_lock(&home.start_lock())
+        .map_err(|error| home.unusable(error, attempt))?;
+    let expired = || LifeError::NoAnswer {
+        pid: home.pid_hint(),
+        log: home.log(),
+    };
+    loop {
+        if deadline.left().is_none() {
+            return Err(expired());
         }
+        match start_lock.try_lock() {
+            Ok(()) => return Ok(start_lock),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) => return Err(error.into()),
+        }
+        if !deadline.pause().await {
+            return Err(expired());
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Stopped {
+    NotRunning,
+    Ended {
+        pid: u32,
+        generation: Option<String>,
+    },
+    /// The server acknowledged the stop, or was signalled, and still holds the home at the deadline.
+    Closing {
+        pid: Option<u32>,
+        generation: Option<String>,
+    },
+}
+
+pub async fn stop(home: &Home) -> Result<Stopped, LifeError> {
+    stop_within(home, STOP_LIMIT).await
+}
+
+/// A home that is free, or a server that may not be stopped, is answered without `start.lock`. Otherwise the stop
+/// takes it, then observes again, and keeps it until the server has let go of the home: a server of a build before
+/// the socket too. The generation it first saw is the one it stops; one that becomes ready while it waits for the lock
+/// is stopped only if the first observation saw none.
+#[cfg(unix)]
+async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
+    let deadline = Deadline::after(limit);
+    let Some(first) = observe_by(home, deadline).await? else {
+        return Err(not_stopped_by_the_deadline(home, Attempt::Stop));
+    };
+    let meant = match first {
+        Observed::Free => return Ok(Stopped::NotRunning),
+        Observed::Legacy | Observed::Starting { .. } => None,
+        Observed::Serving { identity, .. } => identity.generation,
+        Observed::Newer(identity) if lists_this_control(&identity) => identity.generation,
+        refused => return Err(refusal(home, refused, Attempt::Stop)),
+    };
+    let _start_lock = await_start_lock(home, deadline, Attempt::Stop).await?;
+    stop_holding(home, deadline, Attempt::Stop, meant).await
+}
+
+#[cfg(not(unix))]
+async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
+    legacy::stop(home, limit, false)
+        .await
+        .map(|stopped| match stopped {
+            legacy::Stop::Done(stopped) => stopped,
+            legacy::Stop::NotLegacy => Stopped::NotRunning,
+        })
+}
+
+#[cfg(unix)]
+fn not_stopped_by_the_deadline(home: &Home, attempt: Attempt) -> LifeError {
+    LifeError::Hung {
+        hang: Hang::NotReady,
+        home: home.prepared.folder().to_path_buf(),
+        log: home.log(),
+        pid: home.pid_hint(),
+        attempt,
+    }
+}
+
+/// Called with `start.lock` held. Asks the serving generation to stop, once, then waits for the home's lock to be
+/// free: the stopped server's successor can only be a server this command's caller starts.
+/// - `meant`: the generation the command saw before it waited for `start.lock`. Another generation serving now is
+///   refused, and nothing is stopped.
+/// - A take-over (`Start`) refuses a newer server even when it lists this control version, because it would replace
+///   it with an older one.
+/// - A server of a build before the socket is stopped by the legacy path, which hands back as soon as the server
+///   answers with a control version; from then on the socket alone decides.
+#[cfg(unix)]
+async fn stop_holding(
+    home: &Home,
+    deadline: Deadline,
+    attempt: Attempt,
+    meant: Option<String>,
+) -> Result<Stopped, LifeError> {
+    let mut asked: Option<Identity> = None;
+    let mut legacy_possible = true;
+    loop {
+        let Some(observed) = observe_by(home, deadline).await? else {
+            return closing_at_the_deadline(home, asked, attempt);
+        };
+        let serving = match observed {
+            Observed::Free => {
+                return Ok(match asked {
+                    Some(identity) => Stopped::Ended {
+                        pid: identity.pid,
+                        generation: identity.generation,
+                    },
+                    None => Stopped::NotRunning,
+                });
+            }
+            Observed::Legacy if legacy_possible && asked.is_none() => {
+                let left = deadline.left().unwrap_or_default();
+                match legacy::stop(home, left, true).await? {
+                    legacy::Stop::Done(stopped) => return Ok(stopped),
+                    legacy::Stop::NotLegacy => {
+                        legacy_possible = false;
+                        None
+                    }
+                }
+            }
+            Observed::Legacy | Observed::Starting { .. } => None,
+            Observed::Serving { identity, .. } => Some(identity),
+            Observed::Newer(identity)
+                if attempt == Attempt::Stop && lists_this_control(&identity) =>
+            {
+                Some(identity)
+            }
+            refused => return Err(refusal(home, refused, attempt)),
+        };
+        if let Some(identity) = serving {
+            let generation = identity.generation.clone().unwrap_or_default();
+            if let Some(stopped) = asked.as_ref().and_then(|asked| asked.generation.clone()) {
+                if stopped != generation {
+                    return Ok(Stopped::Ended {
+                        pid: asked.as_ref().map_or(0, |asked| asked.pid),
+                        generation: Some(stopped),
+                    });
+                }
+            } else if let Some(meant) = meant.as_ref().filter(|meant| **meant != generation) {
+                return Err(LifeError::OtherGeneration {
+                    asked: meant.clone(),
+                    serving: Some(generation),
+                });
+            } else {
+                let Some(left) = deadline.left() else {
+                    return closing_at_the_deadline(home, asked, attempt);
+                };
+                let answer = stop_over_socket(&home.prepared, &generation, PROBE_LIMIT.min(left));
+                match answer.await {
+                    Ok(StopAnswer::Accepted) => asked = Some(identity),
+                    Ok(StopAnswer::OtherGeneration(serving)) => {
+                        return Err(LifeError::OtherGeneration {
+                            asked: generation,
+                            serving,
+                        });
+                    }
+                    Ok(StopAnswer::Refused(reason)) => {
+                        return Err(LifeError::CannotStop { reason });
+                    }
+                    Ok(StopAnswer::Unconfirmed(reason)) => {
+                        return Err(LifeError::StopUnconfirmed {
+                            generation,
+                            reason,
+                            lock: match home.held() {
+                                Ok(true) => "held: the server may still be stopping".to_owned(),
+                                Ok(false) => "free: no server holds the home now".to_owned(),
+                                Err(error) => format!("unknown ({error})"),
+                            },
+                        });
+                    }
+                    Err(Unanswered::NotListening(_)) => {}
+                    Err(Unanswered::Stalled) if deadline.left().is_none() => {
+                        return closing_at_the_deadline(home, asked, attempt);
+                    }
+                    Err(Unanswered::Stalled) => {
+                        return Err(refusal(home, Observed::Stalled, attempt));
+                    }
+                    Err(Unanswered::NotPermitted(error) | Unanswered::PathError(error)) => {
+                        return Err(refusal(
+                            home,
+                            Observed::Unreachable(format!(
+                                "{} cannot be reached: {error}",
+                                home.prepared.socket().display()
+                            )),
+                            attempt,
+                        ));
+                    }
+                    Err(Unanswered::NotReady(why) | Unanswered::Malformed(why)) => {
+                        return Err(refusal(home, Observed::Malformed(why), attempt));
+                    }
+                    Err(Unanswered::OwnerOnly) => {
+                        return Err(refusal(
+                            home,
+                            Observed::Malformed(
+                                "the socket answered as a TCP listener does".to_owned(),
+                            ),
+                            attempt,
+                        ));
+                    }
+                }
+            }
+        }
+        if !deadline.pause().await {
+            return closing_at_the_deadline(home, asked, attempt);
+        }
+    }
+}
+
+/// An acknowledged stop still holding the home is `Closing`; a server that never became ready to be stopped is
+/// `Hung`.
+#[cfg(unix)]
+fn closing_at_the_deadline(
+    home: &Home,
+    asked: Option<Identity>,
+    attempt: Attempt,
+) -> Result<Stopped, LifeError> {
+    match asked {
+        Some(identity) => Ok(Stopped::Closing {
+            pid: Some(identity.pid),
+            generation: identity.generation,
+        }),
+        None => Err(not_stopped_by_the_deadline(home, attempt)),
     }
 }
 
@@ -727,23 +1242,13 @@ fn log_tail(log: &Path) -> String {
     text[start..].trim().to_owned()
 }
 
-fn remove_runtime(home: &Home, stopped: Option<u32>) {
-    let stale = home.runtime_file().is_some_and(|runtime| match stopped {
-        Some(pid) => runtime.pid == pid,
-        None => !alive(runtime.pid),
-    });
-    if stale {
-        let _ = std::fs::remove_file(home.prepared.runtime());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use quadratique_server::server::Paths;
 
-    use super::{Home, LifeError, Stopped, ensure_within, stop_within};
+    use super::{Home, LifeError, ensure_within};
 
     const HANG_GUARD: Duration = Duration::from_secs(20);
 
@@ -842,6 +1347,7 @@ mod tests {
             address: "127.0.0.1:9".parse().expect("an address"),
             url: String::new(),
             database: "/home/workspace.db".into(),
+            control: None,
         };
         let after =
             |errno: Errno| Found::unanswered(&runtime, Unanswered::of_connect(errno.into()));
@@ -851,8 +1357,14 @@ mod tests {
         assert!(matches!(after(Errno::CONNREFUSED), Found::Nobody));
     }
 
+    /// A held home with no socket and no runtime file is the row "starting": the stop waits for it to answer or to
+    /// let go, and at the deadline it ends with the recovery text, having signalled nothing.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn a_stop_of_a_home_that_stays_held_without_an_answer_says_the_server_is_stopping() {
+    async fn a_stop_of_a_home_that_stays_held_without_an_answer_ends_at_its_deadline_and_says_how_to_recover()
+     {
+        use super::stop_within;
+
         let directory = private_home();
         let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
         let closing_server = home
@@ -866,9 +1378,156 @@ mod tests {
             tokio::time::timeout(HANG_GUARD, stop_within(&home, Duration::from_millis(200))).await;
 
         drop(closing_server);
+        let Ok(Err(error @ LifeError::Hung { .. })) = stopped else {
+            panic!("the stop did not end at its deadline");
+        };
+        let message = error.to_string();
         assert!(
-            matches!(stopped, Ok(Ok(Stopped::Closing { pid: None }))),
-            "the stop did not say the server is stopping"
+            message.contains("Nothing was stopped.") && message.contains("Ctrl-C"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_meets_a_held_home_without_a_socket_waits_then_ends_at_its_deadline_having_started_nothing()
+     {
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+        let starting_server = home
+            .open_lock(&home.prepared.lock())
+            .expect("the home's lock");
+        starting_server
+            .lock()
+            .expect("a server that has not bound its socket holds the home");
+
+        let started =
+            tokio::time::timeout(HANG_GUARD, ensure_within(&home, Duration::from_millis(200)))
+                .await;
+
+        drop(starting_server);
+        let Ok(Err(error @ LifeError::Hung { .. })) = started else {
+            panic!("the start did not end at its deadline: {started:?}");
+        };
+        assert!(
+            error.to_string().contains("Nothing was started."),
+            "{error}"
+        );
+        assert!(!home.log().exists(), "a server was spawned");
+        assert!(!home.start_lock().exists(), "a start was reserved");
+    }
+
+    /// `EACCES`, `EPERM` and path errors on the socket cannot be made for this account's own socket without root; the
+    /// row's outcome is this mapping, which every operation uses.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreachable_socket_refuses_a_start_and_a_stop_each_with_its_own_outcome() {
+        use super::{Attempt, Observed, refusal};
+
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+        let reason = || Observed::Unreachable("connecting is not permitted".to_owned());
+
+        let start = refusal(&home, reason(), Attempt::Start);
+        let stop = refusal(&home, reason(), Attempt::Stop);
+
+        assert!(matches!(start, LifeError::Unreachable { .. }), "{start}");
+        assert!(
+            matches!(stop, LifeError::UnreachableToStop { .. }),
+            "{stop}"
+        );
+        assert!(stop.to_string().ends_with("Nothing was stopped."), "{stop}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_tcp_address_comes_from_the_identity_url_only_when_it_is_a_loopback_url_of_the_command_line()
+     {
+        use quadratique_server::server::Identity;
+
+        let identity = |url: &str| Identity {
+            pid: 1,
+            database: "/home/workspace.db".into(),
+            interface: None,
+            schema: None,
+            generation: None,
+            control: Some(1),
+            controls: None,
+            executable: None,
+            started: None,
+            url: Some(url.to_owned()),
+        };
+
+        let runtime =
+            super::runtime_of(&identity("http://127.0.0.1:4100/cli")).expect("an address");
+
+        assert_eq!(
+            runtime.address,
+            "127.0.0.1:4100".parse().expect("an address")
+        );
+        assert_eq!(runtime.control, Some(1));
+        for refused in [
+            "http://192.0.2.1:4100/cli",
+            "http://127.0.0.1:4100/web",
+            "https://127.0.0.1:4100/cli",
+            "http://localhost:4100/cli",
+        ] {
+            assert!(super::runtime_of(&identity(refused)).is_none(), "{refused}");
+        }
+    }
+
+    /// One deadline per operation: once it has passed, nothing new begins. A free home is not started in.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_whose_deadline_has_passed_reserves_and_spawns_nothing() {
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+
+        let started = tokio::time::timeout(HANG_GUARD, ensure_within(&home, Duration::ZERO)).await;
+
+        assert!(
+            matches!(
+                started,
+                Ok(Err(LifeError::NoAnswer { .. } | LifeError::Hung { .. }))
+            ),
+            "the start went on past its deadline: {started:?}"
+        );
+        assert!(!home.start_lock().exists(), "a start was reserved");
+        assert!(!home.log().exists(), "a server was spawned");
+    }
+
+    /// A probe gets what is left of the operation's deadline, not a probe limit of its own: a stop of a stalled socket
+    /// with 200 ms left ends at its deadline, not five seconds later as "stalled".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_probe_is_cut_to_what_is_left_of_the_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::stop_within;
+
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+        let holder = home
+            .open_lock(&home.prepared.lock())
+            .expect("the home's lock");
+        holder.lock().expect("a server holds the home");
+        let socket = home.prepared.socket();
+        let _never_answers = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+            .expect("mode 0600");
+        let limit = Duration::from_millis(200);
+
+        let started = std::time::Instant::now();
+        let stopped = tokio::time::timeout(HANG_GUARD, stop_within(&home, limit)).await;
+
+        assert!(
+            matches!(stopped, Ok(Err(LifeError::Hung { .. }))),
+            "the stop did not end at its deadline: {stopped:?}"
+        );
+        assert!(
+            started.elapsed() < quadratique_server::server::PROBE_LIMIT,
+            "the probe outlived the deadline: {:?}",
+            started.elapsed()
         );
     }
 }

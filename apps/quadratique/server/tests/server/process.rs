@@ -131,6 +131,7 @@ async fn no_identity_probe_outlasts_the_wait_of_a_starting_server() {
         address: silent.local_addr().expect("the listener's address"),
         url: String::new(),
         database: home.path().join("workspace.db"),
+        control: None,
     };
     std::fs::write(&paths.runtime, serde_json::to_vec(&stale).unwrap()).unwrap();
     let accepting = tokio::spawn(async move {
