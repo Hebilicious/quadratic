@@ -56,6 +56,9 @@ the project. `ui --open` opens the web app in your browser through `xdg-open`; w
   security, agents in a sandbox, and how to develop and test Quadratique.
 - [`apps/quadratique/eval/README.md`](apps/quadratique/eval/README.md): how Quadratique is evaluated,
   and a saved comparison with lific and Beads.
+- [`docs/prd.md`](docs/prd.md): the product requirements: goals, data model, lifecycle and
+  milestones.
+- [`docs/decisions/`](docs/decisions/): the decision records.
 
 ## Repository layout
 
