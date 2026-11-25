@@ -211,12 +211,14 @@ impl Handler for SameOrigin {
             )));
         }
         let origins = request.headers().get_all(header::ORIGIN);
-        let present = origins.iter().next().is_some();
+        // A browser sends one `Origin` at most: more than one is refused on every route.
+        let count = origins.iter().count();
         let own_origin = own_host.is_some_and(|host| {
             origins
                 .iter()
                 .all(|origin| origin.as_bytes() == format!("http://{host}").as_bytes())
-        }) && (present || self.origin_header != OriginHeader::Required);
+        }) && count <= 1
+            && (count == 1 || self.origin_header != OriginHeader::Required);
         if !own_origin {
             return Box::pin(std::future::ready(text(
                 StatusCode::FORBIDDEN,

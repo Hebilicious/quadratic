@@ -402,6 +402,12 @@ pub struct SessionRoute {
 
 impl Handler for SessionRoute {
     fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
+        if request.uri().path() != SESSION {
+            return Box::pin(std::future::ready(answer(
+                StatusCode::NOT_FOUND,
+                "No such route.",
+            )));
+        }
         if request.method() != Method::POST {
             let mut response = answer(StatusCode::METHOD_NOT_ALLOWED, "Only POST.");
             response

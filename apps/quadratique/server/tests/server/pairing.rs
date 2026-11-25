@@ -396,3 +396,37 @@ async fn the_server_refuses_a_web_app_inside_its_data_folder() {
         refused.err()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_exact_path_redeems_a_code_and_only_with_one_origin_header() {
+    let site = start(built).await;
+    let code = code_of(&pair(site.home.path(), false).await);
+    let host = site.address().to_string();
+    let origin = site.origin();
+    let body = Some(json!({ "code": code }));
+
+    let below = request(
+        site.address(),
+        "POST",
+        "/session/x",
+        &[("Host", host.as_str()), ("Origin", origin.as_str())],
+        body.clone(),
+    )
+    .await;
+    let twice = request(
+        site.address(),
+        "POST",
+        "/session",
+        &[
+            ("Host", host.as_str()),
+            ("Origin", origin.as_str()),
+            ("Origin", origin.as_str()),
+        ],
+        body,
+    )
+    .await;
+
+    assert_eq!(below.status, 404, "POST /session/x");
+    assert_eq!(twice.status, 403, "{}", twice.body);
+    assert_eq!(redeem(site.address(), &code, None).await.status, 200);
+}
