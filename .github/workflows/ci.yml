@@ -64,7 +64,7 @@ jobs:
         run: >-
           moon run
           quadratique-cli:test quadratique-cli:lint quadratique-cli:fmt-check
-          quadratique-server:test quadratique-server:lint quadratique-server:fmt-check
+          quadratique-server:test quadratique-server:lint quadratique-server:fmt-check quadratique-server:package-test
           quadratique-install:test
           quadratique-eval:test
           quadratique-catalog:check
