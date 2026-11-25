@@ -10,7 +10,10 @@ import { test as base } from "@playwright/test";
 import { HANG_GUARD_MS } from "./hang-guard.ts";
 
 const BINARY = fileURLToPath(
-  new URL(`../../target/debug/quadratique${process.platform === "win32" ? ".exe" : ""}`, import.meta.url),
+  new URL(
+    `../../target/debug/quadratique${process.platform === "win32" ? ".exe" : ""}`,
+    import.meta.url,
+  ),
 );
 const BUILT_APP = fileURLToPath(new URL("../dist", import.meta.url));
 
