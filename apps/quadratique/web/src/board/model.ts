@@ -105,6 +105,19 @@ export const LinkSchema = Schema.Struct({
 });
 export type Link = typeof LinkSchema.Type;
 
+export const LandedCommitSchema = Schema.Struct({
+  commit: Schema.String,
+  url: Schema.optionalKey(Schema.String),
+});
+export type LandedCommit = typeof LandedCommitSchema.Type;
+
+export const WorkSchema = Schema.Struct({
+  branch: Schema.optionalKey(Schema.String),
+  pullRequest: Schema.optionalKey(Schema.String),
+  commits: Schema.Array(LandedCommitSchema),
+});
+export type Work = typeof WorkSchema.Type;
+
 export const IssueSchema = Schema.Struct({
   ...IssueSummarySchema.fields,
   description: Schema.optionalKey(Schema.String),
@@ -119,6 +132,7 @@ export const IssueSchema = Schema.Struct({
   updatedAt: Schema.String,
   source: Schema.optionalKey(SourceSchema),
   links: Schema.Array(LinkSchema),
+  work: Schema.optionalKey(WorkSchema),
 });
 export type Issue = typeof IssueSchema.Type;
 

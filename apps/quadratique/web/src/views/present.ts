@@ -325,3 +325,131 @@ export function labelsOf(text: string): readonly string[] {
     ),
   ];
 }
+
+export type TextPart =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "link"; readonly text: string };
+
+/** Counts the characters a scan reads, so that a test can bound its work. */
+export interface Meter {
+  steps: number;
+}
+
+const SCHEMES = ["https://", "http://"] as const;
+const ENDS_AN_ADDRESS = new Set([" ", "\t", "\n", "\r", "\f", "\v", "<", ">", '"', "'", "`"]);
+const TRAILING = new Set([".", ",", ";", ":", "!", "?"]);
+const OPENING_OF: Readonly<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
+
+function schemeAt(text: string, at: number): boolean {
+  return SCHEMES.some((scheme) => text.startsWith(scheme, at));
+}
+
+function isWebAddress(candidate: string): boolean {
+  if (!URL.canParse(candidate)) {
+    return false;
+  }
+  const url = new URL(candidate);
+  return (url.protocol === "https:" || url.protocol === "http:") && url.hostname.length > 0;
+}
+
+function isSpace(character: string): boolean {
+  return /\s/u.test(character);
+}
+
+/** The end of the bare address that starts at `from`: it stops at a space, a quote or an angle bracket, and leaves out trailing punctuation and closing brackets it did not open. */
+function bareEnd(text: string, from: number, meter: Meter): number {
+  const open: Record<string, number> = { "(": 0, "[": 0, "{": 0 };
+  const closed: Record<string, number> = { ")": 0, "]": 0, "}": 0 };
+  let end = from;
+  while (end < text.length) {
+    const character = text.charAt(end);
+    meter.steps += 1;
+    if (ENDS_AN_ADDRESS.has(character) || isSpace(character)) {
+      break;
+    }
+    if (character in open) {
+      open[character] = (open[character] ?? 0) + 1;
+    } else if (character in closed) {
+      closed[character] = (closed[character] ?? 0) + 1;
+    }
+    end += 1;
+  }
+  while (end > from) {
+    const last = text.charAt(end - 1);
+    meter.steps += 1;
+    const opening = OPENING_OF[last];
+    if (TRAILING.has(last)) {
+      end -= 1;
+    } else if (opening !== undefined && (closed[last] ?? 0) > (open[opening] ?? 0)) {
+      closed[last] = (closed[last] ?? 0) - 1;
+      end -= 1;
+    } else {
+      break;
+    }
+  }
+  return end;
+}
+
+/** The position of the `>` that closes an address in angle brackets opened just before `from`, or -1. */
+function bracketEnd(text: string, from: number, meter: Meter): number {
+  for (let at = from; at < text.length; at += 1) {
+    const character = text.charAt(at);
+    meter.steps += 1;
+    if (character === ">") {
+      return at;
+    }
+    if (character === "<" || isSpace(character)) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The text cut into plain text and web addresses, for a page that shows each address as a link. An address inside
+ * angle brackets is taken whole, up to the `>`. Every part is text to show as text: nothing in it is ever read as
+ * HTML. One pass: the work grows with the length of the text.
+ */
+export function textParts(text: string, meter: Meter = { steps: 0 }): readonly TextPart[] {
+  const parts: TextPart[] = [];
+  let plainFrom = 0;
+  let at = 0;
+  const link = (from: number, to: number) => {
+    if (from > plainFrom) {
+      parts.push({ kind: "text", text: text.slice(plainFrom, from) });
+    }
+    parts.push({ kind: "link", text: text.slice(from, to) });
+  };
+  while (at < text.length) {
+    meter.steps += 1;
+    if (text.charAt(at) === "<" && schemeAt(text, at + 1)) {
+      const close = bracketEnd(text, at + 1, meter);
+      if (close !== -1 && isWebAddress(text.slice(at + 1, close))) {
+        link(at + 1, close);
+        plainFrom = close;
+        at = close + 1;
+        continue;
+      }
+      at += 1;
+      continue;
+    }
+    if (schemeAt(text, at)) {
+      const end = bareEnd(text, at, meter);
+      if (end > at && isWebAddress(text.slice(at, end))) {
+        link(at, end);
+        plainFrom = end;
+      }
+      at = Math.max(end, at + 1);
+      continue;
+    }
+    at += 1;
+  }
+  if (plainFrom < text.length) {
+    parts.push({ kind: "text", text: text.slice(plainFrom) });
+  }
+  return parts;
+}
+
+export function shortCommit(commit: string): string {
+  return commit.slice(0, 12);
+}

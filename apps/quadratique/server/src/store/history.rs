@@ -42,6 +42,9 @@ const CLAIM_COLUMNS: [&str; 4] = [
     "claim_since",
 ];
 
+const CLAIM_OPERATION: &str = "issue.claim";
+const LANDING_OPERATION: &str = "git.merged";
+
 const PROJECT_FIELDS: &[(&str, &str, Shape)] = &[
     ("name", "name", Shape::Text),
     ("repository", "repository", Shape::Text),
@@ -124,6 +127,94 @@ impl View<'_> {
             .map(|entry| self.change(entry))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Page { items, next_cursor })
+    }
+
+    /// The branch of the last claim on `issue` and the position of that claim's commit, in this
+    /// view; it stays after the claim ends.
+    pub fn last_claim(&self, issue: &str) -> Result<Option<(String, i64)>, StoreError> {
+        let Some((seq, hash)) = self.last_issue_commit(issue, CLAIM_OPERATION)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .row(
+                &format!("SELECT claim_branch FROM dolt_at_issues('{hash}') WHERE id = ?"),
+                &[issue.into()],
+            )?
+            .and_then(|row| Cells(&row).opt_text(0))
+            .map(|branch| (branch, seq)))
+    }
+
+    /// The position of the last commit in which the ref watcher recorded a landing of `issue`.
+    pub fn last_landing(&self, issue: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .last_issue_commit(issue, LANDING_OPERATION)?
+            .map(|(seq, _)| seq))
+    }
+
+    fn last_issue_commit(
+        &self,
+        issue: &str,
+        operation: &str,
+    ) -> Result<Option<(i64, String)>, StoreError> {
+        let first_line = format!("{operation}\n\n");
+        let mut sql = "SELECT c.seq, c.hash FROM commit_subjects s \
+                       JOIN commit_index c ON c.seq = s.seq \
+                       WHERE s.issue = ? AND substr(c.message, 1, ?) = ?"
+            .to_owned();
+        let mut params: Vec<Value> = vec![
+            issue.into(),
+            (first_line.len() as i64).into(),
+            first_line.as_str().into(),
+        ];
+        if let Some(bound) = self.bound() {
+            sql.push_str(" AND s.seq <= ?");
+            params.push(bound.into());
+        }
+        sql.push_str(" ORDER BY s.seq DESC LIMIT 1");
+        Ok(self.row(&sql, &params)?.map(|row| {
+            let cells = Cells(&row);
+            (cells.int(0), cells.text(1))
+        }))
+    }
+
+    /// The position of the first commit since which `project` has been bound to the repository it
+    /// is bound to in this view; `None` when it is bound to none. Reads one project commit more
+    /// than the project has had since that binding.
+    pub fn bound_since(&self, project: &str) -> Result<Option<i64>, StoreError> {
+        let mut sql = "SELECT c.seq, c.hash FROM commit_subjects s \
+                       JOIN commit_index c ON c.seq = s.seq \
+                       WHERE s.project = ? AND s.issue = ''"
+            .to_owned();
+        let mut params: Vec<Value> = vec![project.into()];
+        if let Some(bound) = self.bound() {
+            sql.push_str(" AND s.seq <= ?");
+            params.push(bound.into());
+        }
+        sql.push_str(" ORDER BY s.seq DESC");
+        let mut bound: Option<String> = None;
+        let mut since = None;
+        for row in self.rows(&sql, &params)? {
+            let cells = Cells(&row);
+            let repository = self
+                .row(
+                    &format!(
+                        "SELECT repository FROM dolt_at_projects('{}') WHERE key = ?",
+                        cells.text(1)
+                    ),
+                    &[project.into()],
+                )?
+                .and_then(|row| Cells(&row).opt_text(0));
+            let Some(repository) = repository else {
+                break;
+            };
+            match &bound {
+                None => bound = Some(repository),
+                Some(current) if *current != repository => break,
+                Some(_) => {}
+            }
+            since = Some(cells.int(0));
+        }
+        Ok(since)
     }
 
     fn change(&self, entry: Entry) -> Result<Change, StoreError> {

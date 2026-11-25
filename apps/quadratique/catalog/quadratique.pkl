@@ -48,6 +48,12 @@ local function text(text: String?): Dynamic = new {
   description = text
 }
 
+local function webAddress(text: String): Dynamic = new {
+  type = "string"
+  pattern = "^https://github\\.com/"
+  description = text
+}
+
 local slug = "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
 
 local function token(max: Int, text: String?): Dynamic = new {
@@ -372,8 +378,29 @@ types {
       createdBy = module.ref("Actor")
       source = module.ref("Source")
       links = array(module.ref("Link"), 50, "What the finding is about. Empty for an issue made by hand.")
+      work = module.ref("Work")
     }
     required { ...summaryRequired; "notes"; "relations"; "children"; "createdAt"; "createdBy"; "links" }
+  }
+  ["Work"] {
+    type = "object"
+    description = "Where the issue's work is in git, read from the project's repository: only `issue.get` gives it, and only for an issue with a branch or a landed commit. The addresses come only when the remote that the default branch tracks (else `origin`) is on github.com; the server builds them from that remote's owner and name and never contacts the forge."
+    additionalProperties = false
+    properties {
+      branch = text("The branch of the issue's claim, or of its last claim once the claim has ended; else the branch that landed it.")
+      pullRequest = webAddress("`<repository>/pull/<branch>`, which github.com sends on to the branch's pull request. Absent when the branch is the default branch.")
+      commits = array(module.ref("LandedCommit"), null, "The commits on the default branch that landed the issue: a branch's tip, or a commit whose `Refs` trailer names it.")
+    }
+    required { "commits" }
+  }
+  ["LandedCommit"] {
+    type = "object"
+    additionalProperties = false
+    properties {
+      commit = module.ref("GitCommit")
+      url = webAddress("`<repository>/commit/<commit>`.")
+    }
+    required { "commit" }
   }
   ["Note"] {
     type = "object"
