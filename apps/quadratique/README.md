@@ -247,7 +247,20 @@ forward that runs as you (`ssh -L`, socat, the userland forwarders of rootless c
 that process, so everyone who connects through it counts as you. No web page can call the routes
 of the command line, not even Quadratique's own.
 
-The server makes its data folder readable only by its own account (mode `0700`).
+The data folder must be private. The server and every command check it before they open a lock
+file in it, touch the store or start a server, and they refuse it, with the reason, when:
+
+- a folder above it belongs to another account than yours or root's, or a group or other accounts
+  may write it and it is not sticky (`/tmp` is sticky);
+- a link on its path belongs to another account, or sits in a folder that fails the rule above;
+- its mode, or on Linux and macOS an ACL entry, gives a group or another account any access to it
+  (run `chmod 700` on it), or an ACL entry lets another account write a folder of yours above it;
+- `server.sock` in it is anything but a socket of your account;
+- the path of `server.sock` is longer than the system allows (107 bytes on Linux, 103 on macOS).
+
+A missing data folder, and any missing folder above it, is made with mode `0700`. The server also
+listens on the Unix socket `server.sock` in the data folder, with mode `0600`, and `server status`
+asks it there first. The other commands still use the TCP listener.
 
 Some agent sandboxes forbid connections to the loopback interface, and some make the file system
 read-only, so that a command can neither reach the server nor start or stop one in the data

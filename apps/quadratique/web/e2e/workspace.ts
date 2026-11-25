@@ -43,7 +43,8 @@ export class Workspace {
   }
 
   async setUp(): Promise<void> {
-    await mkdir(this.home);
+    // The server refuses a home that a group or other accounts may use.
+    await mkdir(this.home, { mode: 0o700 });
     await this.repositoryAt(this.repository);
     await this.start();
   }

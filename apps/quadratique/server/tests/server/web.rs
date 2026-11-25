@@ -36,7 +36,7 @@ async fn start(build: impl FnOnce(&Path)) -> Site {
 }
 
 async fn start_app(web_app: WebApp, app: TempDir) -> Site {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let server = within(
         "the server's start",
         server::start_with(

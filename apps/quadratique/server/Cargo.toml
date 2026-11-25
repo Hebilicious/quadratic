@@ -40,9 +40,17 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
+# The home policy (src/home.rs) reads modes, owners and Linux's ACLs, and the account it runs as.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "process"] }
+
 # The caller check of the local listener (src/peer.rs) asks the Linux kernel.
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["net"] }
+
+# macOS keeps ACLs out of reach of getxattr: the home policy reads them through exacl.
+[target.'cfg(target_os = "macos")'.dependencies]
+exacl.workspace = true
 
 # doltlite links zlib by name and Windows has none: this builds one from source for it to link.
 [target.'cfg(windows)'.dependencies]

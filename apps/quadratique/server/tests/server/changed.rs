@@ -176,7 +176,7 @@ mod in_process {
     }
 
     async fn board() -> Board {
-        let home = tempfile::tempdir().expect("a temporary home");
+        let home = crate::support::private_home();
         let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
         let app = application().expect("the application");
         let human = Caller {
@@ -260,7 +260,7 @@ mod in_process {
 
     #[tokio::test]
     async fn a_live_occurrence_older_than_max_age_is_skipped_and_the_next_one_is_truncated() {
-        let home = tempfile::tempdir().expect("a temporary home");
+        let home = crate::support::private_home();
         let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
         let app = application().expect("the application");
         let human = Caller {

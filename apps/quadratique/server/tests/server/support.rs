@@ -23,13 +23,24 @@ pub struct Running {
     home: TempDir,
 }
 
+/// A home as the home policy wants it: mode 0700. `tempfile` makes its folders with the mode the umask leaves,
+/// usually 0755, and the policy refuses such a home rather than change its mode.
+pub fn private_home() -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .expect("a temporary home")
+}
+
 pub async fn start() -> Running {
     start_looking_every(watcher::EVERY).await
 }
 
 pub async fn start_looking_every(every: Duration) -> Running {
     environment::read_no_user_configuration();
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = private_home();
     let server = within(
         "the server's start",
         server::start_with(

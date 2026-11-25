@@ -13,34 +13,35 @@ use std::io::{Read, Seek, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use quadratique_server::home::{self, Exposure};
+
 const STAGING_PREFIX: &str = ".quadratique-upgrade-";
 /// The staging folder's name is the prefix and this many lowercase hex digits.
 const STAGING_DIGITS: usize = 24;
 const LOCK_NAME: &str = ".quadratique-upgrade.lock";
-const GROUP_OR_OTHER_WRITE: u32 = 0o022;
-const STICKY: u32 = 0o1000;
 
+/// The home's rule for a folder whose entries no other account may change (`quadratique_server::home::exposure`),
+/// applied to the install folder.
 pub fn check(folder: &Path) -> Result<(), String> {
-    let me = rustix::process::geteuid().as_raw();
+    let me = home::own_account();
     for (index, ancestor) in folder.ancestors().enumerate() {
         let meta = std::fs::metadata(ancestor)
             .map_err(|error| format!("{} cannot be read: {error}", ancestor.display()))?;
-        if meta.uid() != me && meta.uid() != 0 {
-            return Err(format!(
-                "{} belongs to another account (uid {}), which could replace the binary",
-                ancestor.display(),
-                meta.uid()
-            ));
-        }
-        let mode = meta.permissions().mode();
-        let sticky = mode & STICKY != 0;
-        if mode & GROUP_OR_OTHER_WRITE != 0 && (index == 0 || !sticky) {
-            return Err(format!(
-                "other accounts can write {} (mode {:o}: group or others may write it), so they could replace the binary between its check and its install; remove their write access (chmod go-w {})",
-                ancestor.display(),
-                mode & 0o7777,
-                crate::init::shell_word(&ancestor.display().to_string())
-            ));
+        match home::exposure(meta.uid(), meta.permissions().mode(), me, index == 0) {
+            Some(Exposure::OtherOwner(uid)) => {
+                return Err(format!(
+                    "{} belongs to another account (uid {uid}), which could replace the binary",
+                    ancestor.display(),
+                ));
+            }
+            Some(Exposure::Writable(mode)) => {
+                return Err(format!(
+                    "other accounts can write {} (mode {mode:o}: group or others may write it), so they could replace the binary between its check and its install; remove their write access (chmod go-w {})",
+                    ancestor.display(),
+                    crate::init::shell_word(&ancestor.display().to_string())
+                ));
+            }
+            None => {}
         }
     }
     Ok(())

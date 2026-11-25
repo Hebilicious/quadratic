@@ -4,13 +4,17 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use quadratique_server::app::interface;
+use quadratique_server::home;
 use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered, identity};
-use quadratique_server::store::{StoreError, canonical_folder, refuse_git_work_tree};
+use quadratique_server::store::{canonical_folder, refuse_git_work_tree};
 
 use crate::process::{alive, ask_to_stop, detach};
 use crate::route::McpTool;
 
 const STOP_LIMIT: Duration = Duration::from_secs(30);
+/// Set in the environment of a server that a command starts, so that its identity says it was started on demand.
+pub const STARTED_VARIABLE: &str = "QUADRATIQUE_STARTED";
+pub const ON_DEMAND: &str = "on-demand";
 const POLL: Duration = Duration::from_millis(20);
 const LOG_TAIL: usize = 2000;
 
@@ -157,13 +161,21 @@ pub struct Home {
 }
 
 impl Home {
-    pub fn new(paths: Paths) -> Result<Home, StoreError> {
-        let directory = paths
-            .database
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        refuse_git_work_tree(&directory)?;
+    /// Applies the home policy before anything opens a lock file in the home or starts a server for it, and makes the
+    /// home when it is missing. `directory` is the home with its links resolved.
+    pub fn new(paths: Paths) -> Result<Home, String> {
+        refuse_git_work_tree(paths.folder()).map_err(|error| error.to_string())?;
+        let directory =
+            home::prepare(paths.folder()).map_err(|refusal| match refusal.denied() {
+                Some(error) => LifeError::Unreachable {
+                    reason: format!(
+                        "this process cannot use {}: {error}; a sandbox may be blocking it",
+                        paths.folder().display()
+                    ),
+                }
+                .to_string(),
+                None => refusal.to_string(),
+            })?;
         Ok(Home { paths, directory })
     }
 
@@ -176,7 +188,6 @@ impl Home {
     }
 
     fn open_lock(&self, path: &Path) -> std::io::Result<File> {
-        std::fs::create_dir_all(&self.directory)?;
         OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -281,7 +292,9 @@ impl Found {
                     "the server at {address} answers only processes of its own account"
                 ),
             },
-            Unanswered::NotListening(_) | Unanswered::NoIdentity => Found::Nobody,
+            Unanswered::NotListening(_) | Unanswered::NoIdentity | Unanswered::NotReady(_) => {
+                Found::Nobody
+            }
         }
     }
 }
@@ -318,6 +331,32 @@ pub async fn find(home: &Home) -> Result<Found, LifeError> {
         Ok(_) => Found::Nobody,
         Err(unanswered) => Found::unanswered(&runtime, unanswered),
     })
+}
+
+/// The identity that the server of this home gives over its socket, when it gives one for this home's database.
+/// `None` sends the caller to the TCP path, which still finds a server without a socket, of an older build.
+#[cfg(unix)]
+pub async fn over_socket(
+    home: &Home,
+) -> Result<Option<quadratique_server::server::Identity>, LifeError> {
+    match quadratique_server::server::identity_over_socket(&home.directory).await {
+        Ok(identity) if identity.database == home.database() => Ok(Some(identity)),
+        Err(Unanswered::NotPermitted(error)) => {
+            if home
+                .held()
+                .map_err(|error| home.unusable(error, Attempt::Start))?
+            {
+                return Err(LifeError::Unreachable {
+                    reason: format!(
+                        "connecting to {} is not permitted ({error})",
+                        home.directory.join(home::SOCKET_FILE).display()
+                    ),
+                });
+            }
+            Ok(None)
+        }
+        Ok(_) | Err(_) => Ok(None),
+    }
 }
 
 pub async fn ensure(home: &Home) -> Result<RuntimeFile, LifeError> {
@@ -587,6 +626,7 @@ impl OwnedChild {
         if let Some(directory) = &home.paths.home {
             command.env("QUADRATIQUE_HOME", directory);
         }
+        command.env(STARTED_VARIABLE, ON_DEMAND);
         let child = detach(&mut command)
             .arg("serve")
             .current_dir(&home.directory)
@@ -654,9 +694,22 @@ mod tests {
 
     const HANG_GUARD: Duration = Duration::from_secs(20);
 
+    /// The home policy refuses a home that a group or other accounts may use, and `tempfile` makes 0755 folders.
+    fn private_home() -> tempfile::TempDir {
+        let builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::PermissionsExt;
+            let mut builder = builder;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+            builder
+        };
+        builder.tempdir().expect("a temporary home")
+    }
+
     #[tokio::test]
     async fn a_start_lock_that_another_starter_never_releases_ends_at_the_deadline() {
-        let directory = tempfile::tempdir().expect("a temporary home");
+        let directory = private_home();
         let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
         let other_starter = home.open_lock(&home.start_lock()).expect("the start lock");
         other_starter
@@ -700,7 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_of_a_home_that_stays_held_without_an_answer_says_the_server_is_stopping() {
-        let directory = tempfile::tempdir().expect("a temporary home");
+        let directory = private_home();
         let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
         let closing_server = home.open_lock(&home.paths.lock()).expect("the home's lock");
         closing_server

@@ -281,7 +281,7 @@ done
 pass "systemd reads the unit's quoted paths whole and its restart policy, with spaces in the binary and data folders"
 
 damaged_home=$scratch/damaged
-mkdir -p "$damaged_home"
+mkdir -p -m 700 "$damaged_home"
 echo "notes, not a database" > "$damaged_home/workspace.db"
 refused_status=0
 on_machine env QUADRATIQUE_HOME="$damaged_home" "$quadratique" serve > /dev/null 2>&1 || refused_status=$?

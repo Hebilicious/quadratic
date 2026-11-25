@@ -94,7 +94,7 @@ fn words(args: &[String]) -> Vec<&str> {
 
 pub fn home() -> Result<Home, String> {
     let paths = Paths::from_env().map_err(|error| error.to_string())?;
-    Home::new(paths).map_err(|error| error.to_string())
+    Home::new(paths)
 }
 
 const TAKE_OVER_FLAG: &str = "--take-over";
@@ -144,7 +144,11 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
     } else {
         None
     };
-    match server::start(&home.paths, address).await {
+    let started = match std::env::var(background::STARTED_VARIABLE) {
+        Ok(value) if value == background::ON_DEMAND => server::Started::OnDemand,
+        _ => server::Started::Serve,
+    };
+    match server::start_by(&home.paths, address, started).await {
         Ok(server) => {
             drop(taken);
             server::until_stopped(server).await;
@@ -186,7 +190,18 @@ fn located(home: &Home, mut value: Value) -> Value {
     value
 }
 
+/// Asks over the socket first. A server that does not answer there may be of a build before the socket: the runtime
+/// file and TCP still find it.
 async fn status(home: &Home) -> Result<Value, background::LifeError> {
+    #[cfg(unix)]
+    match background::over_socket(home).await {
+        Ok(Some(identity)) => return Ok(located(home, answered_over_socket(&identity))),
+        Ok(None) => {}
+        Err(background::LifeError::Unreachable { reason }) => {
+            return Ok(located(home, unreachable(home, reason)));
+        }
+        Err(other) => return Err(other),
+    }
     let value = match background::find(home).await? {
         Found::Ours(runtime) => json!({
             "running": true,
@@ -214,6 +229,25 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
         Found::Nobody => json!({ "running": false, "database": home.paths.database }),
     };
     Ok(located(home, value))
+}
+
+#[cfg(unix)]
+fn answered_over_socket(identity: &server::Identity) -> Value {
+    let same = identity.interface.as_deref() == Some(quadratique_server::app::interface().as_str());
+    let mut value = json!({
+        "running": true,
+        "sameInterface": same,
+        "pid": identity.pid,
+        "url": identity.url,
+        "database": identity.database,
+        "generation": identity.generation,
+        "control": identity.control,
+        "started": identity.started,
+    });
+    if !same {
+        value["interface"] = json!(identity.interface);
+    }
+    value
 }
 
 fn unreachable(home: &Home, reason: String) -> Value {

@@ -602,7 +602,7 @@ mod in_process {
 
     #[tokio::test]
     async fn a_run_that_adds_no_block_loads_no_board() {
-        let home = tempfile::tempdir().expect("a temporary home");
+        let home = crate::support::private_home();
         let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
         let human = Caller {
             actor: serde_json::from_str(HUMAN).expect("an actor"),
@@ -650,7 +650,7 @@ mod in_process {
 
     #[tokio::test]
     async fn a_run_with_hundreds_of_blocks_loads_the_board_once() {
-        let home = tempfile::tempdir().expect("a temporary home");
+        let home = crate::support::private_home();
         let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
         let human = Caller {
             actor: serde_json::from_str(HUMAN).expect("an actor"),

@@ -283,3 +283,105 @@ fn commands_with_and_without_a_runtime_directory_find_the_same_server_of_the_def
     assert_eq!(reused["url"], url);
     assert_eq!(home.servers().len(), 1);
 }
+
+/// Without its runtime file, the command line has no TCP address to try: the answer can come only over the socket.
+#[test]
+fn server_status_reaches_the_server_over_its_socket_and_reports_its_generation_and_control_version()
+{
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    let home = Home::new();
+    let elsewhere = outside();
+    home.quadratique(elsewhere.path())
+        .args(["project", "list"])
+        .run()
+        .ok();
+    let runtime = home.runtime().expect("the runtime file");
+    std::fs::remove_file(home.runtime_path()).expect("the runtime file goes");
+    let socket = home.path().join("server.sock");
+    let socket_meta = std::fs::symlink_metadata(&socket).expect("the socket");
+    assert!(socket_meta.file_type().is_socket());
+    assert_eq!(socket_meta.permissions().mode() & 0o777, 0o600);
+
+    let status = home
+        .quadratique(elsewhere.path())
+        .args(["server", "status"])
+        .run()
+        .ok();
+
+    assert_eq!(status["running"], true, "{status}");
+    assert_eq!(status["sameInterface"], true, "{status}");
+    assert_eq!(status["pid"], runtime["pid"], "{status}");
+    assert_eq!(status["url"], runtime["url"], "{status}");
+    assert_eq!(status["control"], 1, "{status}");
+    assert_eq!(status["started"], "on-demand", "{status}");
+    let generation = status["generation"].as_str().expect("a generation");
+    assert!(
+        generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{status}"
+    );
+
+    std::fs::write(home.runtime_path(), runtime.to_string())
+        .expect("the runtime file, which stop still reads until QUA-54");
+    let stopped = home
+        .quadratique(elsewhere.path())
+        .args(["server", "stop"])
+        .run()
+        .ok();
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+}
+
+#[test]
+fn a_home_that_the_policy_refuses_gets_no_lock_file_and_no_server() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = Home::new();
+    let elsewhere = outside();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o750))
+        .expect("a home its group may read");
+
+    let refused = home
+        .quadratique(elsewhere.path())
+        .args(["project", "list"])
+        .run();
+
+    assert_ne!(refused.code, 0, "{refused:?}");
+    assert!(
+        refused.stderr.contains("is not private") && refused.stderr.contains("chmod 700"),
+        "{refused:?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(home.path())
+        .expect("the home")
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect();
+    assert!(left.is_empty(), "the refused home holds {left:?}");
+    assert!(home.servers().is_empty());
+}
+
+#[test]
+fn a_missing_default_home_is_made_private_with_the_folders_above_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = Home::new();
+    let elsewhere = outside();
+    let data = home.path().join("data");
+
+    let status = home
+        .quadratique(elsewhere.path())
+        .without_env("QUADRATIQUE_HOME")
+        .env("XDG_DATA_HOME", &data.display().to_string())
+        .args(["server", "status"])
+        .run()
+        .ok();
+
+    assert_eq!(status["running"], false, "{status}");
+    for folder in [data.clone(), data.join("quadratique")] {
+        let mode = std::fs::metadata(&folder)
+            .expect("the folder")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "{}", folder.display());
+    }
+}

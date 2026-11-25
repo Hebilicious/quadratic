@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use acid_cat_core::http::{HttpBinding, HttpOptions};
@@ -12,13 +12,14 @@ use futures::future::BoxFuture;
 use http::{Method, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::app::{Context, application, caller_of, interface};
 use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
 use crate::git::repository::GIT_LIMIT;
 use crate::git::watcher::{self, Watcher};
+use crate::home::{self, HomeError};
 use crate::serve::{self, Admit, Connection, OWNER_ONLY};
 use crate::store::{Store, StoreError, canonical_folder, refuse_git_work_tree};
 use crate::web::{self, WebApp};
@@ -28,6 +29,11 @@ mod closing;
 pub const TARGET: &str = "cli";
 pub const BASE: &str = "/cli";
 pub const IDENTITY: &str = "/server";
+/// The version of the control protocol: `GET /server`, and later `POST /server/stop`. A build keeps answering every
+/// version it ever served.
+pub const CONTROL: u32 = 1;
+/// The authority that a request on the Unix socket names: the socket, not a host, decides where it goes.
+pub const SOCKET_AUTHORITY: &str = "quadratique.invalid";
 const DATABASE_FILE: &str = "workspace.db";
 const RUNTIME_FILE: &str = "server.json";
 const LOCK_FILE: &str = "server.lock";
@@ -75,6 +81,8 @@ pub enum ServerError {
     CallersUnknown(String),
     #[error("the agent tokens cannot load: {0}")]
     Credentials(#[from] CredentialsError),
+    #[error("the Quadratique home is refused: {0}")]
+    Home(#[from] HomeError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +99,21 @@ impl Paths {
 
     pub fn credentials(&self) -> PathBuf {
         self.database.with_file_name(CREDENTIALS_FILE)
+    }
+
+    /// The folder that holds the store, the lock and the socket.
+    pub fn folder(&self) -> &Path {
+        self.database.parent().unwrap_or(Path::new("."))
+    }
+
+    /// The same files in `folder`, which `home::prepare` resolved.
+    fn within(&self, folder: &Path) -> Paths {
+        let name = |path: &Path| path.file_name().map(PathBuf::from).unwrap_or_default();
+        Paths {
+            database: folder.join(name(&self.database)),
+            runtime: folder.join(name(&self.runtime)),
+            home: self.home.clone(),
+        }
     }
 
     pub fn in_home(home: &Path) -> Result<Paths, ServerError> {
@@ -156,18 +179,76 @@ pub struct Identity {
     /// built before the field: those builds know schema 1 only.
     #[serde(default)]
     pub schema: Option<i64>,
+    /// 128 random bits, new at each start of a server. This field and the ones below are absent in the answer of a
+    /// server built before the Unix socket.
+    #[serde(default)]
+    pub generation: Option<String>,
+    #[serde(default)]
+    pub control: Option<u32>,
+    #[serde(default)]
+    pub executable: Option<Executable>,
+    #[serde(default)]
+    pub started: Option<Started>,
+    /// The address of the command line's routes on TCP, as the runtime file names it.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
+/// The file the server runs, as it found it at its start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Executable {
+    pub path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl Executable {
+    fn of_this_process() -> Option<Executable> {
+        let path = std::env::current_exe().ok()?;
+        let meta = std::fs::metadata(&path).ok()?;
+        #[cfg(unix)]
+        let (device, inode) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(not(unix))]
+        let (device, inode) = {
+            let _ = meta;
+            (0, 0)
+        };
+        Some(Executable {
+            path,
+            device,
+            inode,
+        })
+    }
+}
+
+/// Who started the server: a command that needed it, or a person or a supervisor with `quadratique serve`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Started {
+    OnDemand,
+    Serve,
+}
+
+fn generation() -> std::io::Result<String> {
+    let mut bits = [0u8; 16];
+    getrandom::fill(&mut bits).map_err(std::io::Error::other)?;
+    Ok(bits.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The answer is complete once the TCP listener's address is known; until then the route answers `503`.
 struct Identify {
-    answer: Bytes,
+    answer: Arc<OnceLock<Bytes>>,
 }
 
 impl Handler for Identify {
     fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
-        let (status, body) = if request.method() == Method::GET {
-            (StatusCode::OK, self.answer.clone())
-        } else {
-            (StatusCode::METHOD_NOT_ALLOWED, Bytes::new())
+        let (status, body) = match (request.method() == Method::GET, self.answer.get()) {
+            (false, _) => (StatusCode::METHOD_NOT_ALLOWED, Bytes::new()),
+            (true, Some(answer)) => (StatusCode::OK, answer.clone()),
+            (true, None) => (StatusCode::SERVICE_UNAVAILABLE, Bytes::new()),
         };
         let mut response = Response::new(Full::new(body).boxed_unsync());
         *response.status_mut() = status;
@@ -182,6 +263,8 @@ impl Handler for Identify {
 pub struct Server {
     admit: Admit,
     credentials: Credentials,
+    #[cfg(unix)]
+    socket: serve::ServedSocket,
     served: serve::Served,
     watcher: Watcher,
     runtime: RuntimeFile,
@@ -211,12 +294,19 @@ impl Server {
         self.published.path()
     }
 
+    #[cfg(unix)]
+    pub fn socket_path(&self) -> &Path {
+        self.socket.path()
+    }
+
     pub async fn look_at_repositories(&self) {
         self.watcher.look().await;
     }
 
     pub async fn shutdown(self) {
         self.watcher.stop().await;
+        #[cfg(unix)]
+        self.socket.close().await;
         self.served.close().await;
     }
 }
@@ -236,6 +326,23 @@ pub async fn start(paths: &Paths, address: SocketAddr) -> Result<Server, ServerE
     .await
 }
 
+/// As `start`, saying who started the server.
+pub async fn start_by(
+    paths: &Paths,
+    address: SocketAddr,
+    started: Started,
+) -> Result<Server, ServerError> {
+    start_as(
+        paths,
+        address,
+        WebApp::from_env(),
+        watcher::EVERY,
+        Waits::default(),
+        started,
+    )
+    .await
+}
+
 pub async fn start_with(
     paths: &Paths,
     address: SocketAddr,
@@ -243,26 +350,48 @@ pub async fn start_with(
     look_every: Duration,
     waits: Waits,
 ) -> Result<Server, ServerError> {
+    start_as(paths, address, web_app, look_every, waits, Started::Serve).await
+}
+
+pub async fn start_as(
+    paths: &Paths,
+    address: SocketAddr,
+    web_app: WebApp,
+    look_every: Duration,
+    waits: Waits,
+    started: Started,
+) -> Result<Server, ServerError> {
     if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
         return Err(ServerError::NotLoopback(address));
     }
     let own_account = callers::own_account()?;
     callers::check_own_connection(&own_account)?;
+    refuse_git_work_tree(paths.folder())?;
+    let folder = home::prepare(paths.folder())?;
+    let paths = &paths.within(&folder);
     let owner: closing::HomeLock = Arc::new(own(paths, waits).await?);
+    #[cfg(unix)]
+    let (socket_listener, socket_file) = home::bind_socket(&folder)?;
     let credentials = Credentials::open(paths.credentials())?.holding(Arc::clone(&owner));
     let store = Store::open(&paths.database)?;
     store.hold_until_closed(Arc::clone(&owner));
     let database = store.path().to_path_buf();
     let app = application().map_err(ServerError::Application)?;
-    let identity = Identity {
+    let mut identity = Identity {
         pid: std::process::id(),
         database: database.clone(),
         interface: Some(interface()),
         schema: Some(crate::store::SCHEMA_VERSION),
+        generation: Some(generation()?),
+        control: Some(CONTROL),
+        executable: Executable::of_this_process(),
+        started: Some(started),
+        url: None,
     };
-    let identify = Identify {
-        answer: Bytes::from(serde_json::to_vec(&identity).map_err(std::io::Error::from)?),
-    };
+    let answer = Arc::new(OnceLock::new());
+    let identify: Arc<dyn Handler> = Arc::new(Identify {
+        answer: Arc::clone(&answer),
+    });
     let watcher = Watcher::start(store.clone(), look_every, GIT_LIMIT, watcher::READ_WAIT);
     let looks = watcher.looks();
     let origin = web::Origin::default();
@@ -285,7 +414,7 @@ pub async fn start_with(
     );
     let command_line: remote::Routes = vec![
         (BASE.into(), Arc::new(binding) as Arc<dyn Handler>),
-        (IDENTITY.into(), Arc::new(identify) as Arc<dyn Handler>),
+        (IDENTITY.into(), Arc::clone(&identify)),
     ];
     let mut routes = web::guarded(&origin, command_line, web::OriginHeader::Refused);
     routes.extend(web::guarded(
@@ -308,12 +437,26 @@ pub async fn start_with(
         url: format!("{}{BASE}", served.url()),
         database,
     };
+    identity.url = Some(runtime.url.clone());
+    let _ = answer.set(Bytes::from(
+        serde_json::to_vec(&identity).map_err(std::io::Error::from)?,
+    ));
+    #[cfg(unix)]
+    let socket = serve::serve_socket(
+        socket_listener,
+        socket_file,
+        vec![(IDENTITY.into(), identify)],
+    );
     if let Err(error) = write_runtime(&paths.runtime, &runtime) {
         watcher.stop().await;
+        #[cfg(unix)]
+        socket.close().await;
         served.close().await;
         return Err(error.into());
     }
     Ok(Server {
+        #[cfg(unix)]
+        socket,
         served,
         published: closing::Published::new(paths.runtime.clone(), &runtime),
         runtime,
@@ -378,9 +521,7 @@ mod callers {
 /// Every child process between its `fork` and its `exec` holds the lock too, because a `flock` stays taken while any
 /// copy of its descriptor is open.
 async fn own(paths: &Paths, waits: Waits) -> Result<File, ServerError> {
-    let directory = paths.database.parent().unwrap_or(Path::new("."));
-    refuse_git_work_tree(directory)?;
-    std::fs::create_dir_all(directory)?;
+    let directory = paths.folder();
     let database =
         canonical_folder(directory)?.join(paths.database.file_name().unwrap_or_default());
     let lock = OpenOptions::new()
@@ -391,10 +532,7 @@ async fn own(paths: &Paths, waits: Waits) -> Result<File, ServerError> {
     let deadline = Instant::now() + waits.start;
     loop {
         match lock.try_lock() {
-            Ok(()) => {
-                private(directory)?;
-                return Ok(lock);
-            }
+            Ok(()) => return Ok(lock),
             Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
@@ -404,18 +542,6 @@ async fn own(paths: &Paths, waits: Waits) -> Result<File, ServerError> {
         }
         tokio::time::sleep(POLL).await;
     }
-}
-
-#[cfg(unix)]
-fn private(directory: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn private(_directory: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 async fn answers_for(runtime: &Path, database: &Path, limit: Duration) -> bool {
@@ -437,6 +563,8 @@ pub enum Unanswered {
     NotPermitted(std::io::Error),
     OwnerOnly,
     NoIdentity,
+    /// The entry at the socket's name is not yet one to trust: not a socket of this account with mode 0600.
+    NotReady(String),
 }
 
 impl Unanswered {
@@ -461,11 +589,44 @@ async fn identity_within(address: SocketAddr, limit: Duration) -> Result<Identit
 }
 
 async fn ask_identity(address: SocketAddr) -> Result<Identity, Unanswered> {
-    let mut stream = TcpStream::connect(address)
+    let stream = TcpStream::connect(address)
         .await
         .map_err(Unanswered::of_connect)?;
-    let request =
-        format!("GET {IDENTITY} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+    ask_identity_on(stream, &address.to_string()).await
+}
+
+/// The answer of the server whose socket is in `folder` to `GET /server` within the probe limit, or why it gave none.
+/// The socket is trusted only as a socket of this account with mode 0600.
+#[cfg(unix)]
+pub async fn identity_over_socket(folder: &Path) -> Result<Identity, Unanswered> {
+    let socket = folder.join(home::SOCKET_FILE);
+    match home::socket_ready(&socket) {
+        Ok(()) => {}
+        Err(home::NotReady::Missing) => {
+            return Err(Unanswered::NotListening(
+                std::io::ErrorKind::NotFound.into(),
+            ));
+        }
+        Err(home::NotReady::Denied(error)) => return Err(Unanswered::NotPermitted(error)),
+        Err(home::NotReady::Untrusted(why)) => return Err(Unanswered::NotReady(why)),
+        Err(home::NotReady::Io(error)) => return Err(Unanswered::NotListening(error)),
+    }
+    let asking = async {
+        let stream = tokio::net::UnixStream::connect(&socket)
+            .await
+            .map_err(Unanswered::of_connect)?;
+        ask_identity_on(stream, SOCKET_AUTHORITY).await
+    };
+    tokio::time::timeout(PROBE_LIMIT, asking)
+        .await
+        .unwrap_or(Err(Unanswered::NoIdentity))
+}
+
+async fn ask_identity_on(
+    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    host: &str,
+) -> Result<Identity, Unanswered> {
+    let request = format!("GET {IDENTITY} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await

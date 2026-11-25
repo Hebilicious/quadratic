@@ -70,6 +70,10 @@ jobs:
           quadratique-catalog:check
           quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test quadratique-web:e2e
 
+      # The runner's sudo needs no password, and /tmp lets the account nobody reach a test home's folder.
+      - name: Another account against the server
+        run: moon run quadratique-server:test-as-nobody
+
   # The same checks on macOS and Windows, one step per area, so that each platform reports every area that fails and
   # not only the first. The server serves only on Linux until it can check who connects to its local listener
   # elsewhere (docs/decisions/0003-the-caller-check-on-macos-and-windows.md), and the installer is Linux-only until the
