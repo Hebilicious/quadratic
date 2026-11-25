@@ -17,7 +17,7 @@ embedded-web = ["quadratique-server/embedded-web"]
 acid-cat-core.workspace = true
 futures.workspace = true
 quadratique-server.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

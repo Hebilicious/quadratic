@@ -112,18 +112,33 @@ from inside the repository:
 quadratique init
 ```
 
-The binary knows every skill text that a build of Quadratique wrote, by its SHA-256. A skill file
-that holds one of them is replaced with this build's text, and the answer says `updated: it held
-an earlier Quadratique text`. A skill file that holds any other text was changed by a person: it
-is kept, and the answer says `different: yours is kept`. A repository set up by Quadratic, the
-earlier name, moves to Quadratique: the skill is written to `.agents/skills/quadratique/`, the
-files of `.agents/skills/quadratic/` that hold Quadratic's text are removed, and Quadratic's line
-in `AGENTS.md` becomes Quadratique's. The `commit` field records these changes.
+The binary knows every skill text that a build of Quadratique wrote, by the SHA-256 of its bytes.
+A skill file that holds one of them is replaced with this build's text, and the answer says
+`updated: it held an earlier Quadratique text`. A skill file that holds any other bytes was changed
+by a person: it is kept, and the answer says `different: yours is kept`. `init` replaces a file by
+writing a new file beside it and renaming it over the old one, so another hard link to the old
+file keeps its bytes. It checks the file again just before the write: a file that changed since
+`init` read it, or one that appeared where there was none, is kept with a warning.
 
-`quadratique init --dry-run` changes nothing and creates no project. Its answer has
-`"dryRun": true` and says per file what `init` would do: `would create` (the file is missing),
-`unchanged` (it holds this build's text), `would update: it holds an earlier Quadratique text`, or
-`different: yours is kept` (a person changed it).
+A repository set up by Quadratic, the earlier name, moves to Quadratique: the skill is written to
+`.agents/skills/quadratique/`, the files of `.agents/skills/quadratic/` that hold a text Quadratic
+wrote there are removed, and Quadratic's line in `AGENTS.md` becomes Quadratique's. The `commit`
+field records these changes, also on a later run, as long as git's index still holds Quadratic's
+text at the removed path (the answer then says `removed earlier: the commit records it`).
+
+In `AGENTS.md`, the Quadratique line is a line that is exactly the instruction from its first
+character, followed by nothing but spaces or tabs, outside any fenced code block. A quotation, an
+indented line and an example inside a fence are left as they are. The first standalone Quadratic
+line becomes the Quadratique line, unless that is already there; other Quadratic lines are removed.
+Every other byte of the file stays as it is, line endings and a missing final newline included. A
+file without the line gets it at its end, in the file's own line ending.
+
+`quadratique init --dry-run` writes nothing: it creates no project, starts no server and runs no
+git command that writes. It asks a server about the project only when one already runs; otherwise
+its `project` is `{"lookedUp": false, "reason": "..."}`. Its answer has `"dryRun": true` and says per
+file what `init` would do: `would create` (the file is missing), `unchanged` (it holds this build's
+text), `would update: it holds an earlier Quadratique text`, `different: yours is kept` (a person
+changed it), or `would fail: <reason>` when the file or its folder is not writable.
 
 A kept file is also a warning. The answer then starts with a `warnings` list that names each
 kept file and the command that prints this build's text of it, for example:
@@ -138,9 +153,12 @@ wrapped in JSON, so that you or an agent can compare it with the kept file and m
 no repository and no server and writes nothing, so it works in a sandbox that cannot reach the
 server. Any other name is refused with the list of names it knows.
 
-`init` removes a file of `.agents/skills/quadratic/` only when it is a regular file that holds
-exactly a text Quadratic wrote. It keeps a link, a changed file and any other file there, and keeps
-the folder when it is not empty.
+`init` removes a file of `.agents/skills/quadratic/` only when it is a regular file, reached
+through no link, that holds exactly a text Quadratic wrote there before the rename. It follows no
+link there: a link, a directory, a changed file (a copy of a later Quadratique text included) and
+any other file are kept, each with a warning, and the folder is kept when it is not empty. For a
+changed file, the warning says where the merged text goes: `.agents/skills/quadratique/`, which
+Quadratique reads.
 
 ## Who can talk to the server
 

@@ -88,6 +88,11 @@ fn every_earlier_quadratique_skill_is_reported_older_by_a_dry_run_and_replaced_b
     let home = Home::new();
     let versions = earlier_versions("quadratique");
     assert_eq!(versions.len(), 3, "{versions:?}");
+    let started = Repository::new();
+    home.quadratique(&started.root)
+        .args(["project", "list"])
+        .run()
+        .ok();
 
     for (index, (version, skill, planning)) in versions.iter().enumerate() {
         let repository = Repository::new();
@@ -411,4 +416,274 @@ fn in_quadratic_s_folder_a_link_and_a_person_s_own_file_are_never_removed() {
         "our notes\n"
     );
     assert!(!root.join(QUADRATIC_PLANNING_PATH).exists());
+}
+
+fn home_files(home: &Home) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(folder: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else {
+                files.push((path.clone(), std::fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(home.path(), &mut files);
+    files.sort();
+    files
+}
+
+#[test]
+fn a_dry_run_with_no_server_running_starts_none_and_writes_nothing_in_the_home_or_the_index() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let root = &repository.root;
+    let (_, older_skill, planning) = earlier_versions("quadratique").remove(0);
+    write(root, SKILL_PATH, &older_skill);
+    write(root, PLANNING_PATH, &planning);
+    write(root, "AGENTS.md", &format!("{LINE}\n"));
+    commit_all(root);
+    let touched = std::fs::File::options()
+        .write(true)
+        .open(root.join(PLANNING_PATH))
+        .unwrap();
+    touched
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+        .unwrap();
+    drop(touched);
+    let index = std::fs::read(root.join(".git/index")).unwrap();
+    let worktree = snapshot(root);
+    let home_before = home_files(&home);
+
+    let checked = home
+        .quadratique(root)
+        .args(["init", "--dry-run"])
+        .run()
+        .ok();
+
+    assert_eq!(
+        checked["files"][SKILL_PATH], "would update: it holds an earlier Quadratique text",
+        "{checked}"
+    );
+    assert_eq!(
+        checked["project"],
+        serde_json::json!({
+            "lookedUp": false,
+            "reason": "no Quadratique server runs, and a dry run starts none"
+        })
+    );
+    assert!(home.servers().is_empty(), "the dry run started a server");
+    assert_eq!(
+        home_files(&home),
+        home_before,
+        "the dry run wrote in the home"
+    );
+    assert_eq!(
+        std::fs::read(root.join(".git/index")).unwrap(),
+        index,
+        "the dry run rewrote the index"
+    );
+    assert_eq!(snapshot(root), worktree);
+}
+
+#[test]
+fn an_update_replaces_the_file_so_a_hard_link_outside_the_repository_keeps_its_bytes() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let root = &repository.root;
+    let (_, older_skill, planning) = earlier_versions("quadratique").remove(0);
+    write(root, SKILL_PATH, &older_skill);
+    write(root, PLANNING_PATH, &planning);
+    let elsewhere = crate::support::outside();
+    let outside = elsewhere.path().join("SKILL.md");
+    std::fs::hard_link(root.join(SKILL_PATH), &outside).unwrap();
+
+    let answer = home
+        .quadratique(root)
+        .args(["init", "--key", "HRD"])
+        .run()
+        .ok();
+
+    assert_eq!(
+        answer["files"][SKILL_PATH], "updated: it held an earlier Quadratique text",
+        "{answer}"
+    );
+    assert_eq!(read(root, SKILL_PATH), SKILL);
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), older_skill);
+}
+
+#[test]
+fn a_copy_of_the_current_skill_in_quadratic_s_folder_is_kept_not_removed() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let root = &repository.root;
+    write(root, QUADRATIC_SKILL_PATH, SKILL);
+
+    let answer = home
+        .quadratique(root)
+        .args(["init", "--key", "CUR"])
+        .run()
+        .ok();
+
+    assert_eq!(answer["files"][QUADRATIC_SKILL_PATH], KEPT, "{answer}");
+    assert_eq!(read(root, QUADRATIC_SKILL_PATH), SKILL);
+    assert!(
+        answer["warnings"][0]
+            .as_str()
+            .is_some_and(|warning| warning.contains(&format!(
+                "merge what you need of {QUADRATIC_SKILL_PATH} into {SKILL_PATH}"
+            ))),
+        "{answer}"
+    );
+}
+
+#[test]
+fn only_the_standalone_agents_line_is_updated_and_a_second_run_changes_nothing() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let root = &repository.root;
+    let text = format!(
+        "# Agents\r\n\r\n> {QUADRATIC_LINE}\r\n\r\n```\r\n{QUADRATIC_LINE}\r\n```\r\n\r\n{QUADRATIC_LINE}  \r\n{QUADRATIC_LINE}\r\nend"
+    );
+    write(root, "AGENTS.md", &text);
+
+    let first = home
+        .quadratique(root)
+        .args(["init", "--key", "AGT"])
+        .run()
+        .ok();
+    let second = home.quadratique(root).args(["init"]).run().ok();
+
+    assert_eq!(
+        first["files"]["AGENTS.md"], "updated: it held Quadratic's line",
+        "{first}"
+    );
+    assert_eq!(
+        read(root, "AGENTS.md"),
+        format!(
+            "# Agents\r\n\r\n> {QUADRATIC_LINE}\r\n\r\n```\r\n{QUADRATIC_LINE}\r\n```\r\n\r\n{LINE}\r\nend"
+        )
+    );
+    assert_eq!(second["files"]["AGENTS.md"], "unchanged", "{second}");
+}
+
+#[test]
+fn removals_of_quadratic_s_files_stay_in_the_printed_commit_after_a_second_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    let repository = Repository::new();
+    let root = &repository.root;
+    let (_, skill, planning) = earlier_versions("quadratic").remove(0);
+    write(root, QUADRATIC_SKILL_PATH, &skill);
+    write(root, QUADRATIC_PLANNING_PATH, &planning);
+    write(root, "AGENTS.md", "# Agents\n");
+    commit_all(root);
+    let agents = root.join("AGENTS.md");
+    std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let failed = home.quadratique(root).args(["init", "--key", "TWC"]).run();
+    assert_ne!(failed.code, 0, "{failed:?}");
+    assert!(!root.join(QUADRATIC_SKILL_PATH).exists());
+
+    std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let first = home.quadratique(root).args(["init"]).run().ok();
+    let second = home.quadratique(root).args(["init"]).run().ok();
+
+    for answer in [&first, &second] {
+        assert_eq!(
+            answer["files"][QUADRATIC_SKILL_PATH], "removed earlier: the commit records it",
+            "{answer}"
+        );
+    }
+    run_commit(root, &second);
+    assert_eq!(
+        git_stdout(root, &["show", "--name-status", "--format=", "HEAD"]),
+        format!(
+            "D\t{QUADRATIC_SKILL_PATH}\nD\t{QUADRATIC_PLANNING_PATH}\nA\t{SKILL_PATH}\nA\t{PLANNING_PATH}\nM\tAGENTS.md"
+        )
+    );
+    assert_eq!(git_stdout(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_directory_a_link_to_one_and_a_dangling_link_in_quadratic_s_folder_are_kept_and_warned() {
+    let home = Home::new();
+    for (index, make) in [
+        (|root: &Path| std::fs::create_dir_all(root.join(QUADRATIC_SKILL_PATH)).unwrap())
+            as fn(&Path),
+        |root| {
+            std::fs::create_dir_all(root.join("docs")).unwrap();
+            std::fs::create_dir_all(root.join(".agents/skills/quadratic")).unwrap();
+            std::os::unix::fs::symlink("../../../docs", root.join(QUADRATIC_SKILL_PATH)).unwrap();
+        },
+        |root| {
+            std::fs::create_dir_all(root.join(".agents/skills/quadratic")).unwrap();
+            std::os::unix::fs::symlink("gone.md", root.join(QUADRATIC_SKILL_PATH)).unwrap();
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let repository = Repository::new();
+        let root = &repository.root;
+        make(root);
+
+        let answer = home
+            .quadratique(root)
+            .args(["init", "--key", &format!("DIR{index}")])
+            .run()
+            .ok();
+
+        let word = answer["files"][QUADRATIC_SKILL_PATH]
+            .as_str()
+            .unwrap_or_default();
+        assert!(word.ends_with(": kept"), "{index}: {answer}");
+        assert!(
+            answer["warnings"][0].as_str().is_some_and(
+                |warning| warning.starts_with(&format!("{QUADRATIC_SKILL_PATH} was kept"))
+            ),
+            "{index}: {answer}"
+        );
+        assert!(std::fs::symlink_metadata(root.join(QUADRATIC_SKILL_PATH)).is_ok());
+    }
+}
+
+#[test]
+fn a_dry_run_reports_a_read_only_skill_and_a_skill_that_is_not_utf8_is_kept_with_a_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    let repository = Repository::new();
+    let root = &repository.root;
+    let (_, older_skill, _) = earlier_versions("quadratique").remove(0);
+    write(root, SKILL_PATH, &older_skill);
+    std::fs::write(root.join(PLANNING_PATH), b"# planning \xff\n").unwrap();
+    std::fs::set_permissions(
+        root.join(SKILL_PATH),
+        std::fs::Permissions::from_mode(0o444),
+    )
+    .unwrap();
+
+    let checked = home
+        .quadratique(root)
+        .args(["init", "--key", "ROF", "--dry-run"])
+        .run()
+        .ok();
+    let failed = home.quadratique(root).args(["init", "--key", "ROF"]).run();
+
+    let skill_word = checked["files"][SKILL_PATH].as_str().unwrap_or_default();
+    assert!(
+        skill_word.starts_with("would fail: ") && skill_word.ends_with("is not writable"),
+        "{checked}"
+    );
+    assert_eq!(checked["files"][PLANNING_PATH], KEPT, "{checked}");
+    let warnings = checked["warnings"].to_string();
+    assert!(
+        warnings.contains(&format!("{SKILL_PATH} cannot be written"))
+            && warnings.contains(&format!("{PLANNING_PATH} was kept")),
+        "{checked}"
+    );
+    assert_ne!(failed.code, 0, "{failed:?}");
+    assert_eq!(read(root, SKILL_PATH), older_skill);
 }
