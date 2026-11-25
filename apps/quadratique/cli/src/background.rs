@@ -969,6 +969,7 @@ async fn await_start_lock(
     }
 }
 
+#[derive(Debug)]
 pub enum Stopped {
     NotRunning,
     Ended {
@@ -1473,5 +1474,60 @@ mod tests {
         ] {
             assert!(super::runtime_of(&identity(refused)).is_none(), "{refused}");
         }
+    }
+
+    /// One deadline per operation: once it has passed, nothing new begins. A free home is not started in.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_whose_deadline_has_passed_reserves_and_spawns_nothing() {
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+
+        let started = tokio::time::timeout(HANG_GUARD, ensure_within(&home, Duration::ZERO)).await;
+
+        assert!(
+            matches!(
+                started,
+                Ok(Err(LifeError::NoAnswer { .. } | LifeError::Hung { .. }))
+            ),
+            "the start went on past its deadline: {started:?}"
+        );
+        assert!(!home.start_lock().exists(), "a start was reserved");
+        assert!(!home.log().exists(), "a server was spawned");
+    }
+
+    /// A probe gets what is left of the operation's deadline, not a probe limit of its own: a stop of a stalled socket
+    /// with 200 ms left ends at its deadline, not five seconds later as "stalled".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_probe_is_cut_to_what_is_left_of_the_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::stop_within;
+
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+        let holder = home
+            .open_lock(&home.prepared.lock())
+            .expect("the home's lock");
+        holder.lock().expect("a server holds the home");
+        let socket = home.prepared.socket();
+        let _never_answers = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+            .expect("mode 0600");
+        let limit = Duration::from_millis(200);
+
+        let started = std::time::Instant::now();
+        let stopped = tokio::time::timeout(HANG_GUARD, stop_within(&home, limit)).await;
+
+        assert!(
+            matches!(stopped, Ok(Err(LifeError::Hung { .. }))),
+            "the stop did not end at its deadline: {stopped:?}"
+        );
+        assert!(
+            started.elapsed() < quadratique_server::server::PROBE_LIMIT,
+            "the probe outlived the deadline: {:?}",
+            started.elapsed()
+        );
     }
 }
