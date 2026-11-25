@@ -74,7 +74,16 @@ pub async fn serve_with(
     admit: Admit,
     refusals: Refusals,
 ) -> std::io::Result<Served> {
-    let listener = TcpListener::bind(address).await?;
+    serve_on(TcpListener::bind(address).await?, routes, admit, refusals)
+}
+
+/// Serves on a listener bound beforehand: connections wait in its backlog until this starts accepting them.
+pub fn serve_on(
+    listener: TcpListener,
+    routes: Routes,
+    admit: Admit,
+    refusals: Refusals,
+) -> std::io::Result<Served> {
     let address = listener.local_addr()?;
     let mut routes = routes;
     routes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));

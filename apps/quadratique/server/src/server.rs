@@ -13,7 +13,7 @@ use http::{Method, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::app::{Context, application, caller_of, interface};
 use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
@@ -295,30 +295,46 @@ pub async fn start_with(
         web::OriginHeader::OwnOnly,
     ));
     let admit = callers::owner_only(own_account);
-    let served = match serve_on_previous_port(paths, address, routes, Arc::clone(&admit)).await {
+    let listener = match listen(paths, address).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            watcher.stop().await;
+            return Err(error.into());
+        }
+    };
+    let address = match listener.local_addr() {
+        Ok(address) => address,
+        Err(error) => {
+            watcher.stop().await;
+            return Err(error.into());
+        }
+    };
+    origin.set(address);
+    let runtime = RuntimeFile {
+        pid: std::process::id(),
+        address,
+        url: format!("http://{address}{BASE}"),
+        database,
+    };
+    // The runtime file names the address before the server there answers: a command that reads an older file, which
+    // may name the same port, never finds this server while the file still names another.
+    let written = write_port(&paths.port(), address.port())
+        .and_then(|()| write_runtime(&paths.runtime, &runtime));
+    if let Err(error) = written {
+        watcher.stop().await;
+        return Err(error.into());
+    }
+    let published = closing::Published::new(paths.runtime.clone(), &runtime);
+    let served = match serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS) {
         Ok(served) => served,
         Err(error) => {
             watcher.stop().await;
             return Err(error.into());
         }
     };
-    origin.set(served.address);
-    let runtime = RuntimeFile {
-        pid: std::process::id(),
-        address: served.address,
-        url: format!("{}{BASE}", served.url()),
-        database,
-    };
-    let written = write_port(&paths.port(), served.address.port())
-        .and_then(|()| write_runtime(&paths.runtime, &runtime));
-    if let Err(error) = written {
-        watcher.stop().await;
-        served.close().await;
-        return Err(error.into());
-    }
     Ok(Server {
         served,
-        published: closing::Published::new(paths.runtime.clone(), &runtime),
+        published,
         runtime,
         watcher,
         _home: owner,
@@ -491,23 +507,17 @@ async fn ask_identity(address: SocketAddr) -> Result<Identity, Unanswered> {
 
 /// A server asked for any port listens on the port this home's server had last, when it is free, so that the web app
 /// keeps its address across restarts; otherwise on the port the system chooses.
-async fn serve_on_previous_port(
-    paths: &Paths,
-    address: SocketAddr,
-    routes: remote::Routes,
-    admit: Admit,
-) -> std::io::Result<serve::Served> {
+async fn listen(paths: &Paths, address: SocketAddr) -> std::io::Result<TcpListener> {
     let previous = std::fs::read_to_string(paths.port())
         .ok()
         .and_then(|text| text.trim().parse::<u16>().ok())
         .filter(|port| *port != 0);
-    if let (0, Some(port)) = (address.port(), previous) {
-        let again = SocketAddr::new(address.ip(), port);
-        if let Ok(served) = serve::serve(again, routes.clone(), Arc::clone(&admit)).await {
-            return Ok(served);
-        }
+    if let (0, Some(port)) = (address.port(), previous)
+        && let Ok(listener) = TcpListener::bind(SocketAddr::new(address.ip(), port)).await
+    {
+        return Ok(listener);
     }
-    serve::serve(address, routes, admit).await
+    TcpListener::bind(address).await
 }
 
 fn write_port(path: &Path, port: u16) -> std::io::Result<()> {
