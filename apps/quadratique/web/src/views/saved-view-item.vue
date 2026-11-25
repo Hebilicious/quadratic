@@ -1,7 +1,7 @@
 <script setup lang="ts" vapor>
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watchEffect } from "vue";
 
-import { nameProblem, refusedWrite, type SavedView } from "../board/saved-views.machine.ts";
+import { nameProblem, writeState, type SavedView } from "../board/saved-views.machine.ts";
 import { useSnapshot } from "../use-actor.ts";
 import { useWorkspace } from "../workspace.ts";
 
@@ -50,10 +50,21 @@ function rename(event: Event): void {
   }
   const form = renameForm.value;
   savedViews.send({ type: "rename", form, id: props.view.id, name: editing.value.name });
-  if (!refusedWrite(savedViews.getSnapshot(), form)) {
+  renamed.value = true;
+}
+
+const renameState = computed(() => writeState(savedSnapshot.value, renameForm.value));
+const removeState = computed(() => writeState(savedSnapshot.value, removeForm.value));
+const renamed = ref(false);
+watchEffect(() => {
+  if (!renamed.value || renameState.value === "pending") {
+    return;
+  }
+  renamed.value = false;
+  if (renameState.value === "idle") {
     void close();
   }
-}
+});
 
 async function close(): Promise<void> {
   forget();
@@ -76,8 +87,8 @@ function remove(): void {
 const notSaved = computed(() => {
   const current = editing.value;
   return (
-    (current.kind === "renaming" && refusedWrite(savedSnapshot.value, renameForm.value)) ||
-    (current.kind === "deleting" && refusedWrite(savedSnapshot.value, removeForm.value))
+    (current.kind === "renaming" && renameState.value === "refused") ||
+    (current.kind === "deleting" && removeState.value === "refused")
   );
 });
 
@@ -135,10 +146,14 @@ function cancel(event: KeyboardEvent): void {
       </label>
       <p v-if="problem !== undefined" class="field-error" role="alert">{{ problem }}</p>
       <p v-else-if="notSaved" class="field-error" role="alert">
-        The view could not be renamed: this browser does not keep site data here.
+        The view could not be renamed: the server did not keep the new name. Try again.
       </p>
       <div class="saved-view-actions">
-        <button class="primary-button" type="submit" :disabled="problem !== undefined">Rename</button>
+        <button
+          class="primary-button"
+          type="submit"
+          :disabled="problem !== undefined || renameState === 'pending'"
+        >Rename</button>
         <button class="ghost-button danger" type="button" @click="confirmDelete">Delete…</button>
         <button class="ghost-button" type="button" @click="close">Cancel</button>
       </div>
@@ -146,10 +161,15 @@ function cancel(event: KeyboardEvent): void {
     <div v-else class="saved-view-form" role="group" :aria-label="`Delete the view ${view.name}`">
       <p class="nav-note">Delete the view {{ view.name }}? Its issues stay as they are.</p>
       <p v-if="notSaved" class="field-error" role="alert">
-        The view could not be deleted: this browser does not keep site data here.
+        The view could not be deleted: the server did not answer. Try again.
       </p>
       <div class="saved-view-actions">
-        <button class="primary-button" type="button" @click="remove">Delete</button>
+        <button
+          class="primary-button"
+          type="button"
+          :disabled="removeState === 'pending'"
+          @click="remove"
+        >Delete</button>
         <button :id="`keep-${view.id}`" class="ghost-button" type="button" @click="close">Keep it</button>
       </div>
     </div>

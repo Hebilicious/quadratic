@@ -205,6 +205,18 @@ const TEST_COLUMN: super::migrate::Migration = super::migrate::Migration {
     sql: "ALTER TABLE issues ADD COLUMN mood TEXT",
 };
 
+/// The migrations of a binary one schema newer than this one.
+fn newer_migrations() -> Vec<super::migrate::Migration> {
+    let mut migrations = super::migrate::MIGRATIONS.to_vec();
+    migrations.push(TEST_COLUMN);
+    migrations
+}
+
+/// The migrations of the binary before saved views.
+fn previous_migrations() -> &'static [super::migrate::Migration] {
+    &super::migrate::MIGRATIONS[..super::migrate::MIGRATIONS.len() - 1]
+}
+
 async fn issue(store: &Store, title: &str) {
     let author = Author::new(r#"{"kind":"human","name":"sam"}"#).expect("an author");
     let title = title.to_owned();
@@ -261,7 +273,8 @@ async fn a_store_made_before_schema_versions_is_adopted_as_version_1_by_a_store_
     raw(&store, "DROP TABLE git_upstream; PRAGMA user_version = 0").await;
     drop(store);
 
-    let store = Store::open(&path).expect("the store made before versions opens");
+    let store = Store::open_with(&path, &super::migrate::MIGRATIONS[..1])
+        .expect("the store made before versions opens");
 
     let (version, committer, message) = version_and_head(&store).await;
     assert_eq!(version, 1);
@@ -329,8 +342,7 @@ async fn a_store_at_the_current_version_opens_without_writing() {
 async fn a_store_newer_than_the_binary_is_refused_and_left_as_it_was() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let path = directory.path().join("workspace.db");
-    let store = Store::open_with(&path, &[super::migrate::MIGRATIONS[0], TEST_COLUMN])
-        .expect("a store of a newer binary");
+    let store = Store::open_with(&path, &newer_migrations()).expect("a store of a newer binary");
     let before = commits_and_changes(&store).await;
     drop(store);
 
@@ -340,8 +352,8 @@ async fn a_store_newer_than_the_binary_is_refused_and_left_as_it_was() {
         matches!(
             &refused,
             Some(StoreError::NewerStore {
-                found: 2,
-                known: 1,
+                found: 3,
+                known: 2,
                 ..
             })
         ),
@@ -365,8 +377,7 @@ async fn an_issue_and_its_history_read_as_of_a_commit_before_a_new_column() {
         .commit
         .clone();
     drop(store);
-    let store = Store::open_with(&path, &[super::migrate::MIGRATIONS[0], TEST_COLUMN])
-        .expect("the store migrates");
+    let store = Store::open_with(&path, &newer_migrations()).expect("the store migrates");
     raw(
         &store,
         "UPDATE issues SET mood = 'calm', title = 'After the column'",
@@ -479,17 +490,24 @@ async fn a_migration_commit_comes_after_its_parent_even_when_the_clock_is_behind
 
     let store = Store::open(&path).expect("the store migrates");
 
+    let migrations = super::migrate::MIGRATIONS.len();
     let times = store
-        .read(AsOf::Now, |view| {
-            view.rows("SELECT at FROM commit_index ORDER BY seq DESC LIMIT 2", &[])
+        .read(AsOf::Now, move |view| {
+            view.rows(
+                &format!(
+                    "SELECT at FROM commit_index ORDER BY seq DESC LIMIT {}",
+                    migrations + 1
+                ),
+                &[],
+            )
         })
         .await
-        .expect("the newest two commits")
+        .expect("the migration commits and the commit before them")
         .iter()
         .map(|row| super::engine::Cells(row).text(0))
         .collect::<Vec<_>>();
-    assert_eq!(times[1], future);
-    assert!(times[0] > times[1], "{times:?}");
+    assert_eq!(times.last().map(String::as_str), Some(future));
+    assert!(times.windows(2).all(|pair| pair[0] > pair[1]), "{times:?}");
 }
 
 const KILLED_WRITER: &str = "QUADRATIQUE_TEST_KILLED_WRITER";
@@ -620,13 +638,129 @@ async fn a_store_is_read_without_writing_and_a_newer_schema_lists_no_repository(
     drop(store);
 
     let newer = directory.path().join("newer.db");
-    drop(
-        Store::open_with(&newer, &[super::migrate::MIGRATIONS[0], TEST_COLUMN])
-            .expect("a store of a newer binary"),
-    );
+    drop(Store::open_with(&newer, &newer_migrations()).expect("a store of a newer binary"));
     let recorded = super::read_recorded(&newer)
         .expect("the store reads")
         .expect("a store");
     assert_eq!(recorded.schema, super::SCHEMA_VERSION + 1);
     assert!(recorded.repositories.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_of_the_previous_schema_takes_saved_views_in_one_store_commit_and_keeps_its_issues()
+{
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("workspace.db");
+    let store = Store::open_with(&path, previous_migrations()).expect("a store before saved views");
+    create(&store, "DEM").await.expect("the project");
+    issue(&store, "Before saved views").await;
+    assert_eq!(version_and_head(&store).await.0, super::SCHEMA_VERSION - 1);
+    drop(store);
+
+    let store = Store::open(&path).expect("the store migrates");
+
+    let (version, committer, message) = version_and_head(&store).await;
+    assert_eq!(version, super::SCHEMA_VERSION);
+    assert!(committer.starts_with("quadratique"), "{committer}");
+    assert!(
+        message.starts_with("store.migrate\n")
+            && message.contains(&format!(
+                "schema version {}: saved views",
+                super::SCHEMA_VERSION
+            )),
+        "{message}"
+    );
+    let (views, title) = store
+        .read(AsOf::Now, |view| {
+            let issue = view.issue("DEM-1")?.expect("the issue");
+            Ok::<_, StoreError>((view.saved_views()?, issue.title))
+        })
+        .await
+        .expect("the views and the issue");
+    assert_eq!(views, []);
+    assert_eq!(title, "Before saved views");
+
+    let author = Author::new(r#"{"kind":"human","name":"sam"}"#).expect("an author");
+    let written = store
+        .write(Call::new(author, "view.save"), |tx| {
+            let id = tx.new_saved_view_id()?;
+            tx.replace_saved_views(&[super::SavedViewRecord {
+                id,
+                name: "Ready".into(),
+                project: Some("DEM".into()),
+                filter: "ready=true".into(),
+            }])
+        })
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    let history = store
+        .read(AsOf::Now, |view| view.history(&Subject::Board, None, 10))
+        .await
+        .expect("the history");
+    assert!(
+        history
+            .items
+            .iter()
+            .all(|change| change.operation != "view.save"),
+        "a saved view is no change of the board: {history:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_with_saved_views_is_refused_by_the_build_before_them_and_left_as_it_was() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("workspace.db");
+    let store = Store::open(&path).expect("the store opens");
+    create(&store, "DEM").await.expect("the project");
+    let before = commits_and_changes(&store).await;
+    drop(store);
+
+    let refused = Store::open_with(&path, previous_migrations()).err();
+
+    assert!(
+        matches!(
+            &refused,
+            Some(StoreError::NewerStore { found, known, .. })
+                if *found == super::SCHEMA_VERSION && *known == super::SCHEMA_VERSION - 1
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(commits_and_changes_in(&path), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_view_ids_are_never_given_twice() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let store = Store::open(directory.path().join("workspace.db")).expect("the store opens");
+    let author = Author::new(r#"{"kind":"human","name":"sam"}"#).expect("an author");
+    let view = |id: String, name: &str| super::SavedViewRecord {
+        id,
+        name: name.into(),
+        project: None,
+        filter: String::new(),
+    };
+    store
+        .write(Call::new(author.clone(), "view.save"), move |tx| {
+            let first = tx.new_saved_view_id()?;
+            let second = tx.new_saved_view_id()?;
+            tx.replace_saved_views(&[view(second, "B"), view(first, "A")])
+        })
+        .await
+        .expect("two views");
+    store
+        .write(Call::new(author, "view.delete"), move |tx| {
+            tx.replace_saved_views(&[])?;
+            let third = tx.new_saved_view_id()?;
+            tx.replace_saved_views(&[view(third, "C")])
+        })
+        .await
+        .expect("the views replaced");
+    let ids: Vec<(String, String)> = store
+        .read(AsOf::Now, |view| view.saved_views())
+        .await
+        .expect("the views")
+        .into_iter()
+        .map(|view| (view.id, view.name))
+        .collect();
+    assert_eq!(ids, [("v3".to_owned(), "C".to_owned())]);
 }

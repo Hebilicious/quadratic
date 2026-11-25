@@ -11,6 +11,7 @@ import {
   IssueSummaryAnswerSchema,
   HistoryPageSchema,
   ProjectListSchema,
+  SavedViewsSchema,
   type Assignee,
   type HistoryPage,
   type Issue,
@@ -20,6 +21,7 @@ import {
   type Relation,
   type RelationKind,
 } from "../board/model.ts";
+import type { SavedViewPorts, Views } from "../board/saved-views.machine.ts";
 import { app, sharedCatalog } from "./catalog.ts";
 import { serverLayer } from "./server.ts";
 
@@ -95,6 +97,7 @@ export interface Quadratique {
     cursor: string | undefined,
     signal: AbortSignal,
   ) => Promise<AsyncIterable<Change>>;
+  readonly views: Omit<SavedViewPorts, "legacy">;
   readonly dispose: () => Promise<void>;
 }
 
@@ -126,16 +129,17 @@ const decodeIssue = Schema.decodeUnknownSync(IssueAnswerSchema);
 const decodeSummary = Schema.decodeUnknownSync(IssueSummaryAnswerSchema);
 const decodeRelations = Schema.decodeUnknownSync(IssueRelationsSchema);
 const decodeHistory = Schema.decodeUnknownSync(HistoryPageSchema);
+const decodeViews = Schema.decodeUnknownSync(SavedViewsSchema);
 
 export async function openQuadratique(options: {
   readonly origin: string;
   readonly modelContext: WebMcp.ModelContext | undefined;
   readonly writable: () => boolean;
 }): Promise<Quadratique> {
-  let confirmOpening: (() => void) | undefined;
+  const openings = new Map<string, () => void>();
   const layer = serverLayer(options.origin, (target, event) => {
-    if (target === "web" && event === "issue.changed") {
-      confirmOpening?.();
+    if (target === "web") {
+      openings.get(event)?.();
     }
   });
   const page = await Handles.open(app, layer, { target: "web" });
@@ -180,17 +184,23 @@ export async function openQuadratique(options: {
     return all;
   };
 
-  const changes = async (cursor: string | undefined, signal: AbortSignal) => {
-    const event = page.events.get("issue.changed");
+  /** The occurrences of a web event, once the server has registered the subscription. */
+  const subscribed = async (
+    id: string,
+    signal: AbortSignal,
+    cursor: string | undefined,
+  ): Promise<AsyncIterable<Occurrence<unknown>>> => {
+    const event = page.events.get(id);
     if (event === undefined) {
-      throw new Error("The web target has no event issue.changed");
+      throw new Error(`The web target has no event ${id}`);
     }
+    let confirm = (): void => {};
     const confirmed = new Promise<"opened">((resolve) => {
-      confirmOpening = () => {
+      confirm = () => {
         resolve("opened");
       };
     });
-    const confirm = confirmOpening;
+    openings.set(id, confirm);
     let iterator: AsyncIterator<Occurrence<unknown>>;
     let first: Promise<IteratorResult<Occurrence<unknown>>>;
     try {
@@ -202,13 +212,21 @@ export async function openQuadratique(options: {
       first = iterator.next();
       await Promise.race([confirmed, first]);
     } finally {
-      if (confirmOpening === confirm) {
-        confirmOpening = undefined;
+      if (openings.get(id) === confirm) {
+        openings.delete(id);
       }
     }
     return (async function* () {
       for (let next = await first; next.done !== true; next = await iterator.next()) {
-        const occurrence = next.value;
+        yield next.value;
+      }
+    })();
+  };
+
+  const changes = async (cursor: string | undefined, signal: AbortSignal) => {
+    const occurrences = await subscribed("issue.changed", signal, cursor);
+    return (async function* () {
+      for await (const occurrence of occurrences) {
         yield {
           cursor: occurrence.cursor,
           truncated: occurrence.truncated === true,
@@ -217,6 +235,35 @@ export async function openQuadratique(options: {
         };
       }
     })();
+  };
+
+  const viewChanges = async (signal: AbortSignal) => {
+    const occurrences = await subscribed("view.changed", signal, undefined);
+    return (async function* () {
+      for await (const occurrence of occurrences) {
+        // BOUNDARY: the payload of the server, already checked by the core against the catalog.
+        yield decodeViews(occurrence.data).items;
+      }
+    })();
+  };
+
+  /** Saved views belong to the human, not to a moment: they are written while the page shows the past too. */
+  const viewCall = async (id: string, input: object, signal?: AbortSignal): Promise<Views> => {
+    const result = await handle(id).invokeExternal(input, signal === undefined ? {} : { signal });
+    if (!result.ok) {
+      throw new Refused(id, result.error);
+    }
+    // BOUNDARY: the answer of the server, already checked by the core against the catalog.
+    return decodeViews(result.value).items;
+  };
+
+  const views: Quadratique["views"] = {
+    list: async (signal) => await viewCall("view.list", {}, signal),
+    save: async (view) => await viewCall("view.save", view),
+    rename: async (id, name) => await viewCall("view.rename", { view: id, name }),
+    remove: async (id) => await viewCall("view.delete", { view: id }),
+    import: async (imported) => await viewCall("views.import", { views: imported }),
+    changes: viewChanges,
   };
 
   return {
@@ -254,6 +301,7 @@ export async function openQuadratique(options: {
       decodeSummary(await call("issue.release", { issue }, signal)).issue,
     close: async (request, signal) => decodeIssue(await call("issue.close", request, signal)).issue,
     changes,
+    views,
     dispose: async () => {
       await Promise.all([page.dispose(), agents?.dispose()]);
     },

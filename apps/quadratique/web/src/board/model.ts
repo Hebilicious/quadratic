@@ -187,6 +187,17 @@ export type Project = typeof ProjectSchema.Type;
 
 export const ProjectListSchema = Schema.Struct({ items: Schema.Array(ProjectSchema) });
 
+export const SavedViewsSchema = Schema.Struct({
+  items: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      name: Schema.String,
+      project: Schema.optionalKey(Schema.String),
+      filter: Schema.String,
+    }),
+  ),
+});
+
 export const IssueChangedSchema = Schema.Struct({
   commit: Schema.String,
   at: Schema.String,
@@ -212,7 +223,7 @@ export const FailureSchema = Schema.Union([
   Schema.Struct({ _tag: Schema.Literal("HumanOnly") }),
   Schema.Struct({
     _tag: Schema.Literal("NotFound"),
-    kind: Schema.Literals(["issue", "project"]),
+    kind: Schema.Literals(["issue", "project", "view"]),
     id: Schema.String,
   }),
   Schema.Struct({

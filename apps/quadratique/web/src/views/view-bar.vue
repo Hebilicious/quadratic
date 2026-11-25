@@ -1,11 +1,11 @@
 <script setup lang="ts" vapor>
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watchEffect } from "vue";
 
 import type { Category, WorkflowStatus } from "../board/model.ts";
 import {
   nameProblem,
-  refusedWrite,
   savedViewOf,
+  writeState,
   type SavedView,
 } from "../board/saved-views.machine.ts";
 import {
@@ -152,9 +152,18 @@ const replacing = computed(() => {
     : undefined;
 });
 
-const notSaved = computed(
-  () => saving.value.kind === "naming" && refusedWrite(savedSnapshot.value, SAVE_FORM),
-);
+const saveState = computed(() => writeState(savedSnapshot.value, SAVE_FORM));
+const notSaved = computed(() => saving.value.kind === "naming" && saveState.value === "refused");
+const submitted = ref(false);
+watchEffect(() => {
+  if (!submitted.value || saveState.value === "pending") {
+    return;
+  }
+  submitted.value = false;
+  if (saveState.value === "idle") {
+    void closeSaving();
+  }
+});
 
 async function startSaving(): Promise<void> {
   saving.value = {
@@ -177,9 +186,7 @@ function save(event: Event): void {
     scope: props.route.scope,
     filter: filter.value,
   });
-  if (!refusedWrite(savedViews.getSnapshot(), SAVE_FORM)) {
-    void closeSaving();
-  }
+  submitted.value = true;
 }
 
 async function closeSaving(): Promise<void> {
@@ -344,9 +351,13 @@ function cancelSaving(event: KeyboardEvent): void {
         />
       </label>
       <p v-if="notSaved" class="field-error" role="alert">
-        The view could not be saved: this browser does not keep site data here.
+        The view could not be saved: the server did not keep it. Try again.
       </p>
-      <button class="primary-button" type="submit" :disabled="saveProblem !== undefined">
+      <button
+        class="primary-button"
+        type="submit"
+        :disabled="saveProblem !== undefined || saveState === 'pending'"
+      >
         {{ replacing === undefined ? "Save" : `Replace ${replacing.name}` }}
       </button>
       <button class="ghost-button" type="button" @click="closeSaving">Cancel</button>

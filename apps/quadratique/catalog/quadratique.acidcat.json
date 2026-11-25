@@ -893,7 +893,8 @@
         "kind": {
           "enum": [
             "issue",
-            "project"
+            "project",
+            "view"
           ],
           "type": "string"
         }
@@ -1057,6 +1058,63 @@
       "maxLength": 32,
       "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
       "type": "string"
+    },
+    "SavedView": {
+      "description": "A named filter of the web app. It belongs to the data folder, and so to the human.",
+      "properties": {
+        "filter": {
+          "$ref": "#/$defs/SavedViewFilter"
+        },
+        "id": {
+          "$ref": "#/$defs/SavedViewId"
+        },
+        "name": {
+          "$ref": "#/$defs/SavedViewName"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectKey",
+          "description": "The project whose issues the view shows. Absent: every project."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "filter"
+      ],
+      "type": "object"
+    },
+    "SavedViewFilter": {
+      "description": "The filters of a saved view, as the query of the web app's address that shows them, such as `label=web&ready=true`. Empty for no filter. The server keeps it as it is given.",
+      "maxLength": 2000,
+      "type": "string"
+    },
+    "SavedViewId": {
+      "description": "A saved view, such as `v3`. The server gives the id; it never changes and no other view of the data folder ever has it.",
+      "maxLength": 20,
+      "pattern": "^v[1-9][0-9]{0,8}$",
+      "type": "string"
+    },
+    "SavedViewName": {
+      "description": "The name of a saved view. The server keeps it without its leading and trailing spaces. Two views never have names that are the same once trimmed and lowercased.",
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "SavedViews": {
+      "description": "Every saved view, in the order the web app shows them, under `items`.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SavedView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
     },
     "Source": {
       "additionalProperties": false,
@@ -2943,6 +3001,156 @@
         "type": "object"
       }
     },
+    "view.delete": {
+      "description": "Delete a saved view. A view that no longer exists is no failure. Answers every saved view. One database commit by the caller when something changed.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "view": {
+            "$ref": "#/$defs/SavedViewId"
+          }
+        },
+        "required": [
+          "view"
+        ],
+        "title": "ViewDeleteInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      }
+    },
+    "view.list": {
+      "description": "List the saved views of the web app, in their order. Changes nothing.",
+      "audience": [
+        "web"
+      ],
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      },
+      "readOnly": true
+    },
+    "view.rename": {
+      "description": "Rename a saved view. `NotFound` when no view has the id, for example after another page deleted it; `NameTaken` when another view has the name (trimmed, in any case). Answers every saved view. One database commit by the caller when something changed.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/SavedViewName"
+          },
+          "view": {
+            "$ref": "#/$defs/SavedViewId"
+          }
+        },
+        "required": [
+          "view",
+          "name"
+        ],
+        "title": "ViewRenameInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      },
+      "failures": {
+        "NameTaken": {
+          "properties": {
+            "_tag": {
+              "const": "NameTaken",
+              "type": "string"
+            },
+            "view": {
+              "$ref": "#/$defs/SavedViewId"
+            }
+          },
+          "required": [
+            "_tag",
+            "view"
+          ],
+          "type": "object"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        }
+      }
+    },
+    "view.save": {
+      "description": "Save the filters of a page of the web app under a name. When a view has that name (trimmed, in any case), its project and filters are replaced and it keeps its id, name and place; otherwise the new view comes last. Answers every saved view. One database commit by the caller when something changed, and no change to any issue or project.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "filter": {
+            "$ref": "#/$defs/SavedViewFilter"
+          },
+          "name": {
+            "$ref": "#/$defs/SavedViewName"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey"
+          }
+        },
+        "required": [
+          "name",
+          "filter"
+        ],
+        "title": "ViewSaveInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      }
+    },
+    "views.import": {
+      "description": "Add the views that a browser kept before the server kept them, in their order, after the saved views, in one database commit. A view whose name, project and filters are those of a saved view is already there and is skipped, so a repeated import adds nothing. A view whose name only is taken comes in as `<name> (imported)`, or `<name> (imported 2)` and so on, so that no view is lost. Answers every saved view.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "views": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "filter": {
+                  "$ref": "#/$defs/SavedViewFilter"
+                },
+                "name": {
+                  "$ref": "#/$defs/SavedViewName"
+                },
+                "project": {
+                  "$ref": "#/$defs/ProjectKey"
+                }
+              },
+              "required": [
+                "name",
+                "filter"
+              ],
+              "type": "object"
+            },
+            "maxItems": 500,
+            "type": "array"
+          }
+        },
+        "required": [
+          "views"
+        ],
+        "title": "ViewsImportInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      }
+    },
     "workspace.instructions": {
       "description": "Give the command reference for agents, and who and where the caller is: its actor, project, branch and worktree. Changes nothing.",
       "audience": [
@@ -3054,6 +3262,52 @@
           "projects"
         ],
         "title": "IssueChangedPayload",
+        "type": "object"
+      }
+    },
+    "view.changed": {
+      "description": "A database commit changed the saved views: the occurrence gives the commit, its author and operation, and every saved view after it. A page that subscribes, or subscribes again after the stream ended, reads `view.list` once it is open: this event replays nothing.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "ViewChangedInput",
+        "type": "object"
+      },
+      "payload": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "author": {
+            "$ref": "#/$defs/Actor"
+          },
+          "commit": {
+            "$ref": "#/$defs/CommitHash"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/SavedView"
+            },
+            "type": "array"
+          },
+          "operation": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit",
+          "at",
+          "author",
+          "operation",
+          "items"
+        ],
+        "title": "ViewChangedPayload",
         "type": "object"
       }
     }
