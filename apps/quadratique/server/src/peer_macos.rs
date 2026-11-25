@@ -218,9 +218,9 @@ pub fn tcp_sockets_of(pid: u32) -> Vec<TcpSocket> {
 
 const MOST_DESCRIPTORS: usize = 1 << 20;
 
-/// Every descriptor of `pid`. The kernel lists them in order and stops when the buffer is full, so a process that
-/// opens descriptors after `pbi_nfiles` was read would push its highest ones, the caller's socket among them, out of
-/// a buffer of exactly that size. A full answer is asked again with twice the room.
+/// Every descriptor of `pid`. `pbi_nfiles` is the size of the process's descriptor table, but the table can grow
+/// between that read and the listing, and the kernel stops when the buffer is full: a full answer is asked again
+/// with twice the room, so no descriptor is left out.
 fn descriptors_of(pid: i32, files: usize) -> Option<Vec<ProcFDInfo>> {
     let mut room = files.saturating_mul(2).max(64);
     while room <= MOST_DESCRIPTORS {

@@ -70,7 +70,9 @@ so the lookup reads IPv4 data only.
   - Cost: one scan of the owner's processes and their descriptors for each new connection. A
     few hundred processes take some milliseconds. HTTP keep-alive spreads the cost, and the
     command line opens one connection per command. QUA-33 measures it.
-  - Safe interface: the `libproc` crate wraps these calls.
+  - Safe interface: the `libproc` crate wraps these calls. Its own socket structure gives the
+    TCP fields only through unions, which need `unsafe` to read; QUA-33 reads them from plain
+    bytes instead (see "macOS, as built" below).
   - Gap: a process of the owner may hand its socket to a process of another account (through
     `SCM_RIGHTS`). The owner chose to do that. Linux has the same gap, because the socket's uid
     stays the creator's.
@@ -208,6 +210,89 @@ and no secret can leak. B adds a transport and still needs A or C for the browse
 the proof from the kernel to file permissions and adds a session to the web app, a bootstrap
 page and an origin-guard change. Each of those is new security code.
 
+## macOS, as built (QUA-33)
+
+Added 2026-11-25. The code is `server/src/peer_macos.rs` (the calls) and
+`server/src/socket_fdinfo.rs` (the bytes and the matching rule, tested on every platform).
+
+- **Tests per platform** (server and command line, passed): macOS 184 before (no test started a
+  server), 463 after; Linux 461 before, 467 after; Windows 180 before, 186 after. The new tests on
+  every platform are the 6 tests of `socket_fdinfo.rs`. "Web journeys" is required on macOS.
+- **Calls.** `libproc` 0.15.0: `pids_by_type(ProcFilter::ByUID)` (`proc_listpids` with
+  `PROC_UID_ONLY` and the server's effective uid, which is the uid the kernel's same-user rule
+  compares), `pidinfo::<BSDInfo>` and `listpidinfo::<ListFDs>` (`PROC_PIDLISTFDS`), and
+  `pidfdinfo` (`PROC_PIDFDSOCKETINFO`) for each socket descriptor. After the scan, the server
+  reads the uid (`pbi_uid`) of each process that holds the socket again. It admits the
+  connection when one of them still runs as the owner. A process id that another account
+  reused between the scan and that read names that account, and the connection is refused.
+- **No `unsafe` in the workspace.** `pidfdinfo` takes any type that implements the safe trait
+  `PIDFDInfo`. The server gives it a `[u8; 792]` buffer (`sizeof(struct socket_fdinfo)`) and
+  reads the fields it needs from fixed offsets, as the Linux check reads netlink bytes. Every
+  byte pattern is a valid value, so a wrong layout can make the lookup find nothing, but it
+  cannot cause undefined behaviour. On macOS the build checks each offset against the crate's
+  `repr(C)` declaration of the structure (`const` assertions with `offset_of!`). The server's
+  self-check at start checks them against the kernel. The kernel refuses a buffer that is
+  smaller than its structure, so if a later macOS makes the structure larger, every lookup
+  finds nothing and the server does not start.
+- **Rule.** As above: exactly one socket that is TCP, IPv4 (`INI_IPV4`) and `ESTABLISHED`,
+  whose local end is the server's `peer` and whose remote end is the server's `local`.
+  Descriptors that share one socket (the same `soi_so`) count as one socket. No match, another
+  state, or two sockets refuse. A process that exits during the scan, or whose descriptors the
+  kernel does not show, holds no socket for the scan. A failure to list the processes refuses
+  the connection, and the server reports it once in its log.
+- **Self-check.** Before it serves, the server connects to a listener of its own and looks up
+  that connection. When the lookup fails, the server does not start. The message says that the
+  server must start from a normal session of the account, outside any sandbox, and where to
+  report the macOS version.
+- **Dependencies.** `libproc` and, at build time, `bindgen` with `clang-sys` (9 crates in the
+  lock file). They are used on macOS only: `bindgen` needs libclang, which the Xcode command
+  line tools provide. Those tools are also needed to compile the C store engine.
+
+What CI proved on macos-latest ([PR 28](https://github.com/Hebilicious/quadratique/pull/28), [run 45555375519](https://github.com/Hebilicious/quadratique/actions/runs/45555375519)):
+
+- The owner's connection is admitted, and a scan of every process finds its holder: `nc` of the
+  owner, `Holders([pid])`.
+- Another account is refused. A process of the account `nobody` holds a connection (`sudo -n -u
+  nobody nc`). Its connection is refused. A scan of every process of the machine (not only the
+  owner's) finds nothing. The kernel lists nobody's processes, but shows this account none of
+  their TCP sockets. Through the whole server, `sudo -n -u nobody curl` gets `403` and the
+  owner-only answer (`test-as-nobody`). The test uses the existing account `nobody` and creates
+  no account. It runs only on the CI runner, where `sudo` needs no password.
+- A connection that closed before the lookup, a peer port with no socket, a port that only a
+  listener holds, a failing lookup, and a self-check that finds nothing, another uid, or an
+  error are refused (unit tests in `peer_macos.rs`).
+- The test that admits 1000 of the owner's connections while other sockets of the same process
+  open and close (`process::the_owner_is_admitted_while_other_sockets_open_and_close`) passes on
+  macOS too.
+- Cost, measured on the runner (`the_cost_of_the_caller_check`, 200 of each): one lookup over the
+  300 processes of the runner's account takes 0.63 ms at the median, 0.9 ms at the 95th
+  percentile, and 6 ms at most. A request to the server on a new connection takes 0.84 ms at the
+  median (1.3 ms at p95). On one kept-alive connection it takes 0.17 ms, because the check runs
+  once for each connection. A browser opens a few kept-alive connections and makes its many
+  requests over them, so the check adds less than a millisecond for each new connection. The 14
+  web journeys pass on macOS in 39 s (1.3 min on the Linux runner). The cost grows with the
+  number of the owner's processes and their descriptors, not with the number of requests.
+- In the first CI run, two of the owner's own requests were refused, both in tests that run git.
+  Between `fork` and `exec`, a child process holds a copy of every descriptor of its parent,
+  the client's socket included. `proc_listpids` lists the newest process first, so the lookup
+  took the child as the holder. When it read the holder's uid again, the child had already
+  exec'd git or ended, and the connection was refused. The lookup now keeps every holder of the
+  socket and admits when any of them still runs as the owner (`account_of_holders`, tested on
+  every platform). The code shows this path; one CI run after the fix passed, which alone does
+  not prove that no other path refuses the owner. `pbi_nfiles` is the size of the descriptor
+  table (150, with 116 descriptors open and the highest at 146), so a buffer of that size holds
+  every descriptor. The lookup still asks `PROC_PIDLISTFDS` again with more room when the answer
+  fills the buffer, because the table can grow during the scan.
+
+Gaps that remain on macOS:
+
+- The check names the account of a process that holds the socket now, not the account that
+  created it. A socket that the owner's process hands to a process of another account
+  (`SCM_RIGHTS`) is the owner's choice, as on Linux. A process that holds the owner's socket and
+  then changes its effective uid is no longer listed, so its connection is refused.
+- A server that runs as root may read every process's descriptors. It still lists only root's
+  processes, and it reads the holder's uid again after the scan.
+
 ## Open questions
 
 Each has a safe default until the owner decides.
@@ -233,3 +318,12 @@ Each has a safe default until the owner decides.
    has no SIGTERM. The command line refuses the stop on Windows (`cli/src/process.rs`).
    Default: QUA-34 adds a stop route that only the owner's command line can call, behind the
    caller check.
+5. **The `unsafe` code inside `libproc`.** The workspace has no `unsafe` code, but the macOS
+   check depends on the crate's `unsafe` code. That code calls the C functions and writes the
+   kernel's answer into a buffer of the type that the server gives. The server gives a byte
+   array, so any answer is a valid value. The crate's `listpidinfo` sets the length of a
+   vector before the kernel fills it (`set_len` on memory that is not initialised). For the
+   integer items that the server reads, nothing in practice goes wrong, but the Rust rules do
+   not allow it. Default: use the crate, pinned at `=0.15.0`, and read every new version's
+   changes to these calls before an upgrade. The alternative is the one `unsafe` module that
+   open question 1 asks about for Windows.
