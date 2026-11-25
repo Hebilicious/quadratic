@@ -165,13 +165,71 @@ the main worktree. When none of these names a branch, as in a main worktree with
 "nothing in the repository names one: give --default-branch". Change it later with
 `quadratique project update`.
 
-A skill file you changed is left as it is. Of the setup files, `init` writes only the three
+A skill file you changed is left as it is: `init` replaces only a file that holds a text an
+earlier build wrote (see "Update a repository's skill after an upgrade"). Of the setup files, `init` writes only the three
 above, all inside the repository, and writes no agent configuration. Like any command, it starts
 the server when none answers, and the server keeps its store in the data folder (see "Backups"),
 outside the repository. `init` makes no commit. Its answer has an optional `commit` field: the
 `git add` and `git commit` to run for the setup files that `init` wrote, or that hold exactly its
 own text and are not committed yet. A skill file you changed, which `init` left alone, is not in
 that command. When every setup file is already committed, the answer has no `commit` field.
+
+## Update a repository's skill after an upgrade
+
+A new build can ship a new skill text. Bring a repository's setup to it with the same command,
+from inside the repository:
+
+```sh
+quadratique init
+```
+
+The binary knows every skill text that a build of Quadratique wrote, by the SHA-256 of its bytes.
+A skill file that holds one of them is replaced with this build's text, and the answer says
+`updated: it held an earlier Quadratique text`. A skill file that holds any other bytes was changed
+by a person: it is kept, and the answer says `different: yours is kept`. `init` replaces a file by
+writing a new file beside it and renaming it over the old one, so another hard link to the old
+file keeps its bytes. It checks the file again just before the write: a file that changed since
+`init` read it, or one that appeared where there was none, is kept with a warning.
+
+A repository set up by Quadratic, the earlier name, moves to Quadratique: the skill is written to
+`.agents/skills/quadratique/`, the files of `.agents/skills/quadratic/` that hold a text Quadratic
+wrote there are removed, and Quadratic's line in `AGENTS.md` becomes Quadratique's. The `commit`
+field records these changes, also on a later run, as long as git's index still holds Quadratic's
+text at the removed path (the answer then says `removed earlier: the commit records it`).
+
+In `AGENTS.md`, the Quadratique line is a line that is exactly the instruction from its first
+character, followed by nothing but spaces or tabs, outside any fenced code block. A quotation, an
+indented line and an example inside a fence are left as they are. The first standalone Quadratic
+line becomes the Quadratique line, unless that is already there; other Quadratic lines are removed.
+Every other byte of the file stays as it is, line endings and a missing final newline included. A
+file without the line gets it at its end, in the file's own line ending.
+
+`quadratique init --dry-run` writes nothing: it creates no project, starts no server and runs no
+git command that writes. It asks a server about the project only when one already runs; otherwise
+its `project` is `{"lookedUp": false, "reason": "..."}`. Its answer has `"dryRun": true` and says per
+file what `init` would do: `would create` (the file is missing), `unchanged` (it holds this build's
+text), `would update: it holds an earlier Quadratique text`, `different: yours is kept` (a person
+changed it), or `would fail: <reason>` when the file or its folder is not writable.
+
+A kept file is also a warning. The answer then starts with a `warnings` list that names each
+kept file and the command that prints this build's text of it, for example:
+
+```json
+{"warnings":[".agents/skills/quadratique/SKILL.md was kept: a person changed it, so it lacks this build's text. Merge that text into it: quadratique init --print SKILL.md"],"files":{...}}
+```
+
+`quadratique init --print SKILL.md` writes this build's `SKILL.md` to standard output as it is, not
+wrapped in JSON, so that you or an agent can compare it with the kept file and merge the two.
+`--print planning.md` gives the other skill file and `--print AGENTS.md` the line. `--print` needs
+no repository and no server and writes nothing, so it works in a sandbox that cannot reach the
+server. Any other name is refused with the list of names it knows.
+
+`init` removes a file of `.agents/skills/quadratic/` only when it is a regular file, reached
+through no link, that holds exactly a text Quadratic wrote there before the rename. It follows no
+link there: a link, a directory, a changed file (a copy of a later Quadratique text included) and
+any other file are kept, each with a warning, and the folder is kept when it is not empty. For a
+changed file, the warning says where the merged text goes: `.agents/skills/quadratique/`, which
+Quadratique reads.
 
 ## Who can talk to the server
 
@@ -376,6 +434,10 @@ command can start another, so the new server is the one that answers.
 The first start of a new binary upgrades the store to that binary's schema, one commit per
 step. A binary refuses a store newer than the schema it knows. Back up the store (see "Backups") before you upgrade, so that you can go back to the older binary
 with the store as it was.
+
+The install does not change the repositories that use Quadratique. Run `quadratique init` in each
+of them to bring its skill to the new build's text (see "Update a repository's skill after an
+upgrade").
 
 ## Uninstall
 

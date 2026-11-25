@@ -24,10 +24,11 @@ acid-cat-core.workspace = true
 futures.workspace = true
 quadratique-server.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 tempfile.workspace = true
