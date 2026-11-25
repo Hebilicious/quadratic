@@ -286,15 +286,39 @@ pub fn git_program() -> &'static Path {
     static GIT: OnceLock<PathBuf> = OnceLock::new();
     GIT.get_or_init(|| {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::split_paths(&path)
-            .map(|directory| directory.join("git"))
-            .find(|candidate| {
-                candidate
-                    .metadata()
-                    .is_ok_and(|file| file.is_file() && file.permissions().mode() & 0o111 != 0)
-            })
-            .expect("git is on the PATH")
+        let here = std::env::current_dir().expect("the test's directory");
+        program_on(&path, &here, "git").expect("git is on the PATH")
     })
+}
+
+/// The first executable `name` on `path`, as an absolute path: the commands that run it start in
+/// other directories. A relative entry is taken from `here`, and an empty entry means `here`,
+/// as a shell takes them.
+fn program_on(path: &std::ffi::OsStr, here: &Path, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|directory| here.join(directory).join(name))
+        .find(|candidate| {
+            candidate
+                .metadata()
+                .is_ok_and(|file| file.is_file() && file.permissions().mode() & 0o111 != 0)
+        })
+}
+
+#[test]
+fn a_relative_path_entry_gives_git_by_its_full_path() {
+    let here = tempfile::tempdir().expect("a temporary directory");
+    let tools = here.path().join("tools");
+    std::fs::create_dir(&tools).expect("the tools folder");
+    let program = tools.join("git");
+    std::fs::write(&program, "#!/bin/sh\n").expect("the program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("the program is executable");
+    std::fs::write(here.path().join("git"), "not executable").expect("a plain file");
+
+    let path = std::env::join_paths(["nowhere", "tools", "/usr/bin"]).expect("a PATH");
+    assert_eq!(program_on(&path, here.path(), "git"), Some(program.clone()));
+    let empty_first = std::ffi::OsString::from(":tools");
+    assert_eq!(program_on(&empty_first, here.path(), "git"), Some(program));
 }
 
 fn git_command(directory: &Path, args: &[&str]) -> Command {
