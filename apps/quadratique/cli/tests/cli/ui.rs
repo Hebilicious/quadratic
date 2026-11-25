@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::support::{HANG_GUARD, Home, outside};
+use crate::support::{HANG_GUARD, Home, await_until, outside};
 
 fn within<F: Future>(what: &str, future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
@@ -321,7 +321,7 @@ fn when_the_kept_port_is_taken_ui_opens_the_new_address_which_is_kept() {
 }
 
 #[test]
-fn strict_on_takes_a_fresh_address_at_each_start_and_strict_off_keeps_the_current_one() {
+fn strict_on_takes_a_fresh_address_at_each_start_and_after_strict_off_the_next_address_is_kept() {
     let home = Home::new();
     let elsewhere = outside();
     let app = built_app(elsewhere.path());
@@ -358,7 +358,7 @@ fn strict_on_takes_a_fresh_address_at_each_start_and_strict_off_keeps_the_curren
         .run()
         .ok();
     assert_eq!(status["running"], false, "{status}");
-    assert_eq!(url_of(&ui_url(&home, elsewhere.path(), &app)), third);
+    let fourth = url_of(&ui_url(&home, elsewhere.path(), &app));
     let status = home
         .quadratique(elsewhere.path())
         .args(["server", "status"])
@@ -366,7 +366,84 @@ fn strict_on_takes_a_fresh_address_at_each_start_and_strict_off_keeps_the_curren
         .ok();
     assert_eq!(
         (&status["web"], &status["addressKept"]),
-        (&json!(third), &json!(true)),
+        (&json!(fourth), &json!(true)),
         "{status}"
     );
+    stop(&home, elsewhere.path());
+    assert_eq!(url_of(&ui_url(&home, elsewhere.path(), &app)), fourth);
+}
+
+fn server_status(home: &Home, elsewhere: &Path) -> Value {
+    home.quadratique(elsewhere)
+        .args(["server", "status"])
+        .run()
+        .ok()
+}
+
+#[test]
+fn a_server_on_a_given_port_says_its_address_is_not_kept() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let kept = url_of(&ui_url(&home, elsewhere.path(), &app));
+    stop(&home, elsewhere.path());
+    let serving = home
+        .quadratique(elsewhere.path())
+        .env("QUADRATIQUE_WEB", &app)
+        .args(["serve", "--port", "0"])
+        .spawn();
+    await_until("the server on port 0 answers", || {
+        server_status(&home, elsewhere.path())["running"] == true
+    });
+
+    let printed = ui_url(&home, elsewhere.path(), &app);
+    let status = server_status(&home, elsewhere.path());
+    stop(&home, elsewhere.path());
+    serving.finish();
+
+    assert_ne!(url_of(&printed), kept);
+    assert_eq!(printed["addressKept"], false, "{printed}");
+    assert_eq!(status["addressKept"], false, "{status}");
+}
+
+#[test]
+fn a_server_that_could_not_keep_its_port_says_its_address_is_not_kept() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    std::fs::create_dir(home.path().join("server.port")).expect("a folder where server.port goes");
+
+    let printed = ui_url(&home, elsewhere.path(), &app);
+    let status = server_status(&home, elsewhere.path());
+    stop(&home, elsewhere.path());
+    let stopped = server_status(&home, elsewhere.path());
+
+    assert_eq!(printed["addressKept"], false, "{printed}");
+    assert_eq!(status["addressKept"], false, "{status}");
+    assert_eq!(
+        stopped["addressKept"], true,
+        "with no server, addressKept says what the next start does: {stopped}"
+    );
+}
+
+#[test]
+fn strict_on_and_off_start_no_server_and_apply_from_the_next_start() {
+    let home = Home::new();
+    let elsewhere = outside();
+
+    let on = strict(&home, elsewhere.path(), "on");
+    let after_on = server_status(&home, elsewhere.path());
+    let off = strict(&home, elsewhere.path(), "off");
+    let after_off = server_status(&home, elsewhere.path());
+
+    assert_eq!(
+        after_on["running"], false,
+        "strict on started a server: {after_on}"
+    );
+    assert_eq!(
+        after_off["running"], false,
+        "strict off started a server: {after_off}"
+    );
+    assert_eq!(on["from"], "the next start of the server", "{on}");
+    assert_eq!(off["from"], "the next start of the server", "{off}");
 }

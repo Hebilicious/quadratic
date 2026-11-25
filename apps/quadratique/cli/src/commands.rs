@@ -27,7 +27,7 @@ pub fn all() -> Vec<CliCommand<Context>> {
         ),
         command(
             "server",
-            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; each start of the server takes an address it never served, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui gives the new address. server strict off: the server keeps its address across restarts (the default).",
+            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; from the next start of the server, each start takes an address it never served, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui gives the new address. server strict off: from the next start, which takes a new address, the server keeps its address across restarts (the default). Neither starts a server.",
             |args, io| server_command(args, io).boxed(),
         ),
         command(
@@ -208,8 +208,11 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     }
 }
 
+/// `addressKept` comes from the running server when one answered; with none, it says what the next start does.
 fn located(home: &Home, mut value: Value) -> Value {
-    value["addressKept"] = json!(!server::strict(home.prepared()));
+    if value.get("addressKept").is_none() {
+        value["addressKept"] = json!(!server::strict(home.prepared()));
+    }
     value["runtime"] = json!(home.prepared().runtime());
     value["log"] = json!(home.log());
     value
@@ -317,6 +320,9 @@ fn answered_over_socket(identity: &server::Identity) -> Value {
     if !same {
         value["interface"] = json!(identity.interface);
     }
+    if let Some(kept) = identity.address_kept {
+        value["addressKept"] = json!(kept);
+    }
     if let Some(origin) = identity
         .url
         .as_deref()
@@ -335,17 +341,14 @@ fn unreachable(home: &Home, reason: String) -> Value {
     })
 }
 
-/// Turning strict off keeps the port of the server that runs now, so that the address already open in the browser is
-/// the one kept; turning it on forgets the kept port, and the next start takes a fresh one.
+/// The setting applies from the next start of the server: neither turning it on nor off starts or changes one.
 async fn set_strict(home: &Home, on: bool) -> Result<Value, background::LifeError> {
-    let port = if on {
-        None
-    } else {
-        Some(background::ensure(home).await?.address.port())
-    };
-    server::set_strict(home.prepared(), on, port)
+    server::set_strict(home.prepared(), on)
         .map_err(|error| home.unusable(error, background::Attempt::Start))?;
-    Ok(located(home, json!({ "strict": on })))
+    Ok(located(
+        home,
+        json!({ "strict": on, "from": "the next start of the server" }),
+    ))
 }
 
 async fn stop(home: &Home) -> Result<Value, background::LifeError> {
@@ -382,7 +385,7 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
         Err(error) => return report(io, Kind::Unavailable, error.to_string()),
     };
     let url = format!("http://{}/", runtime.address);
-    let kept = !server::strict(home.prepared());
+    let kept = address_kept(&home).await;
     let answer = if !open {
         json!({ "url": url, "opened": false, "addressKept": kept })
     } else {
@@ -413,6 +416,18 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
     };
     print_json(io, &answer);
     exit::VALUE
+}
+
+/// Whether the running server listens on the port its home keeps, as it says itself; a server that does not say gets the
+/// home's setting.
+async fn address_kept(home: &Home) -> bool {
+    #[cfg(unix)]
+    if let Ok(identity) = server::identity_over_socket(home.prepared()).await
+        && let Some(kept) = identity.address_kept
+    {
+        return kept;
+    }
+    !server::strict(home.prepared())
 }
 
 const OPENER: &str = if cfg!(target_os = "macos") {
