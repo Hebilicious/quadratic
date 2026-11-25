@@ -162,8 +162,7 @@ fn anything_but_a_socket_of_this_account_at_the_socket_name_is_refused() {
     );
     std::fs::remove_file(&socket).expect("the link goes");
 
-    let stale = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
-    drop(stale);
+    stop_listening(std::os::unix::net::UnixListener::bind(&socket).expect("a socket"));
     prepare(&base).expect("a stale socket of this account is accepted");
 }
 
@@ -419,4 +418,15 @@ fn an_acl_entry_on_a_sticky_folder_above_the_home_is_refused() {
         message.contains(&format!("chmod -N {}", sticky.display())),
         "{message}"
     );
+}
+
+/// Takes `listener` out of the listening state for every descriptor of it, then closes it: later connections are
+/// refused. A plain drop closes one descriptor, while a child that another test spawns holds a copy of each descriptor
+/// of this process between its `fork` and its `exec`, and so keeps the socket listening for that moment. This relies on
+/// Linux's `shutdown`, as `serve.rs` does; elsewhere the listener is only dropped.
+fn stop_listening(listener: std::os::unix::net::UnixListener) {
+    #[cfg(target_os = "linux")]
+    rustix::net::shutdown(&listener, rustix::net::Shutdown::Both)
+        .expect("the socket stops listening");
+    drop(listener);
 }

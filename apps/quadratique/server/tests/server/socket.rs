@@ -7,7 +7,7 @@ use quadratique_server::home::{self, HomeError, SOCKET_FILE};
 use quadratique_server::serve;
 use quadratique_server::server::{self, CONTROL, Paths, RuntimeFile, ServerError, Started};
 
-use crate::support::within;
+use crate::support::{stop_listening, within};
 
 fn prepared_at(home: &Path) -> home::Prepared {
     home::prepare(&Paths::in_home(home).expect("an absolute home"))
@@ -194,8 +194,7 @@ async fn a_stale_socket_of_this_account_is_replaced() {
     let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let stale_path = home.path().join(SOCKET_FILE);
-    let stale = std::os::unix::net::UnixListener::bind(&stale_path).expect("a stale socket");
-    drop(stale);
+    stop_listening(std::os::unix::net::UnixListener::bind(&stale_path).expect("a stale socket"));
     let before = std::os::unix::net::UnixStream::connect(&stale_path);
     assert_eq!(
         before.as_ref().err().map(std::io::Error::kind),

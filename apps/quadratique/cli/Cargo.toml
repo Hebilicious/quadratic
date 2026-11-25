@@ -49,7 +49,7 @@ rustix = { workspace = true, features = ["event", "fs"] }
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-rustix = { workspace = true, features = ["event"] }
+rustix = { workspace = true, features = ["event", "net"] }
 
 # Lets `cargo binstall` download the archive of a GitHub release instead of building.
 [package.metadata.binstall]

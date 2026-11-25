@@ -405,6 +405,21 @@ pub fn git(directory: &Path, args: &[&str]) {
     );
 }
 
+/// Takes `listener` out of the listening state for every descriptor of it, then closes it: later connections are
+/// refused. A plain drop closes one descriptor, while a child that another test spawns holds a copy of each descriptor
+/// of this process between its `fork` and its `exec`, and so keeps the socket listening for that moment.
+pub fn stop_listening(listener: std::os::unix::net::UnixListener) {
+    rustix::net::shutdown(&listener, rustix::net::Shutdown::Both)
+        .expect("the socket stops listening");
+}
+
+/// Lets go of the `flock` on `lock` for every descriptor of it, then closes it. A plain drop closes one descriptor,
+/// while a child that another test spawns holds a copy of each descriptor of this process between its `fork` and its
+/// `exec`, and so keeps the lock taken for that moment.
+pub fn free(lock: std::fs::File) {
+    lock.unlock().expect("the lock is freed");
+}
+
 pub fn outside() -> TempDir {
     tempfile::Builder::new()
         .prefix("quadratique-outside-")
