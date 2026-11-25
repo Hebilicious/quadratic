@@ -556,7 +556,7 @@ failure never leaves a public release without its archives.
 ### The crates
 
 The command line and the server are the crates `quadratique` and `quadratique-server`. Both
-inherit `publish = false` from `[workspace.package]` until the first publication. Each crate
+inherit `publish = true` from `[workspace.package]`. Each crate
 carries the files it reads at build time: the catalog JSON, the skill and the license are links in
 the crate to the files of the repository, and `cargo package` copies their content.
 
