@@ -41,6 +41,10 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
 
+# The upgrade signals and watches the server it stops through a pidfd.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["event", "fs"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 

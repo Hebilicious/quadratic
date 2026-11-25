@@ -221,11 +221,11 @@ fn folder(version: &str) -> String {
 }
 
 /// A stand-in for the binary of the release `version`. Its `--version` answers only in an empty
-/// environment and from `/`, and its skill report names its version, so a test can tell which
-/// build made it.
+/// environment, from `/`, and when run through the descriptor of the written file; its skill
+/// report names its version, so a test can tell which build made it.
 fn new_binary(version: &str) -> Vec<u8> {
     format!(
-        "#!/bin/sh\ncase \"$1 $2\" in\n--version*)\n  if [ -n \"$HOME$QUADRATIQUE_HOME$QUADRATIQUE_UPGRADE_SOURCE\" ] || [ \"$(pwd)\" != / ]; then echo 'not an empty environment' >&2; exit 9; fi\n  echo {version}; exit 0 ;;\n'upgrade --skills') echo '{{\"skills\":{{\"madeBy\":\"{version}\"}}}}'; exit 0 ;;\nesac\nexit 2\n"
+        "#!/bin/sh\ncase \"$1 $2\" in\n--version*)\n  if [ -n \"$HOME$QUADRATIQUE_HOME$QUADRATIQUE_UPGRADE_SOURCE\" ] || [ \"$(pwd)\" != / ]; then echo 'not an empty environment' >&2; exit 9; fi\n  case \"$0\" in /proc/self/fd/*) ;; *) echo \"run by its path $0, not by the written file\" >&2; exit 8 ;; esac\n  echo {version}; exit 0 ;;\n'upgrade --skills') echo '{{\"skills\":{{\"madeBy\":\"{version}\"}}}}'; exit 0 ;;\nesac\nexit 2\n"
     )
     .into_bytes()
 }
@@ -410,8 +410,22 @@ impl Installed {
         );
     }
 
-    /// Starts the home's server from the installed file, then replaces the file by another copy,
-    /// so that the server runs an earlier build of it. Returns the server's pid.
+    /// Writes into the install lock the device and inode of the installed file, as a run does
+    /// just before its rename.
+    fn record_replaced(&self) {
+        use std::os::unix::fs::MetadataExt;
+
+        let meta = std::fs::metadata(&self.binary).unwrap();
+        std::fs::write(
+            self.binary.with_file_name(LOCK),
+            format!("replaced {} {}\n", meta.dev(), meta.ino()),
+        )
+        .unwrap();
+    }
+
+    /// Starts the home's server from the installed file, then replaces the file by another copy
+    /// as a run that was killed after its rename would, so that the server runs the replaced
+    /// file. Returns the server's pid.
     fn server_of_an_earlier_build(&self, releases: &Releases) -> u32 {
         self.quadratique(releases)
             .args(["project", "list"])
@@ -419,6 +433,7 @@ impl Installed {
             .ok();
         let servers = self.home.servers();
         assert_eq!(servers.len(), 1, "{servers:?}");
+        self.record_replaced();
         let copy = self.binary.with_file_name("copy");
         copy_binary(&copy);
         std::fs::rename(&copy, &self.binary).unwrap();
@@ -726,12 +741,13 @@ fn an_install_folder_that_other_accounts_can_write_is_refused() {
     let installed = Installed::file();
     releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
     let bin = installed.binary.parent().unwrap().to_owned();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o757)).unwrap();
-
-    refused(
-        &installed.upgrade(&releases, &[]),
-        "other accounts can write",
-    );
+    for mode in [0o757, 0o775] {
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(mode)).unwrap();
+        refused(
+            &installed.upgrade(&releases, &[]),
+            "other accounts can write",
+        );
+    }
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     installed.still_runs();
 }
@@ -840,15 +856,26 @@ fn a_staging_folder_left_by_a_killed_upgrade_is_removed_by_the_next() {
     releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
     let leftover = installed
         .binary
-        .with_file_name(".quadratique-upgrade-0123abcd");
+        .with_file_name(".quadratique-upgrade-0123456789abcdef01234567");
     std::fs::create_dir(&leftover).unwrap();
     std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(leftover.join("quadratique"), "half written").unwrap();
+    let persons = installed
+        .binary
+        .with_file_name(".quadratique-upgrade-notes");
+    std::fs::create_dir(&persons).unwrap();
+    std::fs::set_permissions(&persons, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(persons.join("quadratique"), "a person's file").unwrap();
 
     let answer = installed.upgrade(&releases, &[]).ok();
 
     assert_eq!(answer["removedLeftovers"], json!([leftover]), "{answer}");
-    assert!(installed.beside().is_empty(), "{:?}", installed.beside());
+    assert_eq!(answer["leftBesideTheBinary"], json!([persons]), "{answer}");
+    assert_eq!(installed.beside(), [".quadratique-upgrade-notes"]);
+    assert_eq!(
+        std::fs::read_to_string(persons.join("quadratique")).unwrap(),
+        "a person's file"
+    );
 }
 
 /// A fake `systemctl` that runs `quadratique.service` as systemd would: its main process is the
@@ -887,6 +914,17 @@ fn a_server_left_on_the_earlier_build_is_restarted_through_the_service_until_the
         format!("restarted quadratique.service; {CURRENT} serves this home (pid {now})"),
         "{answer}"
     );
+    let status = installed
+        .quadratique(&releases)
+        .args(["server", "status"])
+        .run()
+        .ok();
+    assert_eq!(
+        status["running"], true,
+        "answered before the new build served: {status}"
+    );
+    assert_eq!(status["sameInterface"], true, "{status}");
+    assert_eq!(status["pid"], now, "{status}");
     await_exit(earlier);
     assert_eq!(
         std::fs::canonicalize(format!("/proc/{now}/exe")).unwrap(),
@@ -1048,5 +1086,77 @@ fn the_report_names_each_repository_s_state_and_its_errors_and_starts_no_server(
     assert_eq!(
         std::fs::read_to_string(older.join(SKILL_PATH)).unwrap(),
         earlier
+    );
+}
+
+#[test]
+fn a_server_on_a_file_that_no_run_recorded_as_replaced_is_left_running() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
+    let earlier = installed.server_of_an_earlier_build(&releases);
+    std::fs::remove_file(installed.binary.with_file_name(LOCK)).unwrap();
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    assert!(answer.get("server").is_none(), "{answer}");
+    assert_eq!(installed.home.servers(), vec![earlier]);
+}
+
+#[test]
+fn a_service_that_cannot_be_inspected_stops_nothing() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
+    let earlier = installed.server_of_an_earlier_build(&releases);
+    installed.systemctl("#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n");
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    let warning = answer["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("could not be inspected"), "{warning}");
+    assert_eq!(installed.home.servers(), vec![earlier]);
+}
+
+#[test]
+fn the_repair_of_an_earlier_run_waits_for_no_other_upgrade() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
+    let earlier = installed.server_of_an_earlier_build(&releases);
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .open(installed.binary.with_file_name(LOCK))
+        .unwrap();
+    lock.lock().unwrap();
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    let warning = answer["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("another quadratique upgrade"), "{warning}");
+    assert_eq!(installed.home.servers(), vec![earlier]);
+}
+
+#[test]
+fn while_a_server_runs_the_report_comes_from_it_and_not_from_the_store_file() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    let repository = Repository::new();
+    installed
+        .home
+        .quadratique_at(&installed.binary, &repository.root)
+        .args(["init", "--key", "SRV"])
+        .run()
+        .ok();
+    let store = installed.store();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let answer = installed.upgrade(&releases, &["--skills"]).ok();
+
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        answer["skills"]["current"],
+        json!([repository.root.display().to_string()]),
+        "{answer}"
     );
 }

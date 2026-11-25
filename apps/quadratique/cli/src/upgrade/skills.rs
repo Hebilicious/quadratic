@@ -1,6 +1,9 @@
 //! Which repositories of the home's projects hold a skill older than this build, and what to run
-//! in each. The projects are read from the store file, read-only: no server is asked or started,
-//! and no store is created or migrated. Each project's main checkout is read as
+//! in each. When a server runs for the home, it lists the projects and the command opens no store
+//! file. Otherwise, when a store exists, the command reads it once, read-only; the store engine
+//! may leave its lock sidecar (`.workspace.db-lock`) beside it, which it creates for any reader.
+//! With no store, nothing is touched. No server is started and no store is created or migrated.
+//! Each project's main checkout is read as
 //! `init --dry-run` reads it, and no repository is written: a repository may take changes only
 //! through a branch and a pull request.
 
@@ -11,14 +14,18 @@ use quadratique_server::git::environment;
 use quadratique_server::store::{SCHEMA_VERSION, read_recorded};
 use serde_json::{Value, json};
 
-use crate::commands;
+use acid_cat_core::Outcome;
+use quadratique_server::domain::Binding;
+
+use crate::background::{self, Found, Home};
 use crate::init::{setup_of, shell_word};
+use crate::{caller, commands};
 
 const NOTE: &str = "Nothing was written into these repositories. Run each command in the repository, or in the worktree of a new branch where it takes changes through pull requests; init prints the commit to make.";
 const NO_SKILL: &str = "The main checkout holds no Quadratique skill. When another branch or worktree holds it, run quadratique init --dry-run there.";
 
-pub fn report() -> Value {
-    let repositories = match projects() {
+pub async fn report() -> Value {
+    let repositories = match projects().await {
         Ok(repositories) => repositories,
         Err(problem) => {
             return json!({
@@ -30,8 +37,11 @@ pub fn report() -> Value {
     report_of(repositories)
 }
 
-fn projects() -> Result<Vec<PathBuf>, String> {
+async fn projects() -> Result<Vec<PathBuf>, String> {
     let home = commands::home()?;
+    if let Some(repositories) = from_the_server(&home).await? {
+        return Ok(repositories);
+    }
     let database = &home.paths.database;
     match read_recorded(database).map_err(|error| error.to_string())? {
         None => Ok(Vec::new()),
@@ -42,6 +52,31 @@ fn projects() -> Result<Vec<PathBuf>, String> {
         )),
         Some(recorded) => Ok(recorded.repositories),
     }
+}
+
+/// The projects' repositories as the home's server lists them, when one runs. Starts nothing.
+async fn from_the_server(home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
+    let runtime = match background::find(home).await {
+        Ok(Found::Ours(runtime)) | Ok(Found::OtherInterface { runtime, .. }) => runtime,
+        Ok(Found::Nobody) => return Ok(None),
+        Ok(Found::Refused { reason }) => return Err(reason),
+        Err(error) => return Err(error.to_string()),
+    };
+    let caller = caller::detect(Binding::Cli).map_err(|error| error.to_string())?;
+    let client = caller::client(&caller, &runtime.url)?;
+    let projects = match client.invoke("project.list", &json!({})).await {
+        Outcome::Value(value) => value,
+        Outcome::Failure(failure) => return Err(failure.to_string()),
+        Outcome::CallFailure(failure) => return Err(failure.message),
+    };
+    Ok(Some(
+        projects["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|project| project["repository"].as_str().map(PathBuf::from))
+            .collect(),
+    ))
 }
 
 #[derive(Default)]

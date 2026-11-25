@@ -32,14 +32,19 @@ use crate::commands::{self, print_json, report};
 use release::{Release, Source, Version};
 use route::Route;
 
-pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and restarts the server of this home (through quadratique.service when systemd runs it, waiting until the new build serves; else it stops the server, so that the next command starts the new build). Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server.";
+pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and restarts the server of this home (through quadratique.service when systemd runs it, waiting until the new build serves; else it stops the server, so that the next command starts the new build). Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server: the home's server lists the projects when it runs; otherwise the command reads the store file once, read-only, and the store engine may leave its lock file (.workspace.db-lock) beside it.";
 
 /// A release binary is about 23 MiB.
 const BINARY_LIMIT: u64 = 128 << 20;
 const DECODED_LIMIT: u64 = BINARY_LIMIT + (1 << 20);
 const REPORT_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
-/// The store schema that every release knows: release 0.1.0 shipped it.
-const FIRST_RELEASE_SCHEMA: i64 = 1;
+/// The first release that opened each store schema, oldest first. A build that adds a migration
+/// adds its row with the version it will be released as; a test fails until the build's schema
+/// is here.
+const SCHEMA_RELEASES: &[(i64, &str)] = &[(1, "0.1.0")];
+
+/// The file at the binary's path: device, inode, size and modification time.
+type Identity = (u64, u64, u64, Option<std::time::SystemTime>);
 
 #[derive(Default)]
 struct Request {
@@ -78,7 +83,7 @@ pub async fn upgrade(words: &[&str], io: &mut CliIo) -> i32 {
         );
     }
     if request.skills {
-        print_json(io, &json!({ "skills": skills::report() }));
+        print_json(io, &json!({ "skills": skills::report().await }));
         return exit::VALUE;
     }
     match run(&request).await {
@@ -91,7 +96,7 @@ pub async fn upgrade(words: &[&str], io: &mut CliIo) -> i32 {
 }
 
 /// The file as it was when this upgrade started, to tell whether another upgrade replaced it.
-fn identity(binary: &Path) -> Result<(u64, u64, Option<std::time::SystemTime>), String> {
+fn identity(binary: &Path) -> Result<Identity, String> {
     let meta = std::fs::metadata(binary)
         .map_err(|error| format!("{} cannot be read: {error}", binary.display()))?;
     #[cfg(unix)]
@@ -100,8 +105,8 @@ fn identity(binary: &Path) -> Result<(u64, u64, Option<std::time::SystemTime>), 
         (meta.dev(), meta.ino())
     };
     #[cfg(not(unix))]
-    let file = (0, meta.len());
-    Ok((file.0, file.1, meta.modified().ok()))
+    let file = (0, 0);
+    Ok((file.0, file.1, meta.len(), meta.modified().ok()))
 }
 
 async fn run(request: &Request) -> Result<Value, String> {
@@ -135,7 +140,7 @@ async fn run(request: &Request) -> Result<Value, String> {
         if route.manager().is_none() {
             finish_an_earlier_upgrade(&home, &binary, &running, request.check, &mut answer).await;
         }
-        answer["skills"] = skills::report();
+        answer["skills"] = skills::report().await;
         return Ok(answer);
     }
     let mut answer = json!({
@@ -150,7 +155,7 @@ async fn run(request: &Request) -> Result<Value, String> {
             answer["then"] = json!(after_the_manager(&route, &binary).await);
         }
         answer["run"] = json!(route.command());
-        answer["skills"] = skills::report();
+        answer["skills"] = skills::report().await;
         return Ok(answer);
     }
 
@@ -164,7 +169,7 @@ async fn install_release(
     source: &Source,
     release: &Release,
     binary: &Path,
-    started_as: (u64, u64, Option<std::time::SystemTime>),
+    started_as: Identity,
     running: &Version,
 ) -> Result<Value, String> {
     let unchanged = |what: String| format!("{what}. Nothing was changed.");
@@ -183,17 +188,24 @@ async fn install_release(
         ))
     })?;
     folder::check(folder).map_err(unchanged)?;
-    store_opens(home, latest, running).map_err(unchanged)?;
-    let lock = folder::Lock::take(folder).map_err(unchanged)?;
-    let removed = folder::remove_leftovers(folder, &lock);
+    store_opens(home, latest, running)
+        .await
+        .map_err(unchanged)?;
+    let mut lock = folder::Lock::take(folder).map_err(unchanged)?;
     if identity(binary)? != started_as {
         return Err(unchanged(format!(
             "{} changed while this upgrade ran, by another upgrade or install; run quadratique upgrade again",
             binary.display()
         )));
     }
-    replace(source, release, target, binary, folder).await?;
-    drop(lock);
+    let leftovers = folder::remove_leftovers(folder, &lock);
+    let staging = prepare(source, release, target, folder).await?;
+    store_opens(home, latest, running)
+        .await
+        .map_err(unchanged)?;
+    let replaced = (started_as.0, started_as.1);
+    lock.record_replaced(replaced).map_err(unchanged)?;
+    staging.install(binary).map_err(unchanged)?;
 
     let mut answer = json!({
         "from": running.to_string(),
@@ -201,14 +213,18 @@ async fn install_release(
         "binary": binary,
         "sha256": "verified against the GitHub API",
     });
-    if !removed.is_empty() {
-        answer["removedLeftovers"] = json!(removed);
+    if !leftovers.removed.is_empty() {
+        answer["removedLeftovers"] = json!(leftovers.removed);
     }
-    match server::bring_up(home, binary, &latest.to_string()).await {
+    if !leftovers.left.is_empty() {
+        answer["leftBesideTheBinary"] = json!(leftovers.left);
+    }
+    match server::bring_up(home, binary, &latest.to_string(), Some(replaced)).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
     answer["skills"] = new_build_report(binary).await;
+    drop(lock);
     Ok(answer)
 }
 
@@ -219,7 +235,7 @@ async fn install_release(
     _source: &Source,
     _release: &Release,
     _binary: &Path,
-    _started_as: (u64, u64, Option<std::time::SystemTime>),
+    _started_as: Identity,
     _running: &Version,
 ) -> Result<Value, String> {
     Err(format!(
@@ -238,23 +254,48 @@ async fn finish_an_earlier_upgrade(
     check: bool,
     answer: &mut Value,
 ) {
-    let Some(pid) = server::home_server(home).await else {
+    let Some(folder) = binary.parent() else {
         return;
     };
-    if server::what_runs(pid, binary) != server::Runs::EarlierBuild {
+    let mut lock = match folder::Lock::take(folder) {
+        Ok(lock) => lock,
+        Err(problem) if check => {
+            answer["server"] = json!(problem);
+            return;
+        }
+        Err(problem) => {
+            answer["warnings"] = json!([problem]);
+            return;
+        }
+    };
+    let Some(replaced) = lock.replaced() else {
+        return;
+    };
+    let server = match server::home_server(home).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return,
+        Err(problem) => {
+            answer["warnings"] = json!([format!(
+                "the server of this home cannot be reached: {problem}"
+            )]);
+            return;
+        }
+    };
+    if server::what_runs(server.pid, binary, Some(replaced)) != server::Runs::Replaced {
         return;
     }
     if check {
         answer["server"] = json!(format!(
-            "the server of this home (pid {pid}) runs an earlier build of {}; quadratique upgrade restarts it",
-            binary.display()
+            "the server of this home (pid {}) runs the file that an earlier upgrade replaced; quadratique upgrade restarts it",
+            server.pid
         ));
         return;
     }
-    match server::bring_up(home, binary, &running.to_string()).await {
+    match server::bring_up(home, binary, &running.to_string(), Some(replaced)).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
+    drop(lock);
 }
 
 #[cfg(not(unix))]
@@ -269,26 +310,48 @@ async fn finish_an_earlier_upgrade(
 
 /// The highest store schema that release `version` is known to open. Schemas only grow, so a
 /// release at least as new as this build opens every schema this build knows; an older release
-/// is known to open only the schema of the first release.
+/// opens the schemas whose first release it is at or after.
 fn known_schema(version: &Version, running: &Version) -> i64 {
+    known_schema_in(SCHEMA_RELEASES, version, running, SCHEMA_VERSION)
+}
+
+fn known_schema_in(
+    table: &[(i64, &str)],
+    version: &Version,
+    running: &Version,
+    current: i64,
+) -> i64 {
     if version >= running {
-        SCHEMA_VERSION
-    } else {
-        FIRST_RELEASE_SCHEMA
+        return current;
     }
+    table
+        .iter()
+        .filter(|(_, first)| Version::parse(first).is_some_and(|first| first <= *version))
+        .map(|(schema, _)| *schema)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The store's schema: from the home's server when one runs, so that the command opens no store
+/// file; else from the file, read once; `None` when there is no store.
+async fn store_schema(home: &Home) -> Result<Option<i64>, String> {
+    #[cfg(unix)]
+    if let Some(server) = server::home_server(home).await? {
+        return Ok(Some(server.schema));
+    }
+    let database = &home.paths.database;
+    read_recorded(database)
+        .map(|recorded| recorded.map(|recorded| recorded.schema))
+        .map_err(|error| format!("the store {} cannot be read: {error}", database.display()))
 }
 
 /// Refuses a release that could not open the store, before anything changes.
-fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result<(), String> {
-    let database = &home.paths.database;
-    let recorded = read_recorded(database)
-        .map_err(|error| format!("the store {} cannot be read: {error}", database.display()))?;
+async fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result<(), String> {
     let known = known_schema(latest, running);
-    match recorded {
-        Some(recorded) if recorded.schema > known => Err(format!(
-            "the store {} has schema {}, and release {latest} is known to open schema {known} at most: its server could not start",
-            database.display(),
-            recorded.schema
+    match store_schema(home).await? {
+        Some(schema) if schema > known => Err(format!(
+            "the store {} has schema {schema}, and release {latest} is known to open schema {known} at most: its server could not start",
+            home.paths.database.display(),
         )),
         _ => Ok(()),
     }
@@ -318,16 +381,15 @@ async fn after_the_manager(route: &Route, binary: &Path) -> Vec<String> {
     then
 }
 
-/// Downloads, checks and installs the release's binary over `binary`. On an error, `binary` is
-/// as it was and no staging folder is left.
+/// Downloads and checks the release's binary, and leaves it staged beside the binary, run once
+/// with `--version`. On an error no staging folder is left.
 #[cfg(unix)]
-async fn replace(
+async fn prepare(
     source: &Source,
     release: &Release,
     target: &str,
-    binary: &Path,
     folder: &Path,
-) -> Result<(), String> {
+) -> Result<folder::Staging, String> {
     let unchanged = |what: String| format!("{what}. Nothing was changed.");
     let latest = release.version.to_string();
     let files = target::files(&latest, target);
@@ -357,10 +419,11 @@ async fn replace(
     let bytes = archive::binary(&archive, &files.binary, BINARY_LIMIT, DECODED_LIMIT)
         .map_err(|error| unchanged(format!("{} is refused: {error}", files.archive)))?;
     let staging = folder::Staging::create(folder, &bytes).map_err(unchanged)?;
-    install::runs_as(&staging.binary, &latest)
+    let runnable = staging.runnable().map_err(unchanged)?;
+    install::runs_as(&runnable, &latest)
         .await
         .map_err(unchanged)?;
-    staging.install(binary).map_err(unchanged)
+    Ok(staging)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -406,16 +469,36 @@ async fn new_build_report(binary: &Path) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{FIRST_RELEASE_SCHEMA, SCHEMA_VERSION, Version, known_schema, request};
+    use super::{SCHEMA_RELEASES, SCHEMA_VERSION, Version, known_schema, known_schema_in, request};
 
     #[test]
-    fn a_newer_release_opens_this_build_s_schema_and_an_older_one_only_the_first_release_s() {
-        let running = Version::parse("1.4.0").unwrap();
-        let newer = Version::parse("1.5.0").unwrap();
-        let older = Version::parse("1.3.9").unwrap();
-        assert_eq!(known_schema(&newer, &running), SCHEMA_VERSION);
-        assert_eq!(known_schema(&running, &running), SCHEMA_VERSION);
-        assert_eq!(known_schema(&older, &running), FIRST_RELEASE_SCHEMA);
+    fn a_newer_release_opens_this_build_s_schema_and_an_older_one_those_of_its_releases() {
+        let version = |text| Version::parse(text).unwrap();
+        let table = &[(1, "0.1.0"), (2, "0.3.1")];
+        let running = version("0.4.0");
+        let known = |text| known_schema_in(table, &version(text), &running, 2);
+        assert_eq!(known("0.5.0"), 2);
+        assert_eq!(known("0.4.0"), 2);
+        assert_eq!(known("0.3.1"), 2);
+        assert_eq!(known("0.3.0"), 1);
+        assert_eq!(known("0.1.0"), 1);
+        assert_eq!(known("0.0.9"), 0);
+        assert_eq!(known_schema(&version("0.0.1"), &version("0.1.0")), 0);
+    }
+
+    #[test]
+    fn the_schema_of_this_build_has_its_first_release_in_the_table() {
+        assert!(
+            SCHEMA_RELEASES
+                .iter()
+                .any(|(schema, _)| *schema == SCHEMA_VERSION),
+            "add ({SCHEMA_VERSION}, \"<the release that ships it>\") to SCHEMA_RELEASES in apps/quadratique/cli/src/upgrade/mod.rs"
+        );
+        assert!(
+            SCHEMA_RELEASES
+                .iter()
+                .all(|(_, first)| Version::parse(first).is_some())
+        );
     }
 
     #[test]

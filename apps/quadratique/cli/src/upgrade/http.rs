@@ -153,8 +153,18 @@ async fn request(
 }
 
 /// Whether the request may go to `uri`, and over TLS.
+/// The authority must be a bare allowed host: no user information, and for HTTPS no port but 443.
 fn allowed(uri: &Uri, host: &str, hosts: &Hosts<'_>) -> Result<bool, String> {
+    if uri
+        .authority()
+        .is_some_and(|authority| authority.as_str().contains('@'))
+    {
+        return Err(format!("{uri} carries user information: refused"));
+    }
     match (uri.scheme_str(), hosts) {
+        (Some("https"), Hosts::Https(_)) if uri.port_u16().is_some_and(|port| port != 443) => {
+            Err(format!("{uri} names a port other than 443: refused"))
+        }
         (Some("https"), Hosts::Https(allowed)) if allowed.contains(&host) => Ok(true),
         (Some("http"), Hosts::Plain(origin))
             if origin.host == host && Some(origin.port) == uri.port_u16() =>

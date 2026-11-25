@@ -18,7 +18,8 @@ use serde_json::Value;
 
 use crate::init::shell_word;
 
-const REPOSITORY: &str = "hebilicious/quadratique";
+/// The one mise backend that installs this tool, as the README says: `mise use -g github:…`.
+const MISE_TOOL: &str = "github:Hebilicious/quadratique";
 
 pub enum Route {
     File,
@@ -102,10 +103,7 @@ fn mise(binary: &Path) -> Option<Route> {
             )
         })
     };
-    let names_this = |tool: &str| {
-        tool.split_once(':')
-            .is_some_and(|(_, name)| name.eq_ignore_ascii_case(REPOSITORY))
-    };
+    let names_this = |tool: &str| tool.eq_ignore_ascii_case(MISE_TOOL);
     let short = field("short").unwrap_or_default();
     let full = field("full").unwrap_or_default();
     let named = tool_folder
@@ -151,21 +149,28 @@ fn cargo(binary: &Path) -> Option<Route> {
         return unclear("is not the JSON that cargo writes");
     };
     let name = binary.file_name()?.to_str()?;
-    let listed = record["installs"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .any(|(package, install)| {
-            package.split(' ').next() == Some("quadratique")
-                && install["bins"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|bin| bin.as_str() == Some(name))
-        });
-    listed.then(|| Route::Cargo {
-        root: root.to_path_buf(),
-    })
+    let Some(installs) = record["installs"].as_object() else {
+        return unclear("has no `installs` object");
+    };
+    let mut owners = Vec::new();
+    for (package, install) in installs {
+        let Some(bins) = install["bins"].as_array() else {
+            return unclear(&format!("gives no `bins` list for {package}"));
+        };
+        if bins.iter().any(|bin| bin.as_str() == Some(name)) {
+            owners.push(package.split(' ').next().unwrap_or_default().to_owned());
+        }
+    }
+    match owners.as_slice() {
+        [] => None,
+        [owner] if owner == "quadratique" => Some(Route::Cargo {
+            root: root.to_path_buf(),
+        }),
+        _ => unclear(&format!(
+            "says that {} installed the {name} executable",
+            owners.join(" and ")
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -216,8 +221,15 @@ mod tests {
         let binary = binary_in(&root, "bin/quadratique");
         assert!(matches!(Route::of(&binary), Route::File));
 
-        std::fs::write(root.join(".crates2.json"), "{ not json").unwrap();
-        assert!(matches!(Route::of(&binary), Route::Unclear(_)));
+        for unclear in [
+            "{ not json",
+            r#"{"installs":[]}"#,
+            r#"{"installs":{"quadratique 1.0.0 (registry)":{"bins":"quadratique"}}}"#,
+            r#"{"installs":{"other-tool 2.0.0 (registry)":{"bins":["quadratique"]}}}"#,
+        ] {
+            std::fs::write(root.join(".crates2.json"), unclear).unwrap();
+            assert!(matches!(Route::of(&binary), Route::Unclear(_)), "{unclear}");
+        }
 
         std::fs::write(
             root.join(".crates2.json"),
@@ -228,5 +240,20 @@ mod tests {
             Route::of(&binary).command(),
             format!("cargo install --root '{}' quadratique", root.display())
         );
+    }
+
+    #[test]
+    fn another_mise_backend_naming_this_repository_is_unclear() {
+        let folder = tempfile::tempdir().unwrap();
+        let tool = folder
+            .path()
+            .join("mise/installs/ubi-hebilicious-quadratique");
+        let binary = binary_in(&tool, "1.0.0/bin/quadratique");
+        std::fs::write(
+            tool.join(".mise.backend.toml"),
+            "short = \"ubi:Hebilicious/quadratique\"\nfull = \"ubi:Hebilicious/quadratique\"\n",
+        )
+        .unwrap();
+        assert!(matches!(Route::of(&binary), Route::Unclear(_)));
     }
 }
