@@ -191,17 +191,21 @@ async fn a_stale_socket_of_this_account_is_replaced() {
     let stale_path = home.path().join(SOCKET_FILE);
     let stale = std::os::unix::net::UnixListener::bind(&stale_path).expect("a stale socket");
     drop(stale);
-    let stale_inode = std::fs::symlink_metadata(&stale_path).unwrap().ino();
+    let before = std::os::unix::net::UnixStream::connect(&stale_path);
+    assert_eq!(
+        before.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::ConnectionRefused),
+        "the stale socket accepts: {before:?}"
+    );
 
     let running = server::start(&paths, server::loopback())
         .await
         .expect("the server starts over a stale socket");
 
-    let bound = std::fs::symlink_metadata(&stale_path).expect("the new socket");
-    assert_ne!(bound.ino(), stale_inode);
-    server::identity_over_socket(home.path())
+    let identity = server::identity_over_socket(home.path())
         .await
-        .expect("the new socket answers");
+        .expect("the socket at the same name answers");
+    assert_eq!(identity.pid, std::process::id());
     running.shutdown().await;
 }
 
