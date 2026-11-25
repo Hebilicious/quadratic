@@ -651,7 +651,8 @@ they did and answer what they answered, `NotClosed` included; after the answer o
 which go to standard output, they add one line on standard error:
 `` quadratique: `close` is now `finish`; `close` goes away in the release after 0.2. ``. Over
 HTTP, `issue.close` and `issues.close` answer as before. The MCP tool is `issue.finish` only: an
-MCP client reads the tools from the server at each start.
+MCP client reads the tools from the server at each start, so an agent whose MCP session was open
+during the upgrade restarts it to see `issue.finish`.
 
 Every finish now writes the history operation `issue.finish`, whichever name was called. History
 written before 0.2 keeps `issue.close`; `history query` shows both as they were written, and the

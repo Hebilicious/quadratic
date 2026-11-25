@@ -2653,7 +2653,7 @@
       }
     },
     "issues.finish": {
-      "description": "`issue.finish` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.finish`. All or nothing: when `issue.finish` would fail on one issue, nothing changes and the call fails with `NotFinished`, naming that issue and giving its failure. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "`issue.finish` on each issue of `issue`, in order, with the same evidence, in one database commit with the operation `issue.finish`. All or nothing: when `issue.finish` would fail on one issue, nothing changes and the call fails with `NotFinished`, naming that issue and giving its failure. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
       "audience": [
         "cli"
       ],

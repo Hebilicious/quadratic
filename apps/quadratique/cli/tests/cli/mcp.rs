@@ -136,6 +136,14 @@ fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_finishes_seede
             .starts_with("token.")),
         "an agent's MCP tools include a token capability: {listed}"
     );
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        names.contains(&"issue.finish") && !names.contains(&"issue.close"),
+        "an agent's MCP tools offer the old name, or lack the new one: {names:?}"
+    );
     for tool in tools {
         assert!(
             tool.get("outputSchema").is_none(),

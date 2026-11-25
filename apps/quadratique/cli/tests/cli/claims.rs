@@ -344,7 +344,7 @@ fn the_old_name_close_answers_as_finish_does_and_points_to_finish_on_standard_er
         .args(["project", "create", "--key", "CLO", "--name", "Close"])
         .run()
         .ok();
-    for issue in ["CLO-1", "CLO-2", "CLO-3"] {
+    for issue in ["CLO-1", "CLO-2", "CLO-3", "CLO-4", "CLO-5"] {
         home.quadratique(&repository.root)
             .args(["create", "--title", issue, "--acceptance", "It is done."])
             .run()
@@ -398,6 +398,33 @@ fn the_old_name_close_answers_as_finish_does_and_points_to_finish_on_standard_er
     assert_eq!(failure["failure"]["_tag"], "NotFound", "{refused:?}");
     assert_eq!(refused.stderr.trim_end(), POINTER, "{refused:?}");
 
+    let several = agent(&[
+        "issues",
+        "close",
+        "--issue",
+        "CLO-4",
+        "--evidence",
+        "checked",
+    ]);
+    assert_eq!(several.code, 0, "{several:?}");
+    assert_eq!(several.stderr.trim_end(), POINTER, "{several:?}");
+
+    let called = agent(&[
+        "call",
+        "issue.close",
+        r#"{"issue":"CLO-5","evidence":"checked"}"#,
+    ]);
+    assert_eq!(called.code, 0, "{called:?}");
+    assert_eq!(called.json()["issue"]["evidence"], "checked", "{called:?}");
+    assert_eq!(called.stderr.trim_end(), POINTER, "{called:?}");
+
+    let misused = agent(&["close", "--issue", "CLO-3"]);
+    assert_eq!(misused.code, 3, "{misused:?}");
+    assert_eq!(
+        misused.stderr, "The flag --evidence is required.\n",
+        "a failure that is not an answer keeps standard error to itself: {misused:?}"
+    );
+
     let finished = agent(&["finish", "--issue", "CLO-3", "--evidence", "checked"]);
     assert_eq!(finished.code, 0, "{finished:?}");
     assert_eq!(finished.stderr, "", "{finished:?}");
@@ -412,5 +439,5 @@ fn the_old_name_close_answers_as_finish_does_and_points_to_finish_on_standard_er
         .iter()
         .filter(|change| change["operation"] == "issue.finish")
         .count();
-    assert_eq!(finishes, 3, "{history}");
+    assert_eq!(finishes, 5, "{history}");
 }

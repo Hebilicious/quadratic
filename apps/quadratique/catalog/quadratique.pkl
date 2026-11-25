@@ -1037,7 +1037,7 @@ capabilities {
   }
 
   ["issues.finish"] {
-    description = "`issue.finish` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.finish`. All or nothing: when `issue.finish` would fail on one issue, nothing changes and the call fails with `NotFinished`, naming that issue and giving its failure." + committed
+    description = "`issue.finish` on each issue of `issue`, in order, with the same evidence, in one database commit with the operation `issue.finish`. All or nothing: when `issue.finish` would fail on one issue, nothing changes and the call fails with `NotFinished`, naming that issue and giving its failure." + committed
     audience { "cli" }
     input = finishSeveralInput("IssuesFinishInput")
     output = finishSeveralOutput("IssuesFinishAnswer")
