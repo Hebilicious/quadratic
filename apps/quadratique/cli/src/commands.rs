@@ -32,7 +32,7 @@ pub fn all() -> Vec<CliCommand<Context>> {
         ),
         command(
             "ui",
-            "Make sure the server runs, and print the address of the web app (url), a one-time link that lets a browser in (link, valid 60 seconds and once), and addressKept: whether the server keeps that address across restarts (false under server strict on). ui --open: open the web app in the browser and let it in, through a file only this account can read, instead of printing the link. A browser that was let in keeps its token, and stays in across restarts until server sign-out (in strict mode, until the next restart).",
+            "Make sure the server runs, and print the address of the web app (url), a one-time link that lets a browser in (link, valid 60 seconds and once), and addressKept: whether the server keeps that address across restarts (false under server strict on). ui --open: instead of printing the link, hand the opener (xdg-open, or open on macOS) a file only this account can read, which sends the browser to the link; opened: true means only that the opener ran and exited without an error, not that a browser read the file (a sandboxed browser may not reach the data folder: then run quadratique ui and open its link). A browser that was let in keeps its token, and stays in across restarts until server sign-out (in strict mode, until the next restart).",
             |args, io| ui(args, io).boxed(),
         ),
         command("init", crate::init::USAGE, |args, io| {
