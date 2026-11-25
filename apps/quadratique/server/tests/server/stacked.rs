@@ -253,6 +253,33 @@ async fn ready_offers_b_only_from_a_branch_or_a_branch_on_top_of_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn once_another_agent_frees_a_claim_in_review_b_is_still_offered_only_from_a_branch() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    let (lead, _) = stack.agent_from("lead", "main").await;
+    stack
+        .board
+        .ok(&lead, "issue.release", json!({ "issue": stack.a }))
+        .await;
+    let (on_top, _) = stack.agent_from("cache", "parse").await;
+    let (unrelated, _) = stack.agent_from("docs", "main").await;
+
+    assert!(stack.board.ready_ids(&on_top, 10).await.contains(&stack.b));
+    assert!(
+        !stack
+            .board
+            .ready_ids(&unrelated, 10)
+            .await
+            .contains(&stack.b)
+    );
+    let claimed = stack
+        .board
+        .ok(&on_top, "issue.claim", json!({ "issue": stack.b }))
+        .await;
+    assert_eq!(claimed["issue"]["status"], "in-progress", "{claimed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn b_can_be_claimed_only_from_a_branch_that_contains_a_branch() {
     let stack = Stack::new().await;
     stack.close_a().await;
@@ -666,6 +693,46 @@ async fn a_hold_ends_when_its_claim_is_released() {
         .expect("A merges");
 
     assert_eq!(stack.status(&stack.b).await, "todo");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hold_is_kept_when_another_agent_frees_the_claim_in_review() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    let human = stack.human();
+    let (agent, worktree) = stack.agent_from("cache", "parse").await;
+    let (lead, _) = stack.agent_from("lead", "main").await;
+    stack
+        .board
+        .ok(&agent, "issue.claim", json!({ "issue": stack.b }))
+        .await;
+    stack
+        .repository
+        .commit(&worktree, "cache.rs", "Cache the parsed headers");
+    stack.board.look().await;
+    stack
+        .board
+        .ok(
+            &agent,
+            "issue.close",
+            json!({ "issue": stack.b, "evidence": "the tests pass" }),
+        )
+        .await;
+    stack.squash_onto_main("cache", &stack.b);
+    stack.board.look().await;
+    assert_eq!(stack.status(&stack.b).await, "in-review", "B is held");
+
+    let freed = stack
+        .board
+        .ok(&lead, "issue.release", json!({ "issue": stack.b }))
+        .await;
+    assert_eq!(freed["issue"]["status"], "in-review", "{freed}");
+    stack
+        .move_to(&human, &stack.a, "merged")
+        .await
+        .expect("A merges");
+
+    assert_eq!(stack.status(&stack.b).await, "merged");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -72,12 +72,19 @@ impl Board {
                     ),
                     None => (Stage::BeforeReview, None),
                 };
+                let branch = match &node.claim_branch {
+                    Some(branch) => Some(branch.clone()),
+                    None if stage == Stage::InReview => {
+                        view.last_claim(&node.id)?.map(|(branch, _)| branch)
+                    }
+                    None => None,
+                };
                 stacked.insert(
                     node.id.clone(),
                     Node {
                         project: node.project.clone(),
                         stage,
-                        branch: node.claim_branch.clone(),
+                        branch,
                         repository,
                         open: node.claim_branch.is_none()
                             && !category.is_some_and(domain::Category::is_resolved),
@@ -179,6 +186,10 @@ impl Board {
 
     pub(crate) fn check(&self, change: &RelationChange) -> Result<(), Refused> {
         Ok(self.graph.check(change)?)
+    }
+
+    pub(crate) fn check_all(&self, changes: &[RelationChange]) -> Result<(), Refused> {
+        Ok(self.graph.check_all(changes)?)
     }
 
     pub(crate) fn apply(&mut self, change: RelationChange) {

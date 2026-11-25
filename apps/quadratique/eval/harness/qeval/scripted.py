@@ -65,11 +65,10 @@ def measure_setup(p: Prepared) -> dict:
     commits = tally.git(p.repo, "log", "--format=%an: %s", f"{p.base}..{setup_head}", env=env).strip().splitlines()
     config_after = (p.repo / ".git" / "config").read_text()
     steps = [" ".join(entry["cmd"]) for entry in p.sb.log]
-    if p.committed_by_maintainer:
-        steps.append("git add -A && git commit (the maintainer commits what the setup wrote)")
     return {
         "steps": steps,
         "step_count": len(steps),
+        "committed_by_maintainer": p.committed_by_maintainer,
         "files": files,
         "commits": commits,
         "git_config_added": [line.strip() for line in config_after.splitlines() if line not in p.config_before.splitlines()],

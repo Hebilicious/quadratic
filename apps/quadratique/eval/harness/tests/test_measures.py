@@ -407,6 +407,65 @@ class FilesWrittenRow(unittest.TestCase):
         self.assertEqual(row["values"]["beads"], [2])
 
 
+class SetupStepsRow(unittest.TestCase):
+    """The commands of each tracker's quickstart, as the harness logs them; a commit is not a step."""
+
+    QUADRATIQUE = ["quadratique init --key TAL --name tally"]
+    LIFIC = ["lific init --no-service --auth-mode login-free --name Human", "lific bind TAL --create",
+             "lific connect --client claude-code --scope project --stdio --yes", "lific agents-md --project TAL"]
+    BEADS = ["bd init"]
+
+    def row(self, setup):
+        return next(r for r in report.rows({"agents": {}, "scripted": {"setup": setup}})
+                    if r["measure"] == "Setup steps")
+
+    def test_a_saved_run_counts_without_the_commit_it_appended(self):
+        def saved(steps, committed):
+            steps = steps + [report.MAINTAINER_COMMIT] * committed
+            return {"steps": steps, "step_count": len(steps)}
+
+        row = self.row({"quadratique": [saved(self.QUADRATIQUE, True)], "lific": [saved(self.LIFIC, True)],
+                        "beads": [saved(self.BEADS, False)]})
+
+        self.assertEqual(row["values"], {"quadratique": [1], "lific": [4], "beads": [1]})
+        self.assertEqual(report.verdict(row), "tied with beads")
+
+    def test_a_new_run_counts_its_logged_commands(self):
+        def new(steps, committed):
+            return {"steps": steps, "step_count": len(steps), "committed_by_maintainer": committed}
+
+        row = self.row({"quadratique": [new(self.QUADRATIQUE, True)], "lific": [new(self.LIFIC, True)],
+                        "beads": [new(self.BEADS, False)]})
+
+        self.assertEqual(row["values"], {"quadratique": [1], "lific": [4], "beads": [1]})
+
+    def test_the_measure_lists_the_logged_commands_and_records_the_commit_apart(self):
+        from types import SimpleNamespace
+
+        from qeval import scripted, tally
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            repo, home = root / "tally", root / "home"
+            home.mkdir()
+            env = {**WrittenFromGit.ENV, "HOME": str(home)}
+            tally.create_repo(repo, env)
+            base = tally.git(repo, "rev-parse", "HEAD", env=env).strip()
+            config_before = (repo / ".git" / "config").read_text()
+            (repo / ".tracker.toml").write_text("key = \"TAL\"\n")
+            committed = tally.commit_all(repo, env, "Set up the issue tracker")
+            sb = SimpleNamespace(env=lambda: env, log=[{"cmd": ["quadratique", "init", "--key", "TAL", "--name", "tally"]}],
+                                 home=home, root=root)
+            p = SimpleNamespace(sb=sb, repo=repo, base=base, config_before=config_before, committed_by_maintainer=committed)
+
+            setup = scripted.measure_setup(p)
+
+        self.assertEqual(setup["steps"], self.QUADRATIQUE)
+        self.assertEqual(setup["step_count"], 1)
+        self.assertTrue(setup["committed_by_maintainer"])
+        self.assertEqual(setup["files"], ["A\t.tracker.toml"])
+
+
 class Labels(unittest.TestCase):
     def row(self, better, quadratique, lific, beads):
         return {"better": better, "values": {"quadratique": quadratique, "lific": lific, "beads": beads}}

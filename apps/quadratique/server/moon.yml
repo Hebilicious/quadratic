@@ -17,19 +17,20 @@ fileGroups:
     - "/apps/quadratique/Cargo.toml"
     - "/apps/quadratique/Cargo.lock"
     - "/apps/quadratique/rust-toolchain.toml"
+    - "/.cargo/config.toml"
 
 tasks:
   build:
     command: "cargo build -p quadratique-server"
-    inputs: ["@group(sources)", "@group(workspace)"]
+    inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)"]
   test:
     command: "cargo test -p quadratique-server"
-    inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]
+    inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
     tags: ["candidate"]
   test-as-nobody:
     description: "Needs `sudo -n -u nobody` to work without a password: runs the ignored test in which the account nobody calls a server of this account with curl and must get the owner-only 403. Not part of `test`."
     command: "cargo test -p quadratique-server --test server -- --ignored --exact process::a_process_of_another_account_is_refused --nocapture"
-    inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]
+    inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
     options:
       cache: false
   stage-web:
@@ -53,11 +54,11 @@ tasks:
     description: "The preflight's cases, and how build.rs embeds the web app: in the repository with and without the feature, and in a packaged crate with and without the feature, next to an unrelated web folder, and without its staged web app."
     command: "sh package-test.sh"
     deps: ["quadratique-web:build"]
-    inputs: ["@group(sources)", "@group(workspace)", "preflight.sh", "package-test.sh", "/apps/quadratique/web/dist/**/*", "/apps/quadratique/cli/src/skill/*", "/apps/quadratique/cli/LICENSE", "/apps/quadratique/skill/quadratique/*.md", "/LICENSE"]
+    inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "preflight.sh", "package-test.sh", "/apps/quadratique/web/dist/**/*", "/apps/quadratique/cli/src/skill/*", "/apps/quadratique/cli/LICENSE", "/apps/quadratique/skill/quadratique/*.md", "/LICENSE"]
     tags: ["candidate"]
   lint:
     command: "cargo clippy -p quadratique-server --all-targets -- -D warnings"
-    inputs: ["@group(sources)", "@group(workspace)", "tests/**/*"]
+    inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
   fmt-check:
     command: "cargo fmt -p quadratique-server --check"
     inputs: ["@group(sources)", "tests/**/*"]

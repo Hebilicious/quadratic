@@ -130,10 +130,11 @@ async fn list_issues(context: &Context, input: ListInput) -> Result<IssuePage, R
         key: caller.holder_key().as_str().to_owned(),
         session: caller
             .actor
-            .harness
-            .clone()
-            .zip(caller.actor.session.clone())
-            .map(|(harness, session)| HolderSession { harness, session }),
+            .agent_session()
+            .map(|(harness, session)| HolderSession {
+                harness: harness.to_owned(),
+                session: session.to_owned(),
+            }),
     };
     let claim = match input.claim.as_deref() {
         Some("mine") => Some(mine),

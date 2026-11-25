@@ -179,3 +179,24 @@ fn accepted_changes_never_leave_a_cycle() {
         Ok(())
     });
 }
+
+#[test]
+fn changes_checked_together_are_accepted_exactly_when_they_leave_no_cycle() {
+    let runs = (
+        prop::collection::vec(change(), 0..8),
+        prop::collection::vec(change(), 1..8),
+    );
+    property(2000, runs, |(existing, together)| {
+        let mut accepted: Vec<RelationChange> = Vec::new();
+        for change in existing {
+            if relations(&accepted).check(&change).is_ok() {
+                accepted.push(change);
+            }
+        }
+        let answer = relations(&accepted).check_all(&together);
+        let mut proposed = accepted;
+        proposed.extend(together);
+        prop_assert_eq!(answer.is_ok(), !has_cycle(&Relations::of(&proposed)));
+        Ok(())
+    });
+}

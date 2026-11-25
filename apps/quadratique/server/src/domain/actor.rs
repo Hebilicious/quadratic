@@ -105,6 +105,23 @@ const NAME_MAX: usize = 420;
 const WORKTREE_NAME_MAX: usize = 255;
 
 impl Actor {
+    /// The harness and the session id of an agent, when it gives both and neither is blank: a
+    /// session id means something only within its harness. A human has none, whatever fields
+    /// it declares. Like every actor field, both are self-declared.
+    pub fn agent_session(&self) -> Option<(&str, &str)> {
+        if self.kind != ActorKind::Agent {
+            return None;
+        }
+        Some((given(&self.harness)?, given(&self.session)?))
+    }
+
+    /// The actor with a blank `harness` or `session` taken as absent, as `detect` reads them.
+    pub fn without_blank_ids(mut self) -> Actor {
+        self.harness = self.harness.filter(|value| !is_blank(value));
+        self.session = self.session.filter(|value| !is_blank(value));
+        self
+    }
+
     pub fn server() -> Actor {
         Actor {
             harness: Some(SERVER_NAME.into()),
@@ -312,5 +329,13 @@ fn slug_member(value: &str, max: usize) -> Option<String> {
 
 fn text_member(value: &str, max: usize) -> Option<String> {
     let value = cut(value, max);
-    (!value.is_empty()).then_some(value)
+    (!is_blank(&value)).then_some(value)
+}
+
+fn given(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|value| !is_blank(value))
+}
+
+fn is_blank(value: &str) -> bool {
+    value.trim().is_empty()
 }

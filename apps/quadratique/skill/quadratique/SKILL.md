@@ -12,7 +12,7 @@ Quadratique holds every task of this repository as an issue: what to do, who hol
 The session's work has an issue before any file changes.
 
 1. The issue the human names comes first.
-2. Otherwise `quadratique issue list --claim mine`: your session's claims; act from each one's worktree. Read its notes, a reviewer may have sent it back.
+2. Otherwise `quadratique issue list --claim mine`: your session's claims; act on each from any worktree. Read its notes, a reviewer may have sent it back.
 3. Otherwise the first of `quadratique ready` that fits the task. When none fits, create one with `quadratique create --title "<the outcome>" --description "<what, why>" --acceptance "<checkable criteria, one per line>"` and tell the human its id.
 
 ## From a plan or a PRD to issues
@@ -32,7 +32,7 @@ Read [`planning.md`](planning.md) before you turn a plan or a PRD into issues.
 
 - Changes requested: first `quadratique issue update --issue ABC-12 --revision <revision> --status in-progress`, so the board shows you at work. Then change, commit, `close` with the new evidence, and ask again.
 - Accepted: merge as `AGENTS.md` says; after a merge on GitHub, `git fetch`. Quadratique sees the merge and moves the issue to `merged`, which gives it a new `revision`. `quadratique show --issue ABC-12` waits up to 2 seconds for the repository: while it still says review, run it again; if it stays there, it waits for an issue it is stacked on to merge (nothing to do), or the commit on the default branch lacks `Refs: ABC-12` or landed before the `close`: tell the human. When the default branch's checks pass, or at once when it has none: `quadratique issue update --issue ABC-12 --revision <revision from that show> --status done`.
-- A claim left by an agent that ended: add a note (any agent may), and ask the human to release it or move the issue.
+- A claim left by an agent that ended: for feedback, add a note; to free it in review, `quadratique release --issue ABC-12 --reason "..."` (any agent may); before review, ask the human.
 
 ## Blocked
 

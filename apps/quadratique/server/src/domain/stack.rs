@@ -44,7 +44,8 @@ impl Stage {
 pub struct Base {
     pub on: IssueId,
     pub stage: Stage,
-    /// The branch of the base's claim, while it has one.
+    /// The branch of the base's claim, while it has one; for a base in review whose claim was
+    /// freed (decision 0002, rule 3), the branch of its last claim.
     pub branch: Option<String>,
     /// The repository that the base's project is bound to.
     pub repository: Option<String>,

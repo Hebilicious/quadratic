@@ -204,7 +204,8 @@ impl<'c> View<'c> {
                 Some(HolderSession { harness, session }) => {
                     conditions.push(
                         "(i.claim_key = ? OR (json_extract(i.claim_holder, '$.session') = ? \
-                         AND json_extract(i.claim_holder, '$.harness') = ?))"
+                         AND json_extract(i.claim_holder, '$.harness') = ? \
+                         AND json_extract(i.claim_holder, '$.kind') = 'agent'))"
                             .into(),
                     );
                     params.push(key.as_str().into());
