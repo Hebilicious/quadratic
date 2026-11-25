@@ -69,3 +69,87 @@ jobs:
           quadratique-eval:test
           quadratique-catalog:check
           quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test quadratique-web:e2e
+
+  # The same checks on macOS and Windows, one step per area, so that each platform reports every area that fails and
+  # not only the first. Quadratique runs on Linux only so far (QUA-6): on these platforms the server refuses to start
+  # until it can check who connects to its local listener there (docs/decisions/0003-the-caller-check-on-macos-and-windows.md),
+  # so every test that starts a server fails. `continue-on-error` keeps those expected failures out of the run's
+  # result; each job still shows its own outcome. Remove it once a platform's checks pass.
+  portability:
+    name: checks on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    # Only stops a hang: a full check takes far less.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - id: pnpm
+        run: echo "store=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools', 'pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools') }}-
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: apps/quadratique
+
+      - name: Build the binary
+        id: build
+        run: moon run quadratique-cli:build
+
+      - name: Upload the binary
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quadratique-${{ runner.os }}
+          path: |
+            apps/quadratique/target/debug/quadratique
+            apps/quadratique/target/debug/quadratique.exe
+          if-no-files-found: error
+
+      - name: Server tests
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-server:test
+      - name: Command line tests
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-cli:test
+      - name: Lints and formatting
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-cli:lint quadratique-cli:fmt-check quadratique-server:lint quadratique-server:fmt-check
+      - name: Package test
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-server:package-test
+      - name: Install test
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-install:test
+      - name: Eval test
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-eval:test
+      - name: Catalog check
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-catalog:check
+      - name: Web checks
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test
+      - name: Web journeys
+        if: ${{ !cancelled() }}
+        run: |
+          pnpm --filter quadratique-web exec playwright install chromium-headless-shell
+          moon run quadratique-web:e2e
