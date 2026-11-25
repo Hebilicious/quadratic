@@ -31,7 +31,7 @@ use quadratique_server::store::{SCHEMA_VERSION, read_recorded, refuse_git_work_t
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::background::Home;
+use crate::background::{self, Home};
 use crate::commands::{self, print_json, report};
 use release::{Release, Source, Version};
 use route::Route;
@@ -121,7 +121,7 @@ async fn run(request: &Request) -> Result<Value, String> {
         .and_then(|path| path.canonicalize())
         .map_err(|error| unchanged(format!("this binary's file cannot be found: {error}")))?;
     let started_as = identity(&binary)?;
-    let home = commands::home().map_err(unchanged)?;
+    let home = commands::existing_home().map_err(unchanged)?;
     let route = Route::of(&binary);
     if let Route::Unclear(why) = &route {
         return Err(unchanged(why.clone()));
@@ -141,8 +141,8 @@ async fn run(request: &Request) -> Result<Value, String> {
                 "This build is newer than the latest release; --allow-downgrade installs {latest}."
             ));
         }
-        if route.manager().is_none() {
-            finish_an_earlier_upgrade(&home, &binary, &running, request.check, &mut answer).await;
+        if let (None, Some(home)) = (route.manager(), &home) {
+            finish_an_earlier_upgrade(home, &binary, &running, request.check, &mut answer).await;
         }
         answer["skills"] = skills::report().await;
         return Ok(answer);
@@ -163,6 +163,10 @@ async fn run(request: &Request) -> Result<Value, String> {
         return Ok(answer);
     }
 
+    let home = match home {
+        Some(home) => home,
+        None => commands::home().map_err(unchanged)?,
+    };
     install_release(&home, &source, &release, &binary, started_as, &running).await
 }
 
@@ -196,21 +200,25 @@ async fn install_release(
         .await
         .map_err(unchanged)?;
     let mut lock = folder::Lock::take(folder).map_err(unchanged)?;
+    // From here on the lock file exists and leftovers may be gone: only the binary is known to be as it was.
+    let kept = |what: String| format!("{what}. The installed binary was not changed.");
     if identity(binary)? != started_as {
-        return Err(unchanged(format!(
+        return Err(kept(format!(
             "{} changed while this upgrade ran, by another upgrade or install; run quadratique upgrade again",
             binary.display()
         )));
     }
     let leftovers = folder::remove_leftovers(folder, &lock);
     let staging = prepare(source, release, target, folder).await?;
-    // The last look before the rename decides which generation, if any, is stopped after it.
-    let before = store_opens(home, latest, running)
+    // No server may start between the last look and the stop: `start.lock` is held from before the look through the
+    // rename and the stop, and given up before a service's own start.
+    let start = background::reserve_start(home)
         .await
-        .map_err(unchanged)?;
+        .map_err(|error| kept(error.to_string()))?;
+    let before = store_opens(home, latest, running).await.map_err(kept)?;
     let replaced = (started_as.0, started_as.1);
-    lock.record_replaced(replaced).map_err(unchanged)?;
-    staging.install(binary).map_err(unchanged)?;
+    lock.record_replaced(replaced).map_err(kept)?;
+    staging.install(binary).map_err(kept)?;
 
     let mut answer = json!({
         "from": running.to_string(),
@@ -224,7 +232,7 @@ async fn install_release(
     if !leftovers.left.is_empty() {
         answer["leftBesideTheBinary"] = json!(leftovers.left);
     }
-    match server::bring_up(home, binary, &latest.to_string(), replaced, before).await {
+    match server::bring_up(home, binary, &latest.to_string(), replaced, before, start).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
@@ -252,7 +260,7 @@ async fn install_release(
 /// After a run that was stopped between the rename and the stop, the binary is current while the server of this home
 /// may still run the replaced file: stop it now. The record of the replaced file counts only in an install folder that
 /// no other account can change, and only for a server that says, over the socket, that it was started from this path
-/// and from that file.
+/// and from that file. With `check`, nothing is created or stopped: the record is read without the lock.
 #[cfg(unix)]
 async fn finish_an_earlier_upgrade(
     home: &Home,
@@ -278,43 +286,78 @@ async fn finish_an_earlier_upgrade(
         );
         return;
     }
-    let mut lock = match folder::Lock::take(folder) {
-        Ok(lock) => lock,
-        Err(problem) => {
-            note(answer, problem);
-            return;
-        }
-    };
-    let Some(replaced) = lock.replaced() else {
+    if folder::recorded_replaced(folder).is_none() {
         return;
+    }
+    let (replaced, _lock, start) = if check {
+        let Some(replaced) = folder::recorded_replaced(folder) else {
+            return;
+        };
+        (replaced, None, None)
+    } else {
+        let mut lock = match folder::Lock::take(folder) {
+            Ok(lock) => lock,
+            Err(problem) => {
+                note(answer, problem);
+                return;
+            }
+        };
+        let Some(replaced) = lock.replaced() else {
+            return;
+        };
+        let start = match background::reserve_start(home).await {
+            Ok(start) => start,
+            Err(error) => {
+                note(answer, error.to_string());
+                return;
+            }
+        };
+        (replaced, Some(lock), Some(start))
     };
     let seen = match server::look(home).await {
         Ok(seen) => seen,
         Err(problem) => {
-            answer["warnings"] = json!([format!(
-                "the server of this home cannot be reached: {problem}"
-            )]);
+            note(
+                answer,
+                format!("the server of this home cannot be reached: {problem}"),
+            );
             return;
         }
     };
-    let server::Before::Socket(identity) = &seen.before else {
-        return;
+    let identity = match &seen.before {
+        server::Before::Socket(identity) => identity,
+        server::Before::Nobody => {
+            drop(start);
+            if let Some(stopped) = server::service_not_running(binary).await {
+                note(answer, stopped);
+            }
+            return;
+        }
+        _ => return,
     };
     if !server::left_on_the_replaced_file(identity, binary, replaced) {
         return;
     }
-    if check {
+    let Some(start) = start else {
         answer["server"] = json!(format!(
             "the server of this home (pid {}) runs the file that an earlier upgrade replaced; quadratique upgrade stops it",
             identity.pid
         ));
         return;
-    }
-    match server::bring_up(home, binary, &running.to_string(), replaced, seen.before).await {
+    };
+    match server::bring_up(
+        home,
+        binary,
+        &running.to_string(),
+        replaced,
+        seen.before,
+        start,
+    )
+    .await
+    {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
-    drop(lock);
 }
 
 #[cfg(not(unix))]
@@ -424,7 +467,7 @@ async fn prepare(
     target: &str,
     folder: &Path,
 ) -> Result<folder::Staging, String> {
-    let unchanged = |what: String| format!("{what}. Nothing was changed.");
+    let unchanged = |what: String| format!("{what}. The installed binary was not changed.");
     let latest = release.version.to_string();
     let files = target::files(&latest, target);
     let asset = release.assets.get(&files.archive).ok_or_else(|| {

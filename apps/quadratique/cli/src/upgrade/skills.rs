@@ -38,7 +38,9 @@ pub async fn report() -> Value {
 }
 
 async fn projects() -> Result<Vec<PathBuf>, String> {
-    let home = commands::home()?;
+    let Some(home) = commands::existing_home()? else {
+        return Ok(Vec::new());
+    };
     if let Some(repositories) = from_the_server(&home).await? {
         return Ok(repositories);
     }

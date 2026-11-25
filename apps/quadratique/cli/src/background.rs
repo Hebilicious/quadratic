@@ -757,7 +757,7 @@ impl Deadline {
 /// An observation within what is left of `deadline`, or nothing once it has passed. A probe that the deadline cut
 /// short is the deadline, not a stalled server.
 #[cfg(unix)]
-async fn observe_by(home: &Home, deadline: Deadline) -> Result<Option<Observed>, LifeError> {
+pub async fn observe_by(home: &Home, deadline: Deadline) -> Result<Option<Observed>, LifeError> {
     let Some(left) = deadline.left() else {
         return Ok(None);
     };
@@ -982,7 +982,8 @@ impl StartLockHeld {
     }
 }
 
-/// `quadratique serve` holds `start.lock` while its server starts, as every start does.
+/// `quadratique serve` holds `start.lock` while its server starts, as every start does; `quadratique upgrade` holds it
+/// from its last look through the rename and the stop.
 pub async fn reserve_start(home: &Home) -> Result<StartLockHeld, LifeError> {
     let deadline = Deadline::after(START_LIMIT);
     let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
@@ -1104,15 +1105,16 @@ async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError>
 }
 
 /// Stops generation `generation` of this home's server, and no other: `quadratique upgrade` saw it before it replaced
-/// the binary. Under `start.lock`, within `deadline`. Another generation that serves now is refused (`409`, or seen
-/// before the request), a server from before the socket is never signalled, and a free home is `NotRunning`.
+/// the binary, with `start.lock` held (`held`) since before it looked. Within `deadline`. Another generation that serves
+/// now is refused (`409`, or seen before the request), a server from before the socket is never signalled, and a free
+/// home is `NotRunning`.
 #[cfg(unix)]
 pub async fn stop_generation(
     home: &Home,
+    _held: &StartLockHeld,
     generation: &str,
     deadline: Deadline,
 ) -> Result<Stopped, LifeError> {
-    let _start_lock = await_start_lock(home, deadline, Attempt::Stop).await?;
     stop_holding(
         home,
         deadline,

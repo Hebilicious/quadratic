@@ -556,8 +556,13 @@ async fn server(dry_run: bool) -> Result<Result<HttpClient, String>, i32> {
     if !dry_run {
         return crate::remote(crate::route::McpTool::Absent).await.map(Ok);
     }
-    let home = match commands::home() {
-        Ok(home) => home,
+    let home = match commands::existing_home() {
+        Ok(Some(home)) => home,
+        Ok(None) => {
+            return Ok(Err(
+                "no Quadratique server runs, and a dry run starts none".to_owned()
+            ));
+        }
         Err(message) => return Ok(Err(message)),
     };
     let runtime = match running_server(&home).await {

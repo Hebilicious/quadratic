@@ -8,10 +8,13 @@
 //! the generation seen before: a `409` means another generation serves now, and nothing is stopped. No process is
 //! signalled from here.
 //!
+//! `start.lock` is held from before the last look through the rename and the stop, so no server starts in between.
+//!
 //! Until the cutover (QUA-60), `quadratique.service` may run that server. When the unit's main process is the
-//! generation's process, the upgrade stops the generation the same way, waits for systemd to see its main process
-//! leave, and starts the unit again: its `serve --take-over` now runs the new build. A unit with
-//! `Restart=on-failure` does not start a server that exited 0 by itself.
+//! generation's process, the upgrade stops the generation the same way, gives up `start.lock`, waits for systemd to see
+//! its main process leave, and starts the unit again: its `serve --take-over` now runs the new build. A unit with
+//! `Restart=on-failure` does not start a server that exited 0 by itself. A server that a command starts between the
+//! stop and the unit's take-over is replaced by the take-over; the answer names each one the upgrade saw.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -19,13 +22,29 @@ use std::time::{Duration, Instant};
 
 use quadratique_server::server::{Identity, Started};
 
-use crate::background::{self, Deadline, Home, Observed, Stopped};
+use crate::background::{self, Deadline, Home, Observed, StartLockHeld, Stopped};
 use crate::process::{FileId, file_id};
 
 const SERVICE: &str = "quadratique.service";
+/// For a `systemctl` call that is not part of the bring-up's one deadline.
 const SYSTEMCTL_LIMIT: Duration = Duration::from_secs(120);
 /// One deadline for the whole step after the rename: the stop, the unit's start and its readiness.
 const BRING_UP_LIMIT: Duration = Duration::from_secs(60);
+/// A debug build, which the tests run, takes a shorter limit from this variable, in milliseconds, as it takes its
+/// release source from `QUADRATIQUE_UPGRADE_SOURCE`. No release build reads it.
+#[cfg(debug_assertions)]
+const BRING_UP_VARIABLE: &str = "QUADRATIQUE_UPGRADE_BRING_UP_MS";
+
+fn bring_up_limit() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = std::env::var(BRING_UP_VARIABLE)
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return Duration::from_millis(milliseconds);
+    }
+    BRING_UP_LIMIT
+}
 const POLL: Duration = Duration::from_millis(100);
 /// The store schema of every build before servers reported theirs.
 const SCHEMA_BEFORE_REPORTS: i64 = 1;
@@ -113,12 +132,15 @@ pub fn left_on_the_replaced_file(identity: &Identity, binary: &Path, replaced: F
 }
 
 /// What was done after the rename, or the state that was left with what to run. `Err` when the person must act.
+/// `start` is `start.lock`, held since before the look that gave `before`; it is given up before this returns, and
+/// before a service's own start.
 pub async fn bring_up(
     home: &Home,
     binary: &Path,
     version: &str,
     replaced: FileId,
     before: Before,
+    start: StartLockHeld,
 ) -> Result<String, String> {
     let identity = match before {
         Before::Nobody => return Ok(format!("no server runs for this home; {NEXT}")),
@@ -138,7 +160,7 @@ pub async fn bring_up(
             executable.path.display()
         ));
     }
-    stop_replaced(home, binary, version, &identity).await
+    stop_replaced(home, binary, version, &identity, start).await
 }
 
 /// The legacy row's own account of the server and of what stops it: `server stop` with its proof, or the person.
@@ -152,17 +174,19 @@ fn legacy(home: &Home) -> String {
 }
 
 /// Stops the generation seen before the rename, which ran the replaced file. Under the service, starts the unit again.
+/// Every step shares one deadline.
 async fn stop_replaced(
     home: &Home,
     binary: &Path,
     version: &str,
     identity: &Identity,
+    start: StartLockHeld,
 ) -> Result<String, String> {
     let pid = identity.pid;
     let generation = identity.generation.clone().unwrap_or_default();
     let earlier = format!("the server of the earlier build (pid {pid}, generation {generation})");
-    let deadline = Instant::now() + BRING_UP_LIMIT;
-    match inspect_service(SYSTEMCTL_LIMIT).await {
+    let deadline = Instant::now() + bring_up_limit();
+    match inspect_service(left(deadline)).await {
         Inspected::Unknown(problem) => Err(format!(
             "{SERVICE} could not be inspected ({problem}), so {earlier} was left running. Run: quadratique server stop, then systemctl --user start {SERVICE} if the service ran it"
         )),
@@ -175,8 +199,18 @@ async fn stop_replaced(
                     "{SERVICE} runs {earlier}, and its unit changed on disk since systemd loaded it; nothing was stopped. Run: systemctl --user daemon-reload && systemctl --user restart {SERVICE}"
                 ));
             }
-            stopped(home, &generation, deadline, &earlier).await?;
+            stopped(home, &start, &generation, deadline, &earlier).await?;
+            // The unit's `serve --take-over` takes `start.lock` too.
+            drop(start);
             service_left(main_pid, deadline).await?;
+            let mut others = Others::new(&generation);
+            others.see(observed_by(home, deadline).await, None);
+            if left(deadline).is_zero() {
+                return Err(not_ready(
+                    &earlier,
+                    "the deadline passed before the unit's start",
+                ));
+            }
             run_systemctl(&["start", SERVICE], left(deadline))
                 .await
                 .map_err(|problem| {
@@ -185,10 +219,11 @@ async fn stop_replaced(
                         problem.unwrap_or_else(|| "systemctl is missing".to_owned())
                     )
                 })?;
-            ready(home, binary, version, deadline).await
+            ready(home, binary, version, deadline, &earlier, others).await
         }
         Inspected::NoService | Inspected::Service { .. } => {
-            let what = stopped(home, &generation, deadline, &earlier).await?;
+            let what = stopped(home, &start, &generation, deadline, &earlier).await?;
+            drop(start);
             match identity.started {
                 Some(Started::Serve) => Err(format!(
                     "{what}. It was started with `quadratique serve`: restart it the way you started it (your supervisor, your terminal), and it runs this build"
@@ -202,16 +237,17 @@ async fn stop_replaced(
 /// Asks the generation to stop and waits until it lets go of the home. What happened, or why nothing was stopped.
 async fn stopped(
     home: &Home,
+    start: &StartLockHeld,
     generation: &str,
     deadline: Instant,
     earlier: &str,
 ) -> Result<String, String> {
-    match background::stop_generation(home, generation, Deadline::at(deadline)).await {
+    match background::stop_generation(home, start, generation, Deadline::at(deadline)).await {
         Ok(Stopped::Ended { .. }) => Ok(format!("stopped {earlier}")),
         Ok(Stopped::NotRunning) => Ok(format!("{earlier} had stopped already")),
         Ok(Stopped::Closing { .. }) => Err(format!(
             "{earlier} accepted the stop and still holds this home after {} seconds. Run: quadratique server status",
-            BRING_UP_LIMIT.as_secs()
+            bring_up_limit().as_secs()
         )),
         Err(error) => Err(error.to_string()),
     }
@@ -221,11 +257,71 @@ fn left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
+/// One observation of the socket within what is left of the deadline: `None` once it has passed.
+async fn observed_by(home: &Home, deadline: Instant) -> Option<Result<Observed, String>> {
+    match background::observe_by(home, Deadline::at(deadline)).await {
+        Ok(Some(observed)) => Some(Ok(observed)),
+        Ok(None) => None,
+        Err(error) => Some(Err(error.to_string())),
+    }
+}
+
+fn not_ready(earlier: &str, seen: &str) -> String {
+    format!(
+        "{earlier} was stopped, and the new build did not answer for this home as the main process of {SERVICE} within {} seconds ({seen}). Run: systemctl --user status {SERVICE}",
+        bring_up_limit().as_secs()
+    )
+}
+
+/// The generations other than the stopped one that the upgrade saw serving while the service started: a command
+/// started each one after the stop, and the unit's take-over replaces it.
+struct Others {
+    stopped: String,
+    seen: Vec<(String, u32)>,
+}
+
+impl Others {
+    fn new(stopped: &str) -> Others {
+        Others {
+            stopped: stopped.to_owned(),
+            seen: Vec::new(),
+        }
+    }
+
+    /// Records a server on the socket that is neither the stopped generation nor the unit's main process.
+    fn see(&mut self, observed: Option<Result<Observed, String>>, main_pid: Option<u32>) {
+        let Some(Ok(Observed::Serving { identity, .. } | Observed::Newer(identity))) = observed
+        else {
+            return;
+        };
+        let generation = identity.generation.unwrap_or_default();
+        if generation != self.stopped
+            && Some(identity.pid) != main_pid
+            && !self.seen.iter().any(|(seen, _)| *seen == generation)
+        {
+            self.seen.push((generation, identity.pid));
+        }
+    }
+
+    /// What the answer says of them, given the generation that serves at the end.
+    fn told(&self, serving: &str) -> String {
+        self.seen
+            .iter()
+            .filter(|(generation, _)| generation != serving)
+            .map(|(generation, pid)| {
+                format!(
+                    ". Generation {generation} (pid {pid}), which a command started after the earlier build stopped, was replaced by the take-over of {SERVICE}, whose server serves now"
+                )
+            })
+            .collect()
+    }
+}
+
 /// Waits until systemd no longer names `main_pid` as the unit's main process: the unit is inactive, or systemd itself
 /// started another.
 async fn service_left(main_pid: u32, deadline: Instant) -> Result<(), String> {
     loop {
-        let seen = match inspect_service(left(deadline).max(POLL)).await {
+        let seen = match inspect_service(left(deadline)).await {
             Inspected::NoService => return Ok(()),
             Inspected::Service { main_pid: now, .. } if now != main_pid => return Ok(()),
             Inspected::Service { .. } => format!("its main process is still {main_pid}"),
@@ -234,7 +330,7 @@ async fn service_left(main_pid: u32, deadline: Instant) -> Result<(), String> {
         if left(deadline).is_zero() {
             return Err(format!(
                 "the server of the earlier build stopped, and {SERVICE} did not let go of it within {} seconds ({seen}). Run: systemctl --user start {SERVICE}",
-                BRING_UP_LIMIT.as_secs()
+                bring_up_limit().as_secs()
             ));
         }
         tokio::time::sleep(POLL.min(left(deadline))).await;
@@ -312,40 +408,80 @@ async fn inspect_service(limit: Duration) -> Inspected {
 
 /// Waits until the server on the home's socket is the service's main process and says that it runs the installed
 /// file. The identity comes over the verified socket, the main process from systemd: no process is read through
-/// `/proc`.
+/// `/proc`. Each call gets what is left of the one deadline.
 async fn ready(
     home: &Home,
     binary: &Path,
     version: &str,
     deadline: Instant,
+    earlier: &str,
+    mut others: Others,
 ) -> Result<String, String> {
     let installed = file_id(binary);
     let mut seen = "nothing was seen yet".to_owned();
     loop {
         if left(deadline).is_zero() {
-            return Err(format!(
-                "{SERVICE} was started again, but the new build did not answer for this home as its main process within {} seconds ({seen}). Run: systemctl --user status {SERVICE}",
-                BRING_UP_LIMIT.as_secs()
-            ));
+            return Err(not_ready(earlier, &seen));
         }
         match inspect_service(left(deadline)).await {
-            Inspected::Service { main_pid, .. } => match background::observe(home).await {
-                Ok(Observed::Serving { identity, .. } | Observed::Newer(identity))
+            Inspected::Service { main_pid, .. } => match observed_by(home, deadline).await {
+                None => seen = "the deadline passed during a look at the socket".to_owned(),
+                Some(Ok(Observed::Serving { identity, .. } | Observed::Newer(identity)))
                     if identity.pid == main_pid
                         && installed.is_some_and(|installed| runs(&identity, installed)) =>
                 {
+                    let serving = identity.generation.unwrap_or_default();
                     return Ok(format!(
-                        "stopped the earlier build and started {SERVICE} again; {version} serves this home (pid {main_pid})"
+                        "stopped the earlier build and started {SERVICE} again; {version} serves this home (pid {main_pid}, generation {serving}){}",
+                        others.told(&serving)
                     ));
                 }
-                Ok(observed) => seen = format!("the home's socket shows {observed:?}"),
-                Err(error) => seen = error.to_string(),
+                Some(observed) => {
+                    seen = match &observed {
+                        Ok(observed) => format!("the home's socket shows {observed:?}"),
+                        Err(error) => error.clone(),
+                    };
+                    others.see(Some(observed), Some(main_pid));
+                }
             },
             Inspected::NoService => seen = format!("{SERVICE} is not active"),
             Inspected::Unknown(problem) => seen = problem,
         }
         tokio::time::sleep(POLL.min(left(deadline))).await;
     }
+}
+
+/// On a run that finds no server: when `quadratique.service` is loaded, not active, and starts this binary, what to
+/// run. It starts nothing: the person may have stopped the unit on purpose.
+pub async fn service_not_running(binary: &Path) -> Option<String> {
+    let shown = run_systemctl(
+        &[
+            "show",
+            SERVICE,
+            "--property=LoadState,ActiveState,ExecStart",
+        ],
+        SYSTEMCTL_LIMIT,
+    )
+    .await
+    .ok()?;
+    let value = |name: &str| {
+        shown
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let runs_this_binary = value("ExecStart")
+        .split(" ; ")
+        .find_map(|part| part.trim_start_matches("{ ").strip_prefix("path="))
+        .is_some_and(|path| Path::new(path.trim()) == binary);
+    let active = value("ActiveState");
+    (value("LoadState") == "loaded" && active != "active" && active != "activating" && runs_this_binary)
+        .then(|| {
+            format!(
+                "no server runs for this home, and {SERVICE}, which starts this binary, is not running ({active}). If an earlier upgrade stopped it, start it: systemctl --user start {SERVICE}. Otherwise the next quadratique command starts this build"
+            )
+        })
 }
 
 /// The binary that the service's main process runs, when the service runs one. It only describes: nothing is

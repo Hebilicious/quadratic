@@ -458,6 +458,18 @@ fn refused(run: &Run, words: &str) {
     assert!(run.stderr.contains("Nothing was changed."), "{run:?}");
 }
 
+/// A refusal after the upgrade took its lock: the lock file exists and leftovers may be gone, so
+/// it says only that the installed binary was not changed.
+fn refused_after_the_lock(run: &Run, words: &str) {
+    assert_ne!(run.code, 0, "{run:?}");
+    assert!(run.stderr.contains(words), "{run:?}");
+    assert!(
+        run.stderr.contains("The installed binary was not changed.")
+            && !run.stderr.contains("Nothing was changed."),
+        "{run:?}"
+    );
+}
+
 #[test]
 fn upgrade_installs_the_latest_release_verified_by_the_api_s_digest_and_the_new_build_reports() {
     let releases = Releases::start();
@@ -568,11 +580,11 @@ fn a_failed_download_leaves_the_old_binary_in_place_and_working() {
     releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
 
     releases.set(&archive, Reply::Status(500));
-    refused(&installed.upgrade(&releases, &[]), "answered 500");
+    refused_after_the_lock(&installed.upgrade(&releases, &[]), "answered 500");
     installed.still_runs();
 
     releases.set(&archive, Reply::Cut(b"the start of an archive".to_vec()));
-    refused(&installed.upgrade(&releases, &[]), "The download of");
+    refused_after_the_lock(&installed.upgrade(&releases, &[]), "The download of");
     installed.still_runs();
 }
 
@@ -583,14 +595,14 @@ fn an_archive_is_installed_only_with_the_digest_that_the_api_gives_for_it() {
     let published = assets(LATEST, &new_binary(LATEST));
 
     releases.publish_with(LATEST, published.clone(), Digest256::Wrong);
-    refused(
+    refused_after_the_lock(
         &installed.upgrade(&releases, &[]),
         "does not match the SHA-256 that the GitHub API gives for it",
     );
     installed.still_runs();
 
     releases.publish_with(LATEST, published, Digest256::Absent);
-    refused(
+    refused_after_the_lock(
         &installed.upgrade(&releases, &[]),
         "gives no SHA-256 digest",
     );
@@ -609,7 +621,7 @@ fn a_release_without_an_archive_for_this_platform_changes_nothing() {
         )],
     );
 
-    refused(&installed.upgrade(&releases, &[]), "for this platform");
+    refused_after_the_lock(&installed.upgrade(&releases, &[]), "for this platform");
     installed.still_runs();
 }
 
@@ -625,7 +637,7 @@ fn an_archive_with_an_entry_outside_its_folder_is_refused() {
         ]);
         releases.publish(LATEST, vec![(archive_name(LATEST), bytes)]);
 
-        refused(&installed.upgrade(&releases, &[]), "is refused");
+        refused_after_the_lock(&installed.upgrade(&releases, &[]), "is refused");
         installed.still_runs();
     }
 }
@@ -644,7 +656,7 @@ fn a_new_binary_that_does_not_run_says_another_version_or_too_much_is_not_instal
         ),
     ] {
         releases.publish(LATEST, assets(LATEST, &binary));
-        refused(&installed.upgrade(&releases, &[]), words);
+        refused_after_the_lock(&installed.upgrade(&releases, &[]), words);
         installed.still_runs();
     }
 }
@@ -660,7 +672,7 @@ fn a_download_reaches_only_the_release_source() {
         &archive,
         Reply::Redirect("http://127.0.0.1:1/elsewhere".to_owned()),
     );
-    refused(
+    refused_after_the_lock(
         &installed.upgrade(&releases, &[]),
         "this request may reach only",
     );
@@ -672,7 +684,7 @@ fn a_download_reaches_only_the_release_source() {
         "digest": format!("sha256:{}", "0".repeat(64)),
     }]});
     releases.set(LATEST_PATH, Reply::Body(described.to_string().into_bytes()));
-    refused(
+    refused_after_the_lock(
         &installed.upgrade(&releases, &[]),
         "is not a release download",
     );
@@ -853,7 +865,7 @@ fn a_binary_replaced_while_the_upgrade_ran_is_not_replaced_again() {
         ),
     );
 
-    refused(
+    refused_after_the_lock(
         &installed.upgrade(&releases, &[]),
         "changed while this upgrade ran",
     );
@@ -892,9 +904,14 @@ fn a_staging_folder_left_by_a_killed_upgrade_is_removed_by_the_next() {
 /// A fake `systemctl` that runs `quadratique.service` as systemd would: its main process is the
 /// pid in `<state>/pid` while that process lives (a zombie has exited), and a start of an
 /// inactive unit starts the installed binary's server with take-over. It logs every call.
+///
+/// With a file `<state>/start-another`, the first `show` that finds the unit inactive first runs a
+/// command of the installed binary, which starts a server on demand and returns once it is ready,
+/// and writes that server's `server status` to `<state>/another.json`: a command that started a
+/// server between the upgrade's stop and the unit's start.
 fn service(state: &Path, binary: &Path, needs_reload: bool) -> String {
     format!(
-        "#!/bin/sh\nstate={state}\necho \"$*\" >> \"$state/calls\"\nalive() {{ pid=$(cat \"$state/pid\" 2>/dev/null) && [ -r \"/proc/$pid/stat\" ] && [ \"$(sed 's/^.*) //' \"/proc/$pid/stat\" | cut -c1)\" != Z ]; }}\ncase \"$1 $2\" in\n'--user show') if alive; then echo LoadState=loaded; echo ActiveState=active; echo \"MainPID=$pid\"; else echo LoadState=loaded; echo ActiveState=inactive; echo MainPID=0; fi; echo NeedDaemonReload={reload} ;;\n'--user start') alive || {{ nohup {binary} serve --take-over > \"$state/log\" 2>&1 & echo $! > \"$state/pid\"; }} ;;\nesac\n",
+        "#!/bin/sh\nstate={state}\necho \"$*\" >> \"$state/calls\"\nalive() {{ pid=$(cat \"$state/pid\" 2>/dev/null) && [ -r \"/proc/$pid/stat\" ] && [ \"$(sed 's/^.*) //' \"/proc/$pid/stat\" | cut -c1)\" != Z ]; }}\ncase \"$1 $2\" in\n'--user show') if alive; then echo LoadState=loaded; echo ActiveState=active; echo \"MainPID=$pid\"; else if [ -f \"$state/start-another\" ] && [ ! -f \"$state/another.json\" ]; then {binary} project list > /dev/null 2>&1; {binary} server status > \"$state/another.json\"; fi; echo LoadState=loaded; echo ActiveState=inactive; echo MainPID=0; fi; echo NeedDaemonReload={reload} ;;\n'--user start') alive || {{ nohup {binary} serve --take-over > \"$state/log\" 2>&1 & echo $! > \"$state/pid\"; }} ;;\nesac\n",
         state = state.display(),
         binary = binary.display(),
         reload = if needs_reload { "yes" } else { "no" },
@@ -941,7 +958,8 @@ fn under_the_service_the_generation_on_the_replaced_file_is_stopped_and_the_unit
     assert_eq!(
         answer["server"],
         format!(
-            "stopped the earlier build and started quadratique.service again; {CURRENT} serves this home (pid {now})"
+            "stopped the earlier build and started quadratique.service again; {CURRENT} serves this home (pid {now}, generation {})",
+            generation_of(&installed, &releases)
         ),
         "{answer}"
     );
@@ -1125,19 +1143,26 @@ fn a_server_started_with_serve_is_stopped_and_the_person_reads_how_to_restart_it
 }
 
 const OTHER_GENERATION: &str = "fedcba9876543210fedcba9876543210";
-
-/// A fake server on the home's socket that says it runs the installed file, in generation
-/// `GENERATION`, and answers every stop request with `409` naming another generation: the
-/// generation the upgrade saw is no longer the one that serves. It says how many stop requests
-/// reached it.
-struct Replaced {
-    stops: Arc<Mutex<u32>>,
-}
-
 const GENERATION: &str = "0123456789abcdef0123456789abcdef";
 
-impl Replaced {
-    fn start(installed: &Installed) -> Replaced {
+/// What a [`FakeServer`] answers to a stop request of generation `GENERATION`.
+#[derive(Clone, Copy, PartialEq)]
+enum OnStop {
+    /// `409` naming another generation: the generation the upgrade saw no longer serves.
+    Conflict,
+    /// `202`, then it stops listening, as a server does that shuts down.
+    Accept,
+}
+
+/// A fake server on the home's socket that says it runs the installed file, in generation
+/// `GENERATION`. A stop request of any other generation gets `400`. It records the generation of
+/// each stop request it receives.
+struct FakeServer {
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeServer {
+    fn start(installed: &Installed, on_stop: OnStop) -> FakeServer {
         use std::os::unix::fs::MetadataExt;
 
         let path = installed.home.path().join("server.sock");
@@ -1157,8 +1182,8 @@ impl Replaced {
             "url": "http://127.0.0.1:9/cli",
         })
         .to_string();
-        let stops = Arc::new(Mutex::new(0));
-        let counted = Arc::clone(&stops);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&asked);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
@@ -1175,12 +1200,25 @@ impl Replaced {
                 }
                 let mut body = vec![0; length];
                 let _ = reader.read_exact(&mut body);
-                let (status, answer) = if first.starts_with("POST /server/stop ") {
-                    *counted.lock().unwrap() += 1;
-                    (
-                        "409 Conflict",
-                        json!({ "generation": OTHER_GENERATION }).to_string(),
-                    )
+                let stop = first.starts_with("POST /server/stop ");
+                let (status, answer) = if stop {
+                    let generation =
+                        serde_json::from_slice::<Value>(&body).unwrap_or_default()["generation"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                    recorded.lock().unwrap().push(generation.clone());
+                    match on_stop {
+                        _ if generation != GENERATION => ("400 Bad Request", String::new()),
+                        OnStop::Conflict => (
+                            "409 Conflict",
+                            json!({ "generation": OTHER_GENERATION }).to_string(),
+                        ),
+                        OnStop::Accept => (
+                            "202 Accepted",
+                            json!({ "generation": GENERATION }).to_string(),
+                        ),
+                    }
                 } else {
                     ("200 OK", identity.clone())
                 };
@@ -1189,13 +1227,16 @@ impl Replaced {
                     "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
                     answer.len()
                 );
+                if stop && status.starts_with("202") {
+                    return;
+                }
             }
         });
-        Replaced { stops }
+        FakeServer { asked }
     }
 
-    fn stops(&self) -> u32 {
-        *self.stops.lock().unwrap()
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
     }
 }
 
@@ -1205,19 +1246,225 @@ fn a_stop_answered_with_409_stops_nothing_and_says_another_generation_serves() {
     let installed = Installed::file();
     let binary = new_binary(LATEST);
     releases.publish(LATEST, assets(LATEST, &binary));
-    let fake = Replaced::start(&installed);
+    let fake = FakeServer::start(&installed, OnStop::Conflict);
 
     let answer = installed.upgrade(&releases, &[]).ok();
 
     assert_eq!(answer["to"], LATEST, "{answer}");
     assert_eq!(installed.bytes(), binary);
-    assert_eq!(fake.stops(), 1, "{answer}");
+    assert_eq!(fake.asked(), [GENERATION], "{answer}");
     assert_eq!(
         answer["warnings"],
         json!([format!(
             "the server of this home is no longer generation {GENERATION}, which this command asked to stop: another generation ({OTHER_GENERATION}) serves now. Nothing was stopped."
         )]),
         "{answer}"
+    );
+}
+
+/// A command holds `start.lock` while the server it starts becomes ready. The upgrade waits for
+/// `start.lock` before its last look, so it sees that server, which runs the file it replaces, and
+/// stops it after the rename. Without the wait it would have looked first, seen nobody, and left
+/// that server on the replaced file.
+#[test]
+fn a_server_that_becomes_ready_while_the_upgrade_waits_for_start_lock_is_seen_and_stopped() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    let binary = new_binary(LATEST);
+    releases.publish(LATEST, assets(LATEST, &binary));
+    let starter = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(installed.home.path().join("start.lock"))
+        .unwrap();
+    starter.lock().unwrap();
+    let mut watch = Watch::of(&installed.home);
+    let upgrade = installed.quadratique(&releases).args(["upgrade"]).spawn();
+
+    watch.await_steps(&[Step::Opened("start.lock")]);
+    let fake = FakeServer::start(&installed, OnStop::Accept);
+    drop(starter);
+    let answer = upgrade.finish().ok();
+
+    assert_eq!(answer["to"], LATEST, "{answer}");
+    assert_eq!(installed.bytes(), binary);
+    assert_eq!(fake.asked(), [GENERATION], "{answer}");
+    assert_eq!(
+        answer["server"],
+        format!(
+            "stopped the server of the earlier build (pid 4242, generation {GENERATION}); the next quadratique command starts this build"
+        ),
+        "{answer}"
+    );
+}
+
+/// A command starts a server between the upgrade's stop and the unit's start (the fake runs it
+/// when the upgrade first finds the unit inactive). The unit's take-over replaces it, and the
+/// answer names it.
+#[test]
+fn a_server_started_between_the_stop_and_the_service_start_is_named_in_the_answer() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
+    let earlier = installed.server_of_an_earlier_build(&releases);
+    let state = installed.root().join("systemd");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("pid"), earlier.to_string()).unwrap();
+    std::fs::write(state.join("start-another"), "").unwrap();
+    installed.systemctl(&service(&state, &installed.binary, false));
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    let another: Value =
+        serde_json::from_str(&std::fs::read_to_string(state.join("another.json")).unwrap())
+            .unwrap();
+    let (generation, pid) = (
+        another["generation"].as_str().unwrap(),
+        another["pid"].as_u64().unwrap(),
+    );
+    let now: u32 = std::fs::read_to_string(state.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let told = answer["server"].as_str().unwrap_or_default();
+    assert!(
+        told.starts_with("stopped the earlier build and started quadratique.service again")
+            && told.contains(&format!("serves this home (pid {now}, "))
+            && told.contains(&format!(
+                "Generation {generation} (pid {pid}), which a command started after the earlier build stopped, was replaced by the take-over of quadratique.service, whose server serves now"
+            )),
+        "{answer}"
+    );
+    await_exit(u32::try_from(pid).unwrap());
+    await_exit(earlier);
+    assert_eq!(installed.home.servers(), vec![now]);
+}
+
+/// The bring-up has one deadline, and each `systemctl` call gets only what is left of it: a
+/// `systemctl show` that never answers ends at the deadline (1.5 seconds in this debug build),
+/// not at a limit of its own, and nothing is stopped.
+#[test]
+fn a_systemctl_that_never_answers_ends_at_the_bring_up_deadline_and_stops_nothing() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
+    let fake = FakeServer::start(&installed, OnStop::Accept);
+    let never_written = installed.root().join("never-written");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&never_written)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    installed.systemctl(&format!(
+        "#!/bin/sh\nread -r _ < {}\n",
+        never_written.display()
+    ));
+
+    let answer = installed
+        .quadratique(&releases)
+        .env("QUADRATIQUE_UPGRADE_BRING_UP_MS", "1500")
+        .args(["upgrade"])
+        .run()
+        .ok();
+
+    let warning = answer["warnings"][0].as_str().unwrap_or_default();
+    assert!(
+        warning.contains("quadratique.service could not be inspected")
+            && warning.contains("gave no answer within 1 seconds")
+            && warning.contains("was left running"),
+        "{answer}"
+    );
+    assert!(fake.asked().is_empty(), "{answer}");
+}
+
+/// A fake `systemctl` whose `quadratique.service` is loaded, inactive, and starts `binary`.
+fn inactive_service(state: &Path, binary: &Path) -> String {
+    format!(
+        "#!/bin/sh\necho \"$*\" >> {state}/calls\ncase \"$1 $2\" in\n'--user show') echo LoadState=loaded; echo ActiveState=inactive; echo MainPID=0; echo NeedDaemonReload=no; echo 'ExecStart={{ path={binary} ; argv[]={binary} serve --take-over ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }}' ;;\nesac\n",
+        state = state.display(),
+        binary = binary.display(),
+    )
+}
+
+/// An upgrade killed after it stopped the service's server and before it started the unit again
+/// leaves the unit inactive. The next run starts nothing (the person may have stopped the unit),
+/// and says what to run; with the unit starting another binary, it says nothing of it.
+#[test]
+fn an_upgrade_killed_before_the_service_start_leaves_a_run_that_says_how_to_start_the_unit() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
+    installed.record_replaced();
+    let copy = installed.binary.with_file_name("copy");
+    copy_binary(&copy);
+    std::fs::rename(&copy, &installed.binary).unwrap();
+    let state = installed.root().join("systemd");
+    std::fs::create_dir_all(&state).unwrap();
+    installed.systemctl(&inactive_service(&state, &installed.binary));
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+    let checked = installed.upgrade(&releases, &["--check"]).ok();
+    installed.systemctl(&inactive_service(
+        &state,
+        Path::new("/elsewhere/quadratique"),
+    ));
+    let other = installed.upgrade(&releases, &[]).ok();
+
+    let warning = answer["warnings"][0].as_str().unwrap_or_default();
+    assert!(
+        warning
+            .contains("quadratique.service, which starts this binary, is not running (inactive)")
+            && warning.contains("systemctl --user start quadratique.service"),
+        "{answer}"
+    );
+    assert!(
+        checked["server"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("systemctl --user start quadratique.service"),
+        "{checked}"
+    );
+    assert!(other.get("warnings").is_none(), "{other}");
+    let calls = std::fs::read_to_string(state.join("calls")).unwrap();
+    assert!(!calls.contains("--user start"), "{calls}");
+    assert!(installed.home.servers().is_empty());
+}
+
+/// The read-only forms create neither a missing data folder nor the install lock.
+#[test]
+fn check_and_the_reports_create_no_data_folder_and_no_install_lock() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    let missing = installed.home.path().join("missing");
+    let read_only = |args: &[&str]| {
+        installed
+            .quadratique(&releases)
+            .env("QUADRATIQUE_HOME", &missing.display().to_string())
+            .args(["upgrade"])
+            .args(args)
+            .run()
+            .ok()
+    };
+
+    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
+    let up_to_date = read_only(&["--check"]);
+    let skills = read_only(&["--skills"]);
+    releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
+    let newer = read_only(&["--check"]);
+
+    assert_eq!(up_to_date["upToDate"], true, "{up_to_date}");
+    assert_eq!(newer["upToDate"], false, "{newer}");
+    assert_eq!(
+        skills["skills"],
+        json!({ "current": [], "older": [] }),
+        "{skills}"
+    );
+    assert!(!missing.exists(), "a read-only form made the data folder");
+    assert!(
+        !installed.binary.with_file_name(LOCK).exists(),
+        "a read-only form made the install lock"
     );
 }
 
