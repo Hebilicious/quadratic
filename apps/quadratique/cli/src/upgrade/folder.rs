@@ -140,8 +140,7 @@ pub struct Staging {
 impl Staging {
     pub fn create(install: &Path, bytes: &[u8]) -> Result<Staging, String> {
         let mut random = [0u8; 12];
-        rustix::rand::getrandom(&mut random, rustix::rand::GetRandomFlags::empty())
-            .map_err(|error| format!("no random name: {error}"))?;
+        getrandom::fill(&mut random).map_err(|error| format!("no random name: {error}"))?;
         let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let folder = install.join(format!("{STAGING_PREFIX}{name}"));
         std::fs::DirBuilder::new()
@@ -185,7 +184,7 @@ impl Drop for Staging {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 

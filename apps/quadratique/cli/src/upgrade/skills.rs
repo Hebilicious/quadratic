@@ -148,8 +148,6 @@ fn main_checkout(repository: &Path) -> Result<Option<PathBuf>, String> {
 /// The first record of `git worktree list --porcelain -z`: fields end with NUL, and an empty
 /// field ends the record.
 fn main_of(listed: &[u8]) -> Result<Option<PathBuf>, String> {
-    use std::os::unix::ffi::OsStrExt;
-
     let fields: Vec<&[u8]> = listed
         .split(|byte| *byte == 0)
         .take_while(|field| !field.is_empty())
@@ -160,15 +158,30 @@ fn main_of(listed: &[u8]) -> Result<Option<PathBuf>, String> {
     let path = fields
         .first()
         .and_then(|field| field.strip_prefix(b"worktree "))
-        .map(|path| PathBuf::from(std::ffi::OsStr::from_bytes(path)))
-        .ok_or("git worktree list named no main worktree")?;
+        .ok_or("git worktree list named no main worktree")
+        .and_then(path_of)?;
     if !path.is_dir() {
         return Err(format!("the main worktree {} is missing", path.display()));
     }
     Ok(Some(path))
 }
 
-#[cfg(test)]
+#[cfg(unix)]
+fn path_of(bytes: &[u8]) -> Result<PathBuf, &'static str> {
+    use std::os::unix::ffi::OsStrExt;
+
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+/// git prints paths as UTF-8 off Unix.
+#[cfg(not(unix))]
+fn path_of(bytes: &[u8]) -> Result<PathBuf, &'static str> {
+    std::str::from_utf8(bytes)
+        .map(PathBuf::from)
+        .map_err(|_| "git worktree list named a path that is not UTF-8")
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::main_of;
 

@@ -1,18 +1,23 @@
 //! `quadratique upgrade`: installs the latest release over the running binary, brings the
 //! server of this home to it, and says which repositories hold an older skill. The command makes
 //! the network requests itself; the server makes none.
+//!
+//! Installing and restarting are written for Unix. Elsewhere the releases carry no archive yet,
+//! so the code that only installs is compiled there but never reached.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 mod archive;
+#[cfg(unix)]
 mod folder;
 mod http;
 mod install;
 mod release;
 mod route;
+#[cfg(unix)]
 mod server;
 mod skills;
 mod target;
 
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -26,7 +31,6 @@ use crate::background::Home;
 use crate::commands::{self, print_json, report};
 use release::{Release, Source, Version};
 use route::Route;
-use server::Runs;
 
 pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and restarts the server of this home (through quadratique.service when systemd runs it, waiting until the new build serves; else it stops the server, so that the next command starts the new build). Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server.";
 
@@ -65,6 +69,7 @@ pub async fn upgrade(words: &[&str], io: &mut CliIo) -> i32 {
     let Some(request) = request(words) else {
         return report(io, Kind::InvalidInput, format!("Give: quadratique {USAGE}"));
     };
+    #[cfg(unix)]
     if rustix::process::geteuid().is_root() {
         return report(
             io,
@@ -86,16 +91,17 @@ pub async fn upgrade(words: &[&str], io: &mut CliIo) -> i32 {
 }
 
 /// The file as it was when this upgrade started, to tell whether another upgrade replaced it.
-fn identity(binary: &Path) -> Result<(u64, u64, u64, i64, i64), String> {
+fn identity(binary: &Path) -> Result<(u64, u64, Option<std::time::SystemTime>), String> {
     let meta = std::fs::metadata(binary)
         .map_err(|error| format!("{} cannot be read: {error}", binary.display()))?;
-    Ok((
-        meta.dev(),
-        meta.ino(),
-        meta.len(),
-        meta.mtime(),
-        meta.mtime_nsec(),
-    ))
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let file = (0, meta.len());
+    Ok((file.0, file.1, meta.modified().ok()))
 }
 
 async fn run(request: &Request) -> Result<Value, String> {
@@ -148,6 +154,27 @@ async fn run(request: &Request) -> Result<Value, String> {
         return Ok(answer);
     }
 
+    install_release(&home, &source, &release, &binary, started_as, &running).await
+}
+
+/// Installs the release over `binary`, brings the server to it, and reports the repositories.
+#[cfg(unix)]
+async fn install_release(
+    home: &Home,
+    source: &Source,
+    release: &Release,
+    binary: &Path,
+    started_as: (u64, u64, Option<std::time::SystemTime>),
+    running: &Version,
+) -> Result<Value, String> {
+    let unchanged = |what: String| format!("{what}. Nothing was changed.");
+    let latest = &release.version;
+    let Some(target) = target::THIS else {
+        return Err(unchanged(format!(
+            "The releases carry no archive for this platform ({})",
+            target::described()
+        )));
+    };
     let folder = binary.parent().unwrap_or(Path::new("/"));
     refuse_git_work_tree(folder).map_err(|_| {
         unchanged(format!(
@@ -156,16 +183,16 @@ async fn run(request: &Request) -> Result<Value, String> {
         ))
     })?;
     folder::check(folder).map_err(unchanged)?;
-    store_opens(&home, &latest, &running).map_err(unchanged)?;
+    store_opens(home, latest, running).map_err(unchanged)?;
     let lock = folder::Lock::take(folder).map_err(unchanged)?;
     let removed = folder::remove_leftovers(folder, &lock);
-    if identity(&binary)? != started_as {
+    if identity(binary)? != started_as {
         return Err(unchanged(format!(
             "{} changed while this upgrade ran, by another upgrade or install; run quadratique upgrade again",
             binary.display()
         )));
     }
-    replace(&source, &release, &binary, folder).await?;
+    replace(source, release, target, binary, folder).await?;
     drop(lock);
 
     let mut answer = json!({
@@ -177,16 +204,33 @@ async fn run(request: &Request) -> Result<Value, String> {
     if !removed.is_empty() {
         answer["removedLeftovers"] = json!(removed);
     }
-    match server::bring_up(&home, &binary, &latest.to_string()).await {
+    match server::bring_up(home, binary, &latest.to_string()).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
-    answer["skills"] = new_build_report(&binary).await;
+    answer["skills"] = new_build_report(binary).await;
     Ok(answer)
+}
+
+/// The releases carry archives for Linux only; QUA-6 brings the other platforms.
+#[cfg(not(unix))]
+async fn install_release(
+    _home: &Home,
+    _source: &Source,
+    _release: &Release,
+    _binary: &Path,
+    _started_as: (u64, u64, Option<std::time::SystemTime>),
+    _running: &Version,
+) -> Result<Value, String> {
+    Err(format!(
+        "The releases carry no archive for this platform ({}). Nothing was changed.",
+        target::described()
+    ))
 }
 
 /// After a run that was stopped between the rename and the restart, the binary is current while
 /// the server of this home still runs the earlier build: restart it now.
+#[cfg(unix)]
 async fn finish_an_earlier_upgrade(
     home: &Home,
     binary: &Path,
@@ -197,7 +241,7 @@ async fn finish_an_earlier_upgrade(
     let Some(pid) = server::home_server(home).await else {
         return;
     };
-    if server::what_runs(pid, binary) != Runs::EarlierBuild {
+    if server::what_runs(pid, binary) != server::Runs::EarlierBuild {
         return;
     }
     if check {
@@ -211,6 +255,16 @@ async fn finish_an_earlier_upgrade(
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
+}
+
+#[cfg(not(unix))]
+async fn finish_an_earlier_upgrade(
+    _home: &Home,
+    _binary: &Path,
+    _running: &Version,
+    _check: bool,
+    _answer: &mut Value,
+) {
 }
 
 /// The highest store schema that release `version` is known to open. Schemas only grow, so a
@@ -244,10 +298,11 @@ fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result<(), S
 /// not upgraded by the manager.
 async fn after_the_manager(route: &Route, binary: &Path) -> Vec<String> {
     let mut then = Vec::new();
-    if let Some(service) = server::service_binary()
-        .await
-        .filter(|service| service != binary)
-    {
+    #[cfg(unix)]
+    let service = server::service_binary().await;
+    #[cfg(not(unix))]
+    let service: Option<std::path::PathBuf> = None;
+    if let Some(service) = service.filter(|service| service != binary) {
         then.push(match route {
             Route::Mise { tool } => format!(
                 "sh \"$(mise where {tool})/install.sh\" \"$(mise which quadratique)\""
@@ -265,20 +320,16 @@ async fn after_the_manager(route: &Route, binary: &Path) -> Vec<String> {
 
 /// Downloads, checks and installs the release's binary over `binary`. On an error, `binary` is
 /// as it was and no staging folder is left.
+#[cfg(unix)]
 async fn replace(
     source: &Source,
     release: &Release,
+    target: &str,
     binary: &Path,
     folder: &Path,
 ) -> Result<(), String> {
     let unchanged = |what: String| format!("{what}. Nothing was changed.");
     let latest = release.version.to_string();
-    let Some(target) = target::THIS else {
-        return Err(unchanged(format!(
-            "The releases carry no archive for this platform ({})",
-            target::described()
-        )));
-    };
     let files = target::files(&latest, target);
     let asset = release.assets.get(&files.archive).ok_or_else(|| {
         unchanged(format!(
