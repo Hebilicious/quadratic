@@ -601,6 +601,54 @@ mod in_process {
     }
 
     #[tokio::test]
+    async fn a_run_that_adds_no_block_loads_no_board() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
+        let human = Caller {
+            actor: serde_json::from_str(HUMAN).expect("an actor"),
+            working_copy: WorkingCopy::default(),
+        };
+        let session = Session::open(
+            &application().expect("the application"),
+            "cli",
+            Arc::new(Context::new(store.clone(), human)),
+        );
+        let cancel = CancellationToken::new();
+        let created = within(
+            "project.create",
+            session.invoke(
+                "project.create",
+                json!({ "key": "DEM", "name": "Demo" }),
+                &cancel,
+            ),
+        )
+        .await;
+        assert!(matches!(created, Outcome::Value(_)), "{created:?}");
+        let import = |findings| {
+            session.invoke(
+                "findings.import",
+                json!({ "project": "DEM", "tool": "linter", "findings": findings }),
+                &cancel,
+            )
+        };
+
+        for (run, findings, loads) in [
+            ("a run without decisions", dense_run(0, 30), 0),
+            ("a run whose blocks are new", dense_run(2, 30), 1),
+            ("the same run again", dense_run(2, 30), 0),
+        ] {
+            let before = board_loads_on_the_writer_thread(&store).await;
+            let imported = within(run, import(findings)).await;
+            assert!(matches!(imported, Outcome::Value(_)), "{run}: {imported:?}");
+            assert_eq!(
+                board_loads_on_the_writer_thread(&store).await - before,
+                loads,
+                "{run}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_run_with_hundreds_of_blocks_loads_the_board_once() {
         let home = tempfile::tempdir().expect("a temporary home");
         let store = Store::open(home.path().join("workspace.db")).expect("the store opens");

@@ -299,8 +299,11 @@ impl Run {
         for (decision, blocked) in made.difference(&implied) {
             tx.remove_relation(decision, "blocks", blocked)?;
         }
-        let mut board = Board::load(tx)?;
         let added: Vec<&(String, String)> = implied.difference(&made).collect();
+        if added.is_empty() {
+            return Ok(());
+        }
+        let mut board = Board::load(tx)?;
         let changes: Vec<RelationChange> = added
             .iter()
             .map(|(decision, blocked)| RelationChange::Blocks {
