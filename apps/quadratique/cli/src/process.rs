@@ -49,15 +49,11 @@ pub fn file_id(path: &std::path::Path) -> Option<FileId> {
         .map(|meta| (meta.dev(), meta.ino()))
 }
 
-/// The file a process runs, from `/proc` (Linux only). Without a pidfd this names whatever process has the pid now:
-/// use it only to describe, never before a signal.
-#[cfg(unix)]
-pub fn running_file(pid: u32) -> Option<FileId> {
-    if cfg!(target_os = "linux") {
-        file_id(std::path::Path::new(&format!("/proc/{pid}/exe")))
-    } else {
-        None
-    }
+/// The file a process runs, from `/proc`. Without a pidfd this names whatever process has the pid now: use it only
+/// through [`Pinned`].
+#[cfg(target_os = "linux")]
+fn running_file(pid: u32) -> Option<FileId> {
+    file_id(std::path::Path::new(&format!("/proc/{pid}/exe")))
 }
 
 /// A process held by a pidfd. What `/proc/<pid>` shows while the process is alive is that process's own: its pid
@@ -169,24 +165,6 @@ impl Pinned {
             Err(Errno::SRCH) => Ok(Signalled::Gone),
             Err(error) => Err(format!("pid {} cannot be signalled: {error}", self.pid)),
         }
-    }
-
-    /// Whether the process exits within `limit`.
-    pub async fn exits_within(self, limit: std::time::Duration) -> Result<bool, String> {
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
-
-        tokio::task::spawn_blocking(move || {
-            let limit = Timespec {
-                tv_sec: i64::try_from(limit.as_secs()).unwrap_or(i64::MAX),
-                tv_nsec: i64::from(limit.subsec_nanos()),
-            };
-            let mut watched = [PollFd::new(&self.pidfd, PollFlags::IN)];
-            poll(&mut watched, Some(&limit))
-        })
-        .await
-        .map_err(|error| error.to_string())?
-        .map(|ready| ready == 1)
-        .map_err(|error| error.to_string())
     }
 }
 

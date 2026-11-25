@@ -195,8 +195,8 @@ pub fn examine(home: &Home) -> Evidence {
 
 /// Where `install.sh` of release 0.1 put the binary: `${XDG_BIN_HOME:-$HOME/.local/bin}/quadratique`. It counts only as
 /// a regular file of this account, reached without a link, in a folder that the install folder's rule accepts, and
-/// never as this binary's own file. A file that `quadratique upgrade` replaced does not count: nothing durable says
-/// which file it was (QUA-56).
+/// never as this binary's own file. A file that `quadratique upgrade` replaced does not count, and need not: an upgrade
+/// replaces the binary it runs from, and release 0.1 has no `upgrade`, so no server of release 0.1 runs such a file.
 #[cfg(target_os = "linux")]
 fn installed_binary() -> Result<crate::process::FileId, String> {
     use std::os::unix::fs::MetadataExt;
