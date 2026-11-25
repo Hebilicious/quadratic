@@ -60,11 +60,11 @@ pub fn tcp_over_ipv4(bytes: &[u8]) -> Option<TcpSocket> {
 }
 
 /// What a scan of the owner's descriptors found for one accepted connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Found {
     /// Exactly one connected socket has the peer's address as its local end and the server's as its remote end,
-    /// and it is established. It is held by this process (one of them, when `fork` shares it).
-    Holder(u32),
+    /// and it is established. These processes hold it: several when `fork` shares it, in the order of the scan.
+    Holders(Vec<u32>),
     /// No socket has both endpoints.
     Nothing,
     /// The one socket with both endpoints is not established.
@@ -86,10 +86,28 @@ pub fn holder_of(
     let distinct: BTreeSet<u64> = matching.iter().map(|(_, socket)| socket.socket).collect();
     match (distinct.len(), matching.first()) {
         (0, _) | (_, None) => Found::Nothing,
-        (1, Some((pid, socket))) if socket.state == ESTABLISHED => Found::Holder(*pid),
+        (1, Some((_, socket))) if socket.state == ESTABLISHED => {
+            Found::Holders(matching.iter().map(|(pid, _)| *pid).collect())
+        }
         (1, Some((_, socket))) => Found::NotEstablished(socket.state),
         _ => Found::Several,
     }
+}
+
+/// The account to admit for a socket that `holders` hold, read again after the scan: `own_uid` when any holder still
+/// runs as `own_uid`, else the first account that can be read. A child that shared the socket between `fork` and
+/// `exec`, and has ended since, must not hide the parent that still holds it; a process id reused by another
+/// account names that account.
+pub fn account_of_holders(
+    holders: &[u32],
+    own_uid: u32,
+    account_of: impl Fn(u32) -> Option<u32>,
+) -> Option<u32> {
+    let accounts: Vec<u32> = holders.iter().filter_map(|pid| account_of(*pid)).collect();
+    if accounts.contains(&own_uid) {
+        return Some(own_uid);
+    }
+    accounts.first().copied()
 }
 
 #[cfg(test)]
@@ -169,7 +187,7 @@ mod tests {
 
         assert_eq!(
             found(vec![(10, accepted_side), (20, client), (30, unrelated)]),
-            Found::Holder(20)
+            Found::Holders(vec![20])
         );
     }
 
@@ -177,7 +195,37 @@ mod tests {
     fn one_socket_shared_by_fork_counts_once() {
         let client = socket(2, ESTABLISHED, PEER, SERVER);
 
-        assert_eq!(found(vec![(20, client), (21, client)]), Found::Holder(20));
+        assert_eq!(
+            found(vec![(21, client), (20, client)]),
+            Found::Holders(vec![21, 20])
+        );
+    }
+
+    #[test]
+    fn a_holder_that_ended_after_the_scan_does_not_hide_one_that_still_holds_the_socket() {
+        const OWN: u32 = 501;
+        let ended_child = 21;
+        let parent = 20;
+        let reused_by_another = 22;
+        let accounts = |pid: u32| match pid {
+            20 => Some(OWN),
+            22 => Some(OWN + 1),
+            _ => None,
+        };
+
+        assert_eq!(
+            account_of_holders(&[ended_child, parent], OWN, accounts),
+            Some(OWN)
+        );
+        assert_eq!(account_of_holders(&[ended_child], OWN, accounts), None);
+        assert_eq!(
+            account_of_holders(&[reused_by_another], OWN, accounts),
+            Some(OWN + 1)
+        );
+        assert_eq!(
+            account_of_holders(&[reused_by_another, parent], OWN, accounts),
+            Some(OWN)
+        );
     }
 
     #[test]

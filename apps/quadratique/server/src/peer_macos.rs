@@ -160,12 +160,13 @@ fn lookup_for(own_uid: u32) -> Lookup {
     Arc::new(move |socket| uid_of_peer_socket(own_uid, socket))
 }
 
-/// The account of the process that holds the other end of the connection, among this account's processes. The
-/// holder's account is read again after the scan: a process id that the scan found, then reused by another account's
-/// process, is not taken for the owner's.
+/// The account of the processes that hold the other end of the connection, among this account's processes, read
+/// again after the scan (`account_of_holders`).
 fn uid_of_peer_socket(own_uid: u32, socket: PeerSocket) -> io::Result<Option<u32>> {
     match holder_among(processes_of(own_uid)?, socket) {
-        Found::Holder(pid) => Ok(account_of(pid)),
+        Found::Holders(holders) => Ok(socket_fdinfo::account_of_holders(
+            &holders, own_uid, account_of,
+        )),
         Found::Nothing | Found::NotEstablished(_) | Found::Several => Ok(None),
     }
 }

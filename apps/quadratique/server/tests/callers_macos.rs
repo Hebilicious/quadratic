@@ -88,7 +88,7 @@ fn a_connection_held_by_another_process_of_the_owner_is_admitted() {
         holder.child.id()
     );
     assert!(admitted);
-    assert_eq!(found, Found::Holder(holder.child.id()));
+    assert_eq!(found, Found::Holders(vec![holder.child.id()]));
 }
 
 #[test]
