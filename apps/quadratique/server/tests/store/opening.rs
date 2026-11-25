@@ -1,4 +1,4 @@
-use quadratique_server::store::{Store, StoreError};
+use quadratique_server::store::{Store, StoreError, canonical_folder};
 
 fn assert_refused_inside_a_git_work_tree(directory: &std::path::Path) {
     let path = directory.join("nested").join("workspace.db");
@@ -82,7 +82,8 @@ fn refusal_of(contents: &[u8]) -> (std::path::PathBuf, Option<StoreError>) {
     let path = directory.path().join("workspace.db");
     std::fs::write(&path, contents).expect("the file");
     let refused = Store::open(&path).err();
-    (path.canonicalize().expect("the file's path"), refused)
+    let canonical = canonical_folder(directory.path()).expect("the folder's path");
+    (canonical.join("workspace.db"), refused)
 }
 
 fn assert_damaged(path: &std::path::Path, refused: Option<StoreError>) {
