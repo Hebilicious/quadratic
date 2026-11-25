@@ -2,6 +2,8 @@
 
 Date: 2026-11-25
 
+Status: superseded by [0004](0004-a-socket-for-commands-and-a-token-for-the-browser.md) on every platform: the command line and the MCP server reach the server through a Unix socket, the web app needs a token, and neither the kernel check nor a service remains. The analysis of candidates below is kept for its reasons.
+
 ## Context
 
 The server listens on one TCP port of `127.0.0.1`. The command line, the MCP stdio server and
