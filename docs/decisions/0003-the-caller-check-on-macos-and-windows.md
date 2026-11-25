@@ -44,15 +44,29 @@ Constraints that every candidate must meet:
 
 The design stays as on Linux. Only the lookup changes per platform.
 
+**What identifies the caller.** A local address and port alone do not identify a TCP
+connection: the same local port can appear in a listener's row, in rows of other states, and on
+another address. The server knows both endpoints of the connection it accepted: its own address
+and port (`Connection::local`) and the client's (`Connection::peer`). It looks for the client's
+socket, which is the same connection seen from the other side: a connected TCP socket in the
+ESTABLISHED state whose local endpoint is the server's `peer` and whose remote endpoint is the
+server's `local`, both address and port. The kernel allows only one connected socket per
+four-tuple, so at most one socket matches. No match, a listener row, a row in another state, or
+two different sockets that match refuse the connection. Each platform's lookup is held to this
+rule. The listener binds only to `127.0.0.1` (`server::start_with` refuses any other address),
+so the lookup reads IPv4 data only.
+
 - **macOS.** No system call maps a TCP connection to a uid. `libproc` lists the sockets of a
   process: `proc_listpids` with `PROC_UID_ONLY` and the owner's uid lists the owner's processes;
   `proc_pidinfo(PROC_PIDLISTFDS)` and `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)` give each socket's
-  local and remote address. This is what `lsof` does. The server admits the connection when one
-  of the owner's processes holds the socket whose local address is the connection's peer
-  address. macOS answers `proc_pidfdinfo` only for processes of the same uid, unless the caller
-  is root. So a socket of another account is never found, and the connection is refused. That
-  is the fail-closed property, but it rests on the kernel's access policy. QUA-33 must prove it
-  with a test in which a second account connects.
+  state and both endpoints (`tcpsi_state`, and `insi_laddr`, `insi_lport`, `insi_faddr`,
+  `insi_fport` of `tcpsi_ini`). This is what `lsof` does. The server admits the connection when
+  a socket of one of the owner's processes matches both endpoints as above and is ESTABLISHED.
+  Descriptors of one socket that `fork` shares between several of the owner's processes count
+  as one socket. macOS answers `proc_pidfdinfo` only for processes of the same uid, unless the
+  caller is root. So a socket of another account is never found, and the connection is refused.
+  That is the fail-closed property, but it rests on the kernel's access policy. QUA-33 must
+  prove it with a test in which a second account connects.
   - Cost: one scan of the owner's processes and their descriptors for each new connection. A
     few hundred processes take some milliseconds. HTTP keep-alive spreads the cost, and the
     command line opens one connection per command. QUA-33 measures it.
@@ -60,23 +74,49 @@ The design stays as on Linux. Only the lookup changes per platform.
   - Gap: a process of the owner may hand its socket to a process of another account (through
     `SCM_RIGHTS`). The owner chose to do that. Linux has the same gap, because the socket's uid
     stays the creator's.
-- **Windows.** `GetExtendedTcpTable` with `TCP_TABLE_OWNER_PID_ALL` gives the process id that
-  owns each TCP connection, for every account, with no privilege. The server looks up the
-  connection whose local address is the peer's address and reads its pid. It then opens that
-  process (`OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION`, then `OpenProcessToken` and
-  `GetTokenInformation(TokenUser)`) and compares the token's user SID with its own. Windows
-  refuses `OpenProcessToken` on another account's process to a non-elevated caller. That
-  failure refuses the connection.
-  - Gap: the table gives a process id, not an owner that the kernel records on the socket as on
-    Linux. If the connecting process exits and the system gives its pid to a new process of the
-    owner before the lookup, the owner's token would be read. The socket of the process that
-    exited is then closed, unless that process gave a copy of it to a child. A copy belongs to
-    the same account that made the connection. QUA-34 must write this down and test the
-    common case: another account is refused.
-  - Safe interface: no maintained crate gives these four calls safely. The `windows` crate
-    declares them `unsafe`. So QUA-34 needs one module that may use `unsafe` (the workspace's
-    `forbid` becomes `deny`, and the module says `allow` with a comment for each call). That is
-    an owner's decision. The open questions below list it.
+- **Windows.** `GetExtendedTcpTable` lists every TCP endpoint with no privilege. Its IPv4 and
+  IPv6 tables are separate (`ulAf` is `AF_INET` or `AF_INET6`); the server asks for the IPv4
+  table only, because its listener is IPv4 only. It asks for connections only
+  (`TCP_TABLE_OWNER_MODULE_CONNECTIONS`, so no listener rows) and applies the rule above:
+  exactly one row in `MIB_TCP_STATE_ESTAB` whose local endpoint is the server's `peer` and whose
+  remote endpoint is the server's `local`. That row (`MIB_TCPROW_OWNER_MODULE`) names a process
+  and a moment, and neither is the owner of the socket the way Linux records it:
+  - `dwOwningPid` is "the PID of the process that issued a context bind for this TCP
+    connection". Winsock lets that process share the socket with any other process through
+    `WSADuplicateSocket`, and the socket stays open until its last descriptor closes. The row
+    then still names the process that bound it, which may have exited.
+  - A process id can be reused. Between the table read and the token query, the bound process
+    can exit and its id can go to another process, which may belong to the owner. The earlier
+    version of this record argued that only a child of the same account could hold such a
+    socket; that does not hold, because the socket can be handed to any process, so that
+    argument does not make the pid-to-token lookup safe.
+
+  So the Windows lookup reads the token of a process instance that it ties to the row, in this
+  order: read the row; open the process with `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`
+  and hold the handle, which keeps that instance's id from being reused while it is held; read
+  the instance's start time with `GetProcessTimes` and refuse when it started after the row's
+  `liCreateTimestamp` (the moment of the bind: a later process cannot have bound it, so the id
+  was reused); read the token's user with `OpenProcessToken` and `GetTokenInformation(TokenUser)`
+  and compare it with the server's own SID; read the table again and refuse unless the same row
+  is still there with the same pid and timestamp; then close the handle. Any failure refuses,
+  including `OpenProcessToken` on another account's process, which Windows refuses to a
+  non-elevated caller.
+  - What is proven: the documented fields and their meaning (sources below). What is not proven
+    and must be shown by tests before QUA-34 lets Windows serve: that a second account's
+    connection is refused; that a row whose binding process exited is refused (by the start
+    time, or because the row goes away), including after its id is reused; that the row of a
+    socket shared through `WSADuplicateSocket` names the process that bound it, so that a
+    socket bound by another account and handed to the owner's process is refused, and a socket
+    bound by the owner and handed to another account is the owner's choice as on Linux.
+  - Until then the server keeps refusing to start on Windows.
+  - Safe interface: no maintained crate gives these calls safely. The `windows` crate declares
+    them `unsafe`. So QUA-34 needs one module that may use `unsafe` (the workspace's `forbid`
+    becomes `deny`, and the module says `allow` with a comment for each call). That is an
+    owner's decision. The open questions below list it.
+  - Sources: [GetExtendedTcpTable](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable),
+    [MIB_TCPROW_OWNER_PID](https://learn.microsoft.com/en-us/windows/win32/api/tcpmib/ns-tcpmib-mib_tcprow_owner_pid),
+    [MIB_TCPROW_OWNER_MODULE](https://learn.microsoft.com/en-us/windows/win32/api/tcpmib/ns-tcpmib-mib_tcprow_owner_module),
+    [WSADuplicateSocket](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw).
 - **Browser.** No change. The browser connects over TCP like any other process of the owner,
   and the lookup finds it. `quadratique ui` opens the URL as it does now.
 
@@ -133,8 +173,8 @@ request without it. The same scheme could run on Linux, so all platforms would s
 
 | | Another account refused by | Browser | New code | `unsafe` |
 | --- | --- | --- | --- | --- |
-| A, macOS | the kernel's rule that only the same uid may read a process's sockets | unchanged | a lookup through `libproc` | no (`libproc` crate) |
-| A, Windows | the kernel's rule on another account's process token | unchanged | a lookup through four Win32 calls | one module |
+| A, macOS | the kernel's rule that only the same uid may read a process's sockets | unchanged | a lookup through `libproc`, matching both endpoints | no (`libproc` crate) |
+| A, Windows | the kernel's rule on another account's process token, tied to the row by a held handle, the start time and a second read | unchanged | a lookup through six Win32 calls, matching both endpoints; tests before serving | one module |
 | B | the socket's or the pipe's permissions, checked by the kernel | needs A or C as well | a second transport, everywhere | Windows pipe security: one module |
 | C | the file's permissions | a bootstrap page, a new session, an origin-guard change | the secret, the session, the Windows ACL | Windows ACL: one module |
 
@@ -142,9 +182,11 @@ request without it. The same scheme could run on Linux, so all platforms would s
 
 1. **Candidate A on both platforms.** The server keeps one TCP listener and asks the system who
    owns the other end of each connection: `libproc` on macOS (QUA-33),
-   `GetExtendedTcpTable` and the process token on Windows (QUA-34). Each lookup fails closed. As
-   on Linux, the server looks up a connection of its own before it serves, and refuses to start
-   if the lookup does not name its own account.
+   `GetExtendedTcpTable` and the process token on Windows (QUA-34). Each lookup matches exactly
+   one connected socket by both endpoints and fails closed. On Windows the token is read from a
+   process instance tied to the row as candidate A says, and Windows serves only after the tests
+   listed there pass. As on Linux, the server looks up a connection of its own before it serves,
+   and refuses to start if the lookup does not name its own account.
 2. **Until a platform has its lookup, the server refuses to start there** with a message that
    names the issue. QUA-32 did this. No build serves without a caller check.
 3. **Each lookup is proved by a test in which another account connects and gets `403`**, in CI
@@ -178,7 +220,16 @@ Each has a safe default until the owner decides.
    process, not from a process of the owner, and the Linux check would refuse it. Nobody has
    tried it. Default: under WSL the web app is supported only in a browser that runs inside
    WSL; the install stage (QUA-37) tries the Windows browser and records what happens.
-3. **Stopping the server on Windows.** `quadratique server stop` sends SIGTERM on Unix. Windows
+3. **WSL and Windows reaching each other's server.** The second question covers only a Windows
+   browser reaching a server in WSL. The other direction, a process in WSL reaching a server on
+   Windows, uses the host's address in WSL 2's default NAT mode, which is outside the server's
+   loopback bind, so it does not reach the server at all. Mirrored mode gives `localhost` in
+   both directions, but nothing says which identity the receiving kernel can attest for a
+   connection that crosses from one system to the other
+   ([WSL networking](https://learn.microsoft.com/en-us/windows/wsl/networking)). Default: in
+   both directions a connection whose account the receiving kernel cannot attest is refused;
+   QUA-37 and QUA-34 verify what each kernel reports before support is promised.
+4. **Stopping the server on Windows.** `quadratique server stop` sends SIGTERM on Unix. Windows
    has no SIGTERM. The command line refuses the stop on Windows (`cli/src/process.rs`).
    Default: QUA-34 adds a stop route that only the owner's command line can call, behind the
    caller check.
