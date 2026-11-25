@@ -23,6 +23,7 @@ const SYSTEMCTL_LIMIT: Duration = Duration::from_secs(120);
 /// One deadline for the whole readiness step after a restart.
 const READY_LIMIT: Duration = Duration::from_secs(60);
 /// The unit's `TimeoutStopSec`.
+#[cfg(target_os = "linux")]
 const STOP_LIMIT: Duration = Duration::from_secs(70);
 const POLL: Duration = Duration::from_millis(100);
 /// The store schema of every build before servers reported theirs.
