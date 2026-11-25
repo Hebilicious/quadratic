@@ -49,15 +49,11 @@ pub fn file_id(path: &std::path::Path) -> Option<FileId> {
         .map(|meta| (meta.dev(), meta.ino()))
 }
 
-/// The file a process runs, from `/proc` (Linux only). Without a pidfd this names whatever process has the pid now:
-/// use it only to describe, never before a signal.
-#[cfg(unix)]
-pub fn running_file(pid: u32) -> Option<FileId> {
-    if cfg!(target_os = "linux") {
-        file_id(std::path::Path::new(&format!("/proc/{pid}/exe")))
-    } else {
-        None
-    }
+/// The file a process runs, from `/proc`. Without a pidfd this names whatever process has the pid now: use it only
+/// through [`Pinned`].
+#[cfg(target_os = "linux")]
+fn running_file(pid: u32) -> Option<FileId> {
+    file_id(std::path::Path::new(&format!("/proc/{pid}/exe")))
 }
 
 /// A process held by a pidfd. What `/proc/<pid>` shows while the process is alive is that process's own: its pid

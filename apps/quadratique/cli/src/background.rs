@@ -731,6 +731,8 @@ impl Deadline {
         Deadline(Instant::now() + limit)
     }
 
+    /// `quadratique upgrade` shares one deadline between its stop and its service's start (Unix only).
+    #[cfg(unix)]
     pub fn at(instant: Instant) -> Deadline {
         Deadline(instant)
     }
