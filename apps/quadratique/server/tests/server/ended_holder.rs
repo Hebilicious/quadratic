@@ -26,6 +26,12 @@ async fn revision(board: &Running, issue: &str) -> Value {
     board.get(issue).await["revision"].clone()
 }
 
+fn without_harness(mut who: Who) -> Who {
+    let actor = who.actor.as_mut().expect("an actor");
+    actor.as_object_mut().expect("an object").remove("harness");
+    who
+}
+
 fn in_session(mut who: Who, session: &str) -> Who {
     who.actor.as_mut().expect("an actor")["session"] = json!(session);
     who
@@ -213,21 +219,202 @@ async fn once_freed_an_issue_in_review_is_moved_before_it_is_claimed_again() {
     assert_eq!(claimed["issue"]["claim"]["holder"]["name"], lead.name());
 }
 
+/// Every move that `rule 2` names, by `who`, on an issue in progress: the answers of a status
+/// change, a release and a close, in that order.
+async fn every_move(board: &Running, who: &Who, issue: &str) -> [Result<Value, Value>; 3] {
+    let moved = board
+        .call(
+            who,
+            "issue.update",
+            json!({ "issue": issue, "revision": revision(board, issue).await, "status": "todo" }),
+        )
+        .await;
+    let released = board
+        .call(who, "issue.release", json!({ "issue": issue }))
+        .await;
+    let closed = board
+        .call(
+            who,
+            "issue.close",
+            json!({ "issue": issue, "evidence": "-" }),
+        )
+        .await;
+    [moved, released, closed]
+}
+
+fn assert_held_for_every_move(answers: &[Result<Value, Value>; 3], holder: &Who) {
+    for answer in answers {
+        let failure = answer.as_ref().expect_err("a refusal");
+        assert_eq!(failure["_tag"], "Held", "{failure}");
+        assert_eq!(failure["claim"]["holder"]["name"], holder.name());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn the_session_of_the_holder_in_another_worktree_cannot_release_the_claim() {
+async fn the_holders_session_closes_moves_and_releases_its_claim_from_another_worktree() {
+    let board = start().await;
+    let holder = in_session(board.agent("audit"), "session-1");
+    let issue = left_in_progress(&board, &holder).await;
+    let elsewhere = in_session(board.agent("lead"), "session-1");
+
+    let closed = board
+        .ok(
+            &elsewhere,
+            "issue.close",
+            json!({ "issue": issue, "evidence": "checked from lead" }),
+        )
+        .await;
+    let moved = board
+        .ok(
+            &elsewhere,
+            "issue.update",
+            json!({
+                "issue": issue,
+                "revision": revision(&board, &issue).await,
+                "status": "in-progress",
+            }),
+        )
+        .await;
+    let released = board
+        .ok(&elsewhere, "issue.release", json!({ "issue": issue }))
+        .await;
+
+    assert_eq!(closed["issue"]["status"], "in-review", "{closed}");
+    let claim = &closed["issue"]["claim"];
+    assert_eq!(claim["holder"]["name"], holder.name(), "{claim}");
+    assert_eq!(claim["branch"], "audit", "{claim}");
+    assert_eq!(claim["worktree"], holder.worktree(), "{claim}");
+    assert_eq!(moved["issue"]["status"], "in-progress", "{moved}");
+    assert_eq!(moved["issue"]["claim"]["branch"], "audit", "{moved}");
+    assert_eq!(released["issue"]["status"], "todo", "{released}");
+    assert!(released["issue"].get("claim").is_none(), "{released}");
+    assert!(board.get(&issue).await["notes"] == json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_session_in_another_worktree_gets_held() {
     let board = start().await;
     let holder = in_session(board.agent("audit"), "session-1");
     let issue = left_in_progress(&board, &holder).await;
 
-    let released = board
-        .failure(
-            &in_session(board.agent("lead"), "session-1"),
-            "issue.release",
-            json!({ "issue": issue }),
+    let answers = every_move(
+        &board,
+        &in_session(board.agent("lead"), "session-2"),
+        &issue,
+    )
+    .await;
+
+    assert_held_for_every_move(&answers, &holder);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_holders_session_id_from_another_harness_gets_held() {
+    let board = start().await;
+    let holder = in_session(board.agent("audit"), "session-1");
+    let issue = left_in_progress(&board, &holder).await;
+    let mut other_harness = in_session(board.agent("lead"), "session-1");
+    other_harness.actor.as_mut().expect("an actor")["harness"] = json!("codex");
+
+    let answers = every_move(&board, &other_harness, &issue).await;
+
+    assert_held_for_every_move(&answers, &holder);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_with_no_session_in_another_worktree_gets_held() {
+    let board = start().await;
+    let holder = in_session(board.agent("audit"), "session-1");
+    let issue = left_in_progress(&board, &holder).await;
+
+    let answers = every_move(&board, &board.agent("lead"), &issue).await;
+
+    assert_held_for_every_move(&answers, &holder);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_id_without_a_harness_in_another_worktree_gets_held() {
+    let board = start().await;
+    let holder = without_harness(in_session(board.agent("audit"), "session-1"));
+    let issue = left_in_progress(&board, &holder).await;
+    let elsewhere = without_harness(in_session(board.agent("lead"), "session-1"));
+
+    let answers = every_move(&board, &elsewhere, &issue).await;
+
+    assert_held_for_every_move(&answers, &holder);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_holders_name_without_a_session_in_another_worktree_gets_held() {
+    let board = start().await;
+    let holder = board.agent("audit");
+    let issue = left_in_progress(&board, &holder).await;
+    let mut moved = board.agent("audit");
+    moved.worktree = board.agent("audit-moved").worktree;
+    assert_eq!(moved.name(), holder.name());
+
+    let answers = every_move(&board, &moved, &issue).await;
+
+    assert_held_for_every_move(&answers, &holder);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_holders_session_in_another_worktree_gets_human_only_on_an_issue_assigned_to_the_human()
+{
+    let board = start().await;
+    let holder = in_session(board.agent("audit"), "session-1");
+    let issue = left_in_progress(&board, &holder).await;
+    board
+        .ok(
+            &board.human(),
+            "issue.update",
+            json!({
+                "issue": issue,
+                "revision": revision(&board, &issue).await,
+                "assignee": { "kind": "human" },
+            }),
         )
         .await;
 
-    assert_eq!(released["_tag"], "Held", "{released}");
+    let answers = every_move(
+        &board,
+        &in_session(board.agent("lead"), "session-1"),
+        &issue,
+    )
+    .await;
+
+    for answer in &answers {
+        let failure = answer.as_ref().expect_err("a refusal");
+        assert_eq!(failure["_tag"], "HumanOnly", "{failure}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_holders_session_in_another_worktree_gets_base_not_merged_for_a_stacked_issue() {
+    let board = start().await;
+    let holder = in_session(board.agent("audit"), "session-1");
+    let stacked = left_in_progress(&board, &holder).await;
+    let base = board.issue("Base").await;
+    board
+        .ok(
+            &board.human(),
+            "issue.link",
+            json!({ "issue": stacked, "kind": "stacked-on", "target": base }),
+        )
+        .await;
+
+    let merged = board
+        .failure(
+            &in_session(board.agent("lead"), "session-1"),
+            "issue.update",
+            json!({
+                "issue": stacked,
+                "revision": revision(&board, &stacked).await,
+                "status": "merged",
+            }),
+        )
+        .await;
+
+    assert_eq!(merged["_tag"], "BaseNotMerged", "{merged}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

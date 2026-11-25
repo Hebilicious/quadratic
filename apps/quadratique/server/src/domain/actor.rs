@@ -105,6 +105,12 @@ const NAME_MAX: usize = 420;
 const WORKTREE_NAME_MAX: usize = 255;
 
 impl Actor {
+    /// The harness and the session id of this actor, when it gives both: a session id means
+    /// something only within its harness. Like every actor field, both are self-declared.
+    pub fn harness_session(&self) -> Option<(&str, &str)> {
+        Some((self.harness.as_deref()?, self.session.as_deref()?))
+    }
+
     pub fn server() -> Actor {
         Actor {
             harness: Some(SERVER_NAME.into()),

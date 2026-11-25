@@ -8,8 +8,8 @@ A lead agent starts other agents. One of them claims an issue, closes it into re
 The lead, or a reviewer, then needs to add a note to that issue, or to free it when the work
 will not be merged (an audit, for example).
 
-The rules are in `Rules` in `server/src/domain/lifecycle.rs`. The holder of a claim is the
-same actor name in the same worktree (`Caller::holds` in `server/src/domain/issue.rs`).
+The rules are in `Rules` in `server/src/domain/lifecycle.rs`. Who holds a claim is
+`Caller::holds` in `server/src/domain/issue.rs` (rule 2).
 
 The server knows of an agent only what the agent's actor says (`server/src/domain/actor.rs`):
 
@@ -52,8 +52,27 @@ still alive: a claim records no liveness.
      merges gets `BaseNotMerged`, because the human's close moves the issue to the `merge`
      status.
 
-   The holder's own session working in another worktree is not the holder, and gets
-   `Held`.
+   The holder is the same actor name in the same worktree, or, from any worktree, an actor
+   with the holder's `harness` and `session`, both given: the match that
+   `issue.list --claim mine` uses (`Actor::harness_session`). A caller with no session, with
+   a session but no harness, with another session, or with the holder's session id under
+   another harness is not the holder outside the claim's worktree. `HumanOnly` and
+   `BaseNotMerged` keep their place in the order above for the holder's session too.
+
+   A move by the holder's session from another worktree changes nothing in the claim: it
+   keeps its holder, its `branch` and its `worktree`. The merge watcher matches a landing to
+   the claim's `branch`, and the trailer `Refs:` lands an issue in review whatever the
+   branch, so a `close` from elsewhere does not change what counts as the issue's merge.
+   `issue.claim` by the holder's session from another worktree is the holder's repeated call:
+   it changes nothing.
+
+   Every actor field is self-declared. A caller that declares another agent's harness and
+   session, through `QUADRATIQUE_ACTOR_FIELDS` or its environment, is that agent's holder
+   from any worktree. The server cannot detect this: it has no secret per session. Before
+   this rule, the same caller could declare the holder's name and send the holder's worktree
+   path, with the same effect. The rule protects against mistakes of honest agents (another
+   session, a missing session, a session id that two harnesses share), not against an agent
+   that lies.
 3. **A claim whose holder ended.** Any agent may release another agent's claim on an issue
    in review: the workflow's `review` status, or a later status before `merge`. The owner
    decided this on 2026-11-25. The issue keeps its status, its evidence and its assignee, and
@@ -71,18 +90,23 @@ still alive: a claim records no liveness.
    released keeps its branch and its pull request; it reads the note, moves the issue back to
    an unstarted status and claims it again. The skill says what an agent may do in one line.
 
-Rules 1 and 2 were the existing behaviour, stated here and tested. Rule 3 is the owner's
-choice among the alternatives below.
+Rule 1 and the order of refusals in rule 2 were the existing behaviour, stated here and
+tested. The holder's session in another worktree (rule 2) and rule 3 are new: rule 3 is the
+owner's choice among the alternatives below, rule 2 the lead's proposal.
 
 The tests take their names from these rules: `server/tests/server/ended_holder.rs`.
 
 ## Alternatives considered
 
-- **The same session may act from any worktree.** A caller with the holder's `harness` and
-  `session` could release or move the claim. This covers a lead's own claims in other
+- **The same session may act from any worktree.** Chosen (rule 2), proposed by the lead on
+  2026-11-25 and waiting for the owner's confirmation; it is a separate change, which can be
+  dropped without rule 3. A caller with the holder's `harness` and `session` releases,
+  closes or moves the claim. This covers a lead's own claims in other
   worktrees, and subagents that share the lead's session. It does not cover agents that a
-  host starts as sessions of their own, which is the case that raised this question. It
-  also reverses the rule that acting on a claim stays tied to its worktree.
+  host starts as sessions of their own, which is the case that raised this question (rule 3
+  covers that one). It also reverses the rule that acting on a claim stays tied to its
+  worktree: a session that removed the claim's worktree, or moved its branches into another
+  one, met `Held` on its own claim twice and had to recreate the worktree.
 - **The parent may act.** A lead starts each agent with
   `QUADRATIQUE_ACTOR_FIELDS={"parent":"<lead name>"}`, and a caller whose name is the
   holder's `parent` may release or move the claim. This works only where every lead sets
