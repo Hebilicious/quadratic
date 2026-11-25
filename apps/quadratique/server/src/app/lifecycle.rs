@@ -21,7 +21,7 @@ pub(super) fn apply(
     evidence: Option<&str>,
 ) -> Result<(), Refused> {
     tx.set_status(id, &change.status)?;
-    if change.claim != ClaimAfter::Kept {
+    if matches!(change.claim, ClaimAfter::Started(_) | ClaimAfter::Ended) {
         tx.end_held_merge(id)?;
     }
     match &change.claim {

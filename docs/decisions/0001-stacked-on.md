@@ -152,7 +152,9 @@ earlier build is recreated.
     to a canceled, unstarted, backlog or completed status, or into the `merge` status, such as
     a `close` from the default branch), when an import finishes B, and when an assessment finds
     B resolved or at the `merge` status. A move that keeps the claim, such as from review back
-    to in progress, keeps the hold. (`apply` in `app/lifecycle.rs`.)
+    to in progress, keeps the hold. So does an agent's release of another agent's claim in
+    review (decision 0002, rule 3): B stays in review, and the landed work is still B's. (`apply`
+    in `app/lifecycle.rs`.)
 
 ### Cycles
 
