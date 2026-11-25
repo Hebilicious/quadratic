@@ -7,6 +7,7 @@ mod index;
 mod json;
 mod message;
 mod migrate;
+mod recorded;
 mod tx;
 mod types;
 mod view;
@@ -15,6 +16,7 @@ mod writer;
 pub use engine::refuse_git_work_tree;
 pub use error::{Kind, StoreError};
 pub use git::{ClaimStart, ClaimedWork, GitLanding, GitWatch, GitWork};
+pub use recorded::{Recorded, SCHEMA_VERSION, read_recorded};
 pub use tx::Tx;
 pub use types::{
     AsOf, Author, Call, Change, Claim, ClaimFilter, Commit, Direction, FieldChange, FindingLink,
