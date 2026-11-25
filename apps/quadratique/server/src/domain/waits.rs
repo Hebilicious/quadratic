@@ -99,9 +99,11 @@ impl WaitGraph {
         self.check_all(std::slice::from_ref(change))
     }
 
-    /// Whether the changes together close a cycle. Changes only add edges, so when all of them
-    /// close none, no part of them does: one search answers for the whole set, where checking
-    /// each change alone searches the whole graph once per change.
+    /// Whether the graph after all the changes has a cycle. It answers for the final graph only.
+    /// For changes that only add edges, such as the `Blocks` of an import, that answer covers
+    /// every prefix too: when all of them close no cycle, no part of them does, so one search
+    /// replaces a search per change. A `Parent` change can replace an edge, so a sequence with
+    /// one can pass through a cycle and still end without one; check those one at a time.
     pub fn check_all(&self, changes: &[RelationChange]) -> Result<(), Failure> {
         let mut proposed = self.clone();
         for change in changes {
