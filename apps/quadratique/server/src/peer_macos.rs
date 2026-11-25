@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use libproc::bsd_info::BSDInfo;
-use libproc::file_info::{ListFDs, PIDFDInfo, PIDFDInfoFlavor, ProcFDType, pidfdinfo};
+use libproc::file_info::{ListFDs, PIDFDInfo, PIDFDInfoFlavor, ProcFDInfo, ProcFDType, pidfdinfo};
 use libproc::proc_pid::{listpidinfo, pidinfo};
 use libproc::processes::{ProcFilter, pids_by_type};
 
@@ -204,7 +204,7 @@ pub fn tcp_sockets_of(pid: u32) -> Vec<TcpSocket> {
     let Ok(info) = pidinfo::<BSDInfo>(pid, 0) else {
         return Vec::new();
     };
-    let Ok(descriptors) = listpidinfo::<ListFDs>(pid, info.pbi_nfiles as usize) else {
+    let Some(descriptors) = descriptors_of(pid, info.pbi_nfiles as usize) else {
         return Vec::new();
     };
     descriptors
@@ -213,6 +213,36 @@ pub fn tcp_sockets_of(pid: u32) -> Vec<TcpSocket> {
         .filter_map(|descriptor| pidfdinfo::<SocketBytes>(pid, descriptor.proc_fd).ok())
         .filter_map(|bytes| socket_fdinfo::tcp_over_ipv4(&bytes.0))
         .collect()
+}
+
+const MOST_DESCRIPTORS: usize = 1 << 20;
+
+/// Every descriptor of `pid`. The kernel lists them in order and stops when the buffer is full, so a process that
+/// opens descriptors after `pbi_nfiles` was read would push its highest ones, the caller's socket among them, out of
+/// a buffer of exactly that size. A full answer is asked again with twice the room.
+fn descriptors_of(pid: i32, files: usize) -> Option<Vec<ProcFDInfo>> {
+    let mut room = files.saturating_mul(2).max(64);
+    while room <= MOST_DESCRIPTORS {
+        let descriptors = listpidinfo::<ListFDs>(pid, room).ok()?;
+        if descriptors.len() < room {
+            return Some(descriptors);
+        }
+        room *= 2;
+    }
+    None
+}
+
+/// `pbi_nfiles` of `pid`, the number of its open descriptors and its highest descriptor, for the measure: they show
+/// what `pbi_nfiles` counts on this macOS.
+pub fn descriptor_counts(pid: u32) -> Option<(u32, usize, i32)> {
+    let pid = i32::try_from(pid).ok()?;
+    let files = pidinfo::<BSDInfo>(pid, 0).ok()?.pbi_nfiles;
+    let descriptors = descriptors_of(pid, files as usize)?;
+    let highest = descriptors
+        .iter()
+        .map(|descriptor| descriptor.proc_fd)
+        .max()?;
+    Some((files, descriptors.len(), highest))
 }
 
 /// How long `count` lookups of `socket` take, for the measure of the check's cost.

@@ -149,6 +149,14 @@ async fn the_cost_of_the_caller_check() {
     let all = processes.len();
     let listener = listener();
     let holder = Holder::start(Command::new("/usr/bin/env"), &listener);
+    let _many: Vec<_> = (0..100)
+        .filter_map(|_| std::fs::File::open("/dev/null").ok())
+        .collect();
+    let (files, listed, highest) =
+        peer_macos::descriptor_counts(std::process::id()).expect("this process's descriptors");
+    println!(
+        "this process with 100 more descriptors: pbi_nfiles {files}, open descriptors {listed}, highest descriptor {highest}"
+    );
     let lookups = peer_macos::time_lookups(own, holder.peer_socket(), LOOKUPS);
     println!(
         "{LOOKUPS} lookups over {all} processes of this account holding {sockets} TCP sockets over IPv4: {}",
