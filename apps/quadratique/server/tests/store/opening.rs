@@ -1,4 +1,4 @@
-use quadratique_server::store::{Store, StoreError};
+use quadratique_server::store::{Store, StoreError, canonical_folder};
 
 fn assert_refused_inside_a_git_work_tree(directory: &std::path::Path) {
     let path = directory.join("nested").join("workspace.db");
@@ -36,6 +36,9 @@ fn a_database_inside_a_git_working_tree_is_refused() {
     assert_refused_inside_a_git_work_tree(directory.path());
 }
 
+/// Windows makes a symbolic link only for an administrator or in developer mode, and Git for Windows writes HEAD as a
+/// file: nothing covers a linked HEAD there.
+#[cfg(unix)]
 #[test]
 fn a_database_inside_a_git_folder_whose_head_links_to_an_unborn_branch_is_refused() {
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -79,7 +82,8 @@ fn refusal_of(contents: &[u8]) -> (std::path::PathBuf, Option<StoreError>) {
     let path = directory.path().join("workspace.db");
     std::fs::write(&path, contents).expect("the file");
     let refused = Store::open(&path).err();
-    (path.canonicalize().expect("the file's path"), refused)
+    let canonical = canonical_folder(directory.path()).expect("the folder's path");
+    (canonical.join("workspace.db"), refused)
 }
 
 fn assert_damaged(path: &std::path::Path, refused: Option<StoreError>) {
@@ -141,6 +145,8 @@ fn a_plain_sqlite_database_is_refused_as_damaged_naming_the_file_and_the_restore
     assert_damaged(&path, refused);
 }
 
+/// Lists this process's descriptors through `/proc`: nothing checks this on macOS or Windows.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_dropped_store_has_closed_every_file_it_opened() {
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -202,15 +208,25 @@ async fn what_a_store_holds_stays_held_until_its_files_are_closed_with_a_read_in
         crate::support::HANG_GUARD,
         tokio::task::spawn_blocking(move || {
             contender.lock().expect("the lock, once free");
-            std::fs::read_dir("/proc/self/fd")
-                .expect("this process's descriptors")
-                .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
-                .filter(|target| target.starts_with(&folder) && !target.ends_with("server.lock"))
-                .collect::<Vec<_>>()
+            files_open_in(&folder)
         }),
     )
     .await
     .expect("the lock is freed within the hang guard")
     .expect("the waiting thread");
     assert_eq!(open, Vec::<std::path::PathBuf>::new());
+}
+
+/// The files of `folder` this process holds open, except the lock, read from `/proc`. Elsewhere it lists nothing, so
+/// on macOS and Windows that test checks only that the lock is freed.
+fn files_open_in(folder: &std::path::Path) -> Vec<std::path::PathBuf> {
+    if cfg!(target_os = "linux") {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("this process's descriptors")
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target.starts_with(folder) && !target.ends_with("server.lock"))
+            .collect()
+    } else {
+        Vec::new()
+    }
 }

@@ -1,6 +1,8 @@
 
 import os
+import shutil
 import signal
+import sys
 import tempfile
 import threading
 import time
@@ -44,6 +46,7 @@ def in_thread(function):
     return box.get("value")
 
 
+@unittest.skipIf(sys.platform == "win32", "QUA-40: the harness runs commands in POSIX process groups")
 class OwnedProcesses(unittest.TestCase):
     def test_a_command_whose_child_keeps_the_pipe_returns_when_it_ends_and_the_child_is_stopped(self):
         started, owned = recording_owner()
@@ -65,6 +68,7 @@ class OwnedProcesses(unittest.TestCase):
                                             timeout=0.05))
         self.assertEqual(processes.group_members(started[0].group), [])
 
+    @unittest.skipUnless(shutil.which("setsid"), "needs the setsid command of util-linux, which macOS lacks")
     def test_a_child_that_left_the_group_and_holds_the_pipe_fails_the_cleanup_at_its_deadline(self):
         with tempfile.TemporaryDirectory() as folder:
             left, pid_file = Path(folder) / "left", Path(folder) / "escaped.pid"
@@ -115,6 +119,7 @@ class OwnedProcesses(unittest.TestCase):
 
 
 
+@unittest.skipIf(sys.platform == "win32", "QUA-40: the harness runs commands in POSIX process groups")
 class HarnessGit(unittest.TestCase):
     def test_a_git_command_of_the_harness_runs_no_hook_of_the_trackers_repository(self):
         from qeval import tally

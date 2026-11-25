@@ -69,3 +69,104 @@ jobs:
           quadratique-eval:test
           quadratique-catalog:check
           quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test quadratique-web:e2e
+
+  # The same checks on macOS and Windows, one step per area, so that each platform reports every area that fails and
+  # not only the first. The server serves only on Linux until it can check who connects to its local listener
+  # elsewhere (docs/decisions/0003-the-caller-check-on-macos-and-windows.md), and the installer is Linux-only until the
+  # install stages of QUA-6. The steps that fail for those reasons say so and carry `continue-on-error`, so the job
+  # stays green on them and turns red on any other failure. Remove each one when its issue lands.
+  portability:
+    name: checks on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # Only stops a hang: a full check takes far less.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # No later step pushes, so the built-in token is not kept in the checkout.
+          persist-credentials: false
+
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - id: pnpm
+        run: echo "store=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools', 'pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools') }}-
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: apps/quadratique
+
+      - name: Install the browser of the journeys
+        run: pnpm --filter quadratique-web exec playwright install chromium-headless-shell
+
+      - name: Build the binary
+        id: build
+        run: moon run quadratique-cli:build
+
+      - name: Upload the binary
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quadratique-${{ runner.os }}
+          path: |
+            apps/quadratique/target/debug/quadratique
+            apps/quadratique/target/debug/quadratique.exe
+          if-no-files-found: error
+
+      - name: Server tests
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-server:test
+      - name: Command line tests
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-cli:test
+      - name: Lints and formatting
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-cli:lint quadratique-cli:fmt-check quadratique-server:lint quadratique-server:fmt-check
+      - name: Package test
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-server:package-test
+      # The release build with the web app inside it, as the installer and the release archive make it.
+      - name: Release build with the web app
+        if: ${{ !cancelled() }}
+        run: |
+          moon run quadratique-web:build
+          sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target/release-build
+      # Expected to fail, in this order: package.sh uses GNU tar's --sort and sha256sum (QUA-36); build.sh names the
+      # binary without .exe on Windows (QUA-36, QUA-38); install.sh writes a systemd user unit and test.sh fakes
+      # systemctl and reads /proc (QUA-37 on macOS, QUA-38 on Windows). Removing this continue-on-error is part of the
+      # acceptance of the last of those issues to land.
+      - name: Install test (expected to fail until QUA-36, QUA-37, QUA-38)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: moon run quadratique-install:test
+      # The tests that run commands in POSIX process groups say they are skipped on Windows until QUA-40.
+      - name: Eval test
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-eval:test
+      - name: Catalog check
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-catalog:check
+      - name: Web checks
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test
+      # Expected to fail: the journeys start a server, which refuses to start here. Removing this continue-on-error is
+      # part of the acceptance of QUA-33 (macOS) and QUA-34 (Windows).
+      - name: Web journeys (expected to fail until QUA-33, QUA-34)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: moon run quadratique-web:e2e

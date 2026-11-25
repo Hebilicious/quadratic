@@ -16,6 +16,11 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=src/assets.rs");
     println!("cargo::rustc-check-cfg=cfg(embedded_web)");
+    // On Windows doltlite reads the system's certificate store and its random numbers, and links neither library.
+    if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
+        println!("cargo::rustc-link-lib=crypt32");
+        println!("cargo::rustc-link-lib=bcrypt");
+    }
     println!("cargo::rerun-if-env-changed={DIST_VARIABLE}");
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     let feature = std::env::var_os("CARGO_FEATURE_EMBEDDED_WEB").is_some();

@@ -111,7 +111,9 @@ pub fn media_type(file: &Path) -> &'static str {
     }
 }
 
-#[cfg(test)]
+/// Windows makes a symbolic link only for an administrator or in developer mode, so these tests run where links are
+/// ordinary: nothing covers links in the web build on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::symlink;
 

@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use quadratique_server::app::interface;
 use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered, identity};
-use quadratique_server::store::{StoreError, refuse_git_work_tree};
-use rustix::process::{Pid, Signal, kill_process, test_kill_process};
+use quadratique_server::store::{StoreError, canonical_folder, refuse_git_work_tree};
 
+use crate::process::{alive, ask_to_stop, detach};
 use crate::route::McpTool;
 
 const STOP_LIMIT: Duration = Duration::from_secs(30);
@@ -186,8 +186,7 @@ impl Home {
 
     fn database(&self) -> PathBuf {
         let file = self.paths.database.file_name().unwrap_or_default();
-        self.directory
-            .canonicalize()
+        canonical_folder(&self.directory)
             .map(|directory| directory.join(file))
             .unwrap_or_else(|_| self.paths.database.clone())
     }
@@ -241,12 +240,12 @@ impl Home {
     }
 }
 
+/// `EROFS`, `EACCES` and `EPERM` on Unix; `ERROR_ACCESS_DENIED` on Windows.
 fn cannot_write(error: &std::io::Error) -> bool {
-    use rustix::io::Errno;
-
-    [Errno::ROFS, Errno::ACCESS, Errno::PERM]
-        .iter()
-        .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()))
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied
+    )
 }
 
 pub enum Found {
@@ -518,13 +517,7 @@ async fn step(home: &Home, phase: Phase) -> Result<Next, LifeError> {
             }
             match find(home).await? {
                 Found::Ours(runtime) | Found::OtherInterface { runtime, .. } => {
-                    let pid = pid_of(runtime.pid).ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "the server gave no valid pid",
-                        )
-                    })?;
-                    kill_process(pid, Signal::TERM).map_err(std::io::Error::from)?;
+                    ask_to_stop(runtime.pid)?;
                     Next::AfterPoll(Phase::Stopping { pid: runtime.pid })
                 }
                 Found::Refused { reason } => return Err(LifeError::UnreachableToStop { reason }),
@@ -586,8 +579,6 @@ struct OwnedChild {
 
 impl OwnedChild {
     fn spawn(home: &Home) -> std::io::Result<OwnedChild> {
-        use std::os::unix::process::CommandExt;
-
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -596,13 +587,12 @@ impl OwnedChild {
         if let Some(directory) = &home.paths.home {
             command.env("QUADRATIQUE_HOME", directory);
         }
-        let child = command
+        let child = detach(&mut command)
             .arg("serve")
             .current_dir(&home.directory)
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)
-            .process_group(0)
             .spawn()?;
         Ok(OwnedChild { child: Some(child) })
     }
@@ -654,22 +644,13 @@ fn remove_runtime(home: &Home, stopped: Option<u32>) {
     }
 }
 
-fn alive(pid: u32) -> bool {
-    pid_of(pid).is_some_and(|pid| test_kill_process(pid).is_ok())
-}
-
-fn pid_of(pid: u32) -> Option<Pid> {
-    Pid::from_raw(i32::try_from(pid).ok()?)
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use quadratique_server::server::{Paths, RuntimeFile, Unanswered};
-    use rustix::io::Errno;
+    use quadratique_server::server::Paths;
 
-    use super::{Found, Home, LifeError, Stopped, ensure_within, stop_within};
+    use super::{Home, LifeError, Stopped, ensure_within, stop_within};
 
     const HANG_GUARD: Duration = Duration::from_secs(20);
 
@@ -693,8 +674,16 @@ mod tests {
         );
     }
 
+    /// The errno values are Unix's; on Windows a connect is refused with `WSAEACCES`, which std reads as the same
+    /// `PermissionDenied` and nothing tests yet.
+    #[cfg(unix)]
     #[test]
     fn a_connect_that_is_not_permitted_is_refused_and_a_refused_connection_is_nobody() {
+        use quadratique_server::server::{RuntimeFile, Unanswered};
+        use rustix::io::Errno;
+
+        use super::Found;
+
         let runtime = RuntimeFile {
             pid: 1,
             address: "127.0.0.1:9".parse().expect("an address"),

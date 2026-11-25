@@ -7,6 +7,10 @@ project:
   title: "Quadratique catalog"
   description: "The AcidCat catalog of Quadratique, shared by the Rust server and the TypeScript core of the web app."
 
+# The task scripts are POSIX shell: on Windows they run in Git's bash, not PowerShell.
+taskOptions:
+  windowsShell: "bash"
+
 fileGroups:
   source: ["**/*.pkl", "PklProject", "PklProject.deps.json"]
 
