@@ -51,9 +51,10 @@ jobs:
 
   # Names the release to finish, even when release-please failed after it made the draft: the release whose tag is
   # `v` and the version that `.release-please-manifest.json` says at the pushed commit. A draft is built when its tag
-  # points at the commit that release-please released; a published release with its four files needs nothing; a
-  # published release without them fails here and is not changed. Checks out nothing and runs no project code; its
-  # token can see drafts, which needs write access to contents.
+  # points at the commit that release-please released; a published release with its four files needs no build; a
+  # published release without them fails here and is not changed. For a draft or a complete release, it also names
+  # the crates that crates.io lacks at that version, so that a later push finishes a crates publication that failed.
+  # Checks out nothing and runs no project code; its token can see drafts, which needs write access to contents.
   pending:
     name: release to finish
     needs: release-please
@@ -64,6 +65,8 @@ jobs:
       sha: ${{ steps.pending.outputs.sha }}
       version: ${{ steps.pending.outputs.version }}
       release: ${{ steps.pending.outputs.release }}
+      crates-sha: ${{ steps.pending.outputs.crates-sha }}
+      crates: ${{ steps.crates.outputs.crates }}
     steps:
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app
@@ -113,7 +116,17 @@ jobs:
               fi
             done
             [ -z "$missing" ] || fail "the release $tag is public, but these archives are missing or do not match their SHA-256 file:$missing. Nothing was changed. Attach them by hand as the README's \"When a release stops half-way\" says."
-            echo "The release $tag is published with its four files: nothing to do."
+            echo "The release $tag is published with its four files: no archive to build."
+            sha=$(gh api "$repo/commits/refs/tags/$tag" --jq .sha) || fail "the release $tag has no tag $tag"
+            [ "$(manifest_version "$sha")" = "$version" ] || fail "the tag $tag points at $sha, whose manifest does not say $version"
+            case $(gh api "$repo/compare/$sha...$GITHUB_SHA" --jq .status) in
+              ahead | identical) ;;
+              *) fail "the tag $tag points at $sha, which is not in the history of $GITHUB_SHA" ;;
+            esac
+            {
+              echo "version=$version"
+              echo "crates-sha=$sha"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           sha=$(gh api "$repo/commits/refs/tags/$tag" --jq .sha) || fail "the draft release $tag has no tag $tag"
@@ -133,7 +146,35 @@ jobs:
             echo "sha=$sha"
             echo "version=$version"
             echo "release=$id"
+            echo "crates-sha=$sha"
           } >> "$GITHUB_OUTPUT"
+
+      # Reads crates.io's index, as cargo does, and names the crates that lack this version, in the order of
+      # publication. A release whose crates are all there needs no crates job.
+      - name: Name the crates that crates.io lacks
+        id: crates
+        if: steps.pending.outputs.crates-sha != ''
+        env:
+          VERSION: ${{ steps.pending.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*" >&2; exit 1; }
+          missing=""
+          for crate in quadratique-server quadratique; do
+            answer=$(curl --silent --show-error --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
+              --write-out '\n%{http_code}' "https://index.crates.io/qu/ad/$crate") || fail "crates.io's index did not answer for $crate"
+            case ${answer##*$'\n'} in
+              200) jq -e -s --arg version "$VERSION" 'any(.[]; .vers == $version)' <<< "${answer%$'\n'*}" > /dev/null || missing="$missing $crate" ;;
+              404) missing="$missing $crate" ;;
+              *) fail "crates.io's index answered ${answer##*$'\n'} for $crate" ;;
+            esac
+          done
+          if [ -z "$missing" ]; then
+            echo "crates.io has both crates at $VERSION: nothing to publish."
+          else
+            echo "crates.io lacks$missing at $VERSION."
+            echo "crates=${missing# }" >> "$GITHUB_OUTPUT"
+          fi
 
   # On a pull request: release-please, as the pinned action bundles it, opens the release pull request and turns the
   # merged one into the release; and the scripts of the jobs below behave as they should against a fake `gh`.
@@ -332,3 +373,114 @@ jobs:
           gh api -X PATCH "$repo/releases/$RELEASE" -F draft=false > /dev/null
           [ "$(release | jq -r .draft)" = false ] || fail "the release $TAG is still a draft"
           echo "Published $TAG with its four files."
+
+  # Publishes the crates that crates.io lacks, from the tag's commit, once the release is public with its files (or
+  # at once, for a release that was already complete). Runs project code, so it holds no App token and cannot write
+  # to the repository: its only credential is a crates.io token from Trusted Publishing, which lasts 30 minutes, is
+  # minted after the build, and is revoked when the job ends. crates.io accepts that token for this workflow file in
+  # the environment `crates-io`, which only `main` may deploy to, so a pull request that edits this file gets none.
+  crates:
+    name: publish the crates to crates.io
+    needs: [pending, publish]
+    if: >-
+      !cancelled() && needs.pending.outputs.crates != '' && (
+        needs.pending.outputs.release == '' ||
+        needs.publish.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    # Only stops a hang.
+    timeout-minutes: 60
+    steps:
+      # The release's commit, by its SHA: a tag name could also be a branch's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.pending.outputs.crates-sha }}
+          # Moon compares the checkout with `main`, so it needs the history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that the tag points at this commit
+        env:
+          VERSION: ${{ needs.pending.outputs.version }}
+        run: test "$(git rev-parse "refs/tags/v$VERSION^{commit}")" = "$(git rev-parse HEAD)"
+
+      # The store engine is compiled from C and links zlib.
+      - name: Install the system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential zlib1g-dev
+
+      # Installs proto, then the tools that .prototools pins, and caches them.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check that both crates have the release's version
+        working-directory: apps/quadratique
+        env:
+          VERSION: ${{ needs.pending.outputs.version }}
+        run: |
+          set -euo pipefail
+          metadata=$(cargo metadata --no-deps --format-version 1)
+          for crate in quadratique-server quadratique; do
+            found=$(jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version' <<< "$metadata")
+            [ "$found" = "$VERSION" ] || { echo "::error::the crate $crate is at '$found', but the release is $VERSION" >&2; exit 1; }
+          done
+          wanted=$(jq -r '.packages[] | select(.name == "quadratique") | .dependencies[] | select(.name == "quadratique-server") | .req' <<< "$metadata")
+          [ "$wanted" = "^$VERSION" ] || { echo "::error::the crate quadratique requires quadratique-server '$wanted', not ^$VERSION" >&2; exit 1; }
+
+      # Builds the web app, copies it into the server crate, and checks that both crates carry what they read.
+      - run: moon run quadratique-server:preflight
+
+      # Packs both crates and builds each one from its package, as cargo publish would, before any token exists.
+      - name: Package and build both crates as crates.io will serve them
+        working-directory: apps/quadratique
+        run: cargo package --workspace --allow-dirty --locked
+
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: crates-io
+
+      # Reads the index again before it publishes, so that a run of the failed jobs skips what the first run
+      # published. cargo uploads quadratique-server first and waits up to 60 seconds for the index to list it before
+      # it uploads quadratique. The packages were built by the step above, so it does not build them again.
+      - name: Publish the crates that crates.io lacks
+        working-directory: apps/quadratique
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io.outputs.token }}
+          VERSION: ${{ needs.pending.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*" >&2; exit 1; }
+          listed() {
+            local answer
+            answer=$(curl --silent --show-error --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
+              --write-out '\n%{http_code}' "https://index.crates.io/qu/ad/$1") || fail "crates.io's index did not answer for $1"
+            case ${answer##*$'\n'} in
+              200) jq -e -s --arg version "$VERSION" 'any(.[]; .vers == $version)' <<< "${answer%$'\n'*}" > /dev/null ;;
+              404) return 1 ;;
+              *) fail "crates.io's index answered ${answer##*$'\n'} for $1" ;;
+            esac
+          }
+          packages=()
+          for crate in quadratique-server quadratique; do
+            if listed "$crate"; then
+              echo "$crate $VERSION is already on crates.io: skipped."
+            else
+              packages+=(--package "$crate")
+            fi
+          done
+          if [ ${#packages[@]} = 0 ]; then
+            echo "crates.io has both crates at $VERSION: nothing to publish."
+            exit 0
+          fi
+          cargo publish --locked --no-verify --allow-dirty "${packages[@]}"
+          for crate in quadratique-server quadratique; do
+            listed "$crate" || fail "crates.io's index does not list $crate $VERSION yet. Check https://crates.io/crates/$crate/$VERSION, then run the failed jobs again."
+          done
+          echo "crates.io has both crates at $VERSION."

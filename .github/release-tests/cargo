@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""A fake `cargo` for the release workflow's steps. `cargo metadata` describes the two crates of the workspace from
+$FAKE_GH/state.json ("workspace": the crates' versions and the CLI's requirement on the server). `cargo publish`
+uploads the named packages in dependency order to the crates under "crates", as the real one does: it refuses a
+version that the index already lists, fails an upload named by "fail_publish_of" once, leaves a crate named by
+"unlisted" out of the index after its upload, and stops when a crate it uploaded is not listed while another waits
+on it. Every call is logged to $FAKE_GH/calls."""
+import json, os, sys
+
+root = os.environ["FAKE_GH"]
+state_file = os.path.join(root, "state.json")
+state = json.load(open(state_file))
+args = sys.argv[1:]
+open(os.path.join(root, "calls"), "a").write("cargo " + " ".join(args) + "\n")
+workspace = state["workspace"]
+
+
+def save():
+    json.dump(state, open(state_file, "w"))
+
+
+if args[0] == "metadata":
+    print(json.dumps({"packages": [
+        {"name": "quadratique-server", "version": workspace["quadratique-server"], "dependencies": []},
+        {"name": "quadratique", "version": workspace["quadratique"],
+         "dependencies": [{"name": "quadratique-server", "req": workspace["requires"]}]},
+    ]}))
+    sys.exit(0)
+
+assert args[0] == "publish", args
+if not os.environ.get("CARGO_REGISTRY_TOKEN"):
+    sys.exit("error: no token found, please run `cargo login`")
+named = [args[i + 1] for i, a in enumerate(args) if a in ("-p", "--package")]
+plan = [crate for crate in ("quadratique-server", "quadratique") if crate in named]
+for crate in plan:
+    if workspace[crate] in state["crates"].get(crate, []):
+        sys.exit(f"error: crate {crate}@{workspace[crate]} already exists on crates.io index")
+for position, crate in enumerate(plan):
+    version = workspace[crate]
+    print(f"   Uploading {crate} v{version}", file=sys.stderr)
+    if state.get("fail_publish_of") == crate:
+        state.pop("fail_publish_of")
+        save()
+        sys.exit(f"error: failed to publish {crate} v{version} to registry at https://crates.io: connection reset")
+    if crate == state.get("unlisted"):
+        state.setdefault("uploaded", []).append(crate)
+        save()
+        if position + 1 < len(plan):
+            sys.exit(f"error: unable to publish {' and '.join(plan[position + 1:])} due to a timeout while waiting for published dependencies to be available.")
+        print(f"warning: timed out waiting for {crate} v{version} to be available in registry `crates-io`", file=sys.stderr)
+        continue
+    state["crates"].setdefault(crate, []).append(version)
+    save()
+    print(f"   Published {crate} v{version} at registry `crates-io`", file=sys.stderr)
