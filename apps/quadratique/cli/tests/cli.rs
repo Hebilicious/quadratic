@@ -1,6 +1,10 @@
 #[path = "cli/support.rs"]
 mod support;
 
+#[allow(dead_code)]
+#[path = "../src/shipped.rs"]
+mod shipped;
+
 #[path = "cli/advance.rs"]
 mod advance;
 #[path = "cli/callers.rs"]
@@ -21,6 +25,8 @@ mod mcp;
 mod other_build;
 #[path = "cli/server_life.rs"]
 mod server_life;
+#[path = "cli/shipped_lists.rs"]
+mod shipped_lists;
 #[path = "cli/tokens.rs"]
 mod tokens;
 #[path = "cli/traces.rs"]
