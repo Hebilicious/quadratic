@@ -152,6 +152,10 @@ pub struct Identity {
     /// Absent in the answer of a server built before the interface was part of it.
     #[serde(default)]
     pub interface: Option<String>,
+    /// The store schema version the server opened its store at. Absent in the answer of a server
+    /// built before the field: those builds know schema 1 only.
+    #[serde(default)]
+    pub schema: Option<i64>,
 }
 
 struct Identify {
@@ -254,6 +258,7 @@ pub async fn start_with(
         pid: std::process::id(),
         database: database.clone(),
         interface: Some(interface()),
+        schema: Some(crate::store::SCHEMA_VERSION),
     };
     let identify = Identify {
         answer: Bytes::from(serde_json::to_vec(&identity).map_err(std::io::Error::from)?),
