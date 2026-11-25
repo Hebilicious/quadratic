@@ -1712,3 +1712,10 @@ textarea.field-input {
     padding-inline: var(--spacing-size-4);
   }
 }
+
+.not-paired {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: var(--spacing-size-3);
+}

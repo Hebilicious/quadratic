@@ -85,9 +85,36 @@ starts the server on the port you give (`0`: one the system chooses) and keeps n
 While the server is down, another account of this machine can listen on the kept port. A tab or a
 bookmark then reaches that account's program, which can read what the browser saved for that
 address. On a machine whose other accounts you do not trust, run `quadratique server strict on`:
-each start of the server then takes an address it never served, and you run `quadratique ui`
-after each restart. `quadratique server strict off` keeps the current address again. `ui` and
+each start of the server then takes an address it never served and a new token, and you run
+`quadratique ui --open` after each restart. `quadratique server strict off` keeps the current address again. `ui` and
 `server status` say `"addressKept": false` while strict is on.
+
+### Let a browser in
+
+`quadratique ui --open` opens the web app and lets this browser in: run it once per browser, and
+there is nothing to type or copy. The browser keeps a token for the web app, and its tabs and
+bookmarks keep working across restarts and upgrades. A browser that was never let in shows one
+sentence: "To open Quadratique in this browser, run `quadratique ui --open` in a terminal."
+
+How it works: `ui` asks the server, over its socket, for a one-time code, valid once and for 60
+seconds. With `--open` it writes the link into a file of the data folder that only your account can
+read (`open-<random>.html`) and opens that file, so the code never appears in a process list. The
+server removes the file once the code is used or has expired, and at its next start. Without
+`--open`, `ui` prints the link as `link`, for a browser you start yourself or an SSH forward. The
+page takes the code out of its address before anything else runs, and exchanges it at
+`POST /session` for the token, which it saves in the browser and sends as `Authorization: Bearer`
+on every request and on its live channel.
+
+The server keeps the token in `web-token` in the data folder, mode `0600`. To sign every browser
+out, run `quadratique server sign-out`: it makes a new token, and each browser shows the sentence
+at its next request until you run `quadratique ui --open` there again. A live channel that is
+already open goes on until its next reconnection. In strict mode (`quadratique server strict on`)
+the token is made at each start of the server and kept in memory only, so every restart signs
+every browser out. A strict setting that you change applies from the next start of the server.
+
+Until the next release requires it (QUA-58), a request with no token is still served, as the
+kernel check of "Who can talk to the server" guards it; a request with a token that is not the
+current one gets `401`.
 
 ## Install from a release
 

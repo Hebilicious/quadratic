@@ -27,12 +27,12 @@ pub fn all() -> Vec<CliCommand<Context>> {
         ),
         command(
             "server",
-            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; each start of the server takes an address it never served, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui gives the new address. server strict off: the server keeps its address across restarts (the default).",
+            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; from the next start, each start of the server takes an address it never served and a new token, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui opens it again. server strict off: from the next start, the server keeps its address and the web app's token across restarts (the default). server sign-out: a new token for the web app, which signs every browser out; quadratique ui opens it again.",
             |args, io| server_command(args, io).boxed(),
         ),
         command(
             "ui",
-            "Make sure the server runs, and print the address of the web app, and addressKept: whether the server keeps that address across restarts (false under server strict on). ui --open: also open it in the browser.",
+            "Make sure the server runs, and print the address of the web app (url), a one-time link that lets a browser in (link, valid 60 seconds and once), and addressKept: whether the server keeps that address across restarts (false under server strict on). ui --open: open the web app in the browser and let it in, through a file only this account can read, instead of printing the link. A browser that was let in keeps its token, and stays in across restarts until server sign-out (in strict mode, until the next restart).",
             |args, io| ui(args, io).boxed(),
         ),
         command("init", crate::init::USAGE, |args, io| {
@@ -180,11 +180,15 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
         ["stop"] => stop(&home).await,
         ["strict", "on"] => set_strict(&home, true).await,
         ["strict", "off"] => set_strict(&home, false).await,
+        ["sign-out"] => match sign_out(&home).await {
+            Ok(value) => Ok(value),
+            Err(message) => return report(io, Kind::Unavailable, message),
+        },
         _ => {
             return report(
                 io,
                 Kind::InvalidInput,
-                "Give one of: quadratique server status, quadratique server stop, quadratique server strict on, quadratique server strict off.",
+                "Give one of: quadratique server status, quadratique server stop, quadratique server strict on, quadratique server strict off, quadratique server sign-out.",
             );
         }
     };
@@ -334,7 +338,10 @@ async fn set_strict(home: &Home, on: bool) -> Result<Value, background::LifeErro
     };
     server::set_strict(home.prepared(), on, port)
         .map_err(|error| home.unusable(error, background::Attempt::Start))?;
-    Ok(located(home, json!({ "strict": on })))
+    Ok(located(
+        home,
+        json!({ "strict": on, "from": "the next start of the server" }),
+    ))
 }
 
 async fn stop(home: &Home) -> Result<Value, background::LifeError> {
@@ -366,16 +373,17 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
         Ok(home) => home,
         Err(message) => return report(io, Kind::Internal, message),
     };
-    let runtime = match background::ensure(&home).await {
-        Ok(runtime) => runtime,
-        Err(error) => return report(io, Kind::Unavailable, error.to_string()),
-    };
-    let url = format!("http://{}/", runtime.address);
     let kept = !server::strict(home.prepared());
-    let answer = if !open {
-        json!({ "url": url, "opened": false, "addressKept": kept })
-    } else {
-        match open_in_browser(&url).await {
+    let paired = match pair(&home, open).await {
+        Ok(paired) => paired,
+        Err(message) => return report(io, Kind::Unavailable, message),
+    };
+    let url = paired.url.clone();
+    let answer = match (open, paired.file) {
+        (false, _) | (true, None) => {
+            json!({ "url": url, "link": paired.link, "opened": false, "addressKept": kept })
+        }
+        (true, Some(file)) => match open_in_browser(&file.display().to_string()).await {
             Ok(Launch::Opened) => json!({ "url": url, "opened": true, "addressKept": kept }),
             Ok(Launch::Requested) => {
                 json!({ "url": url, "opened": false, "launch": "requested", "addressKept": kept })
@@ -388,20 +396,81 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
                 return report(
                     io,
                     Kind::Unavailable,
-                    format!("the browser opener {OPENER} {ended}; the web app is at {url}"),
+                    format!(
+                        "the browser opener {OPENER} {ended}; run `quadratique ui` for a link to open yourself"
+                    ),
                 );
             }
             Err(error) => {
                 return report(
                     io,
                     Kind::Unavailable,
-                    format!("the browser did not open ({error}); the web app is at {url}"),
+                    format!(
+                        "the browser did not open ({error}); run `quadratique ui` for a link to open yourself"
+                    ),
                 );
             }
-        }
+        },
     };
     print_json(io, &answer);
     exit::VALUE
+}
+
+/// A one-time link to the web app, from the server itself over its socket, so that the code only ever reaches a
+/// listener of this home's server.
+#[cfg(unix)]
+async fn pair(home: &Home, open: bool) -> Result<quadratique_server::pairing::Issued, String> {
+    background::ensure(home)
+        .await
+        .map_err(|error| error.to_string())?;
+    match server::pair_over_socket(home.prepared(), open).await {
+        Ok(server::Asked::Answered(issued)) => Ok(issued),
+        Ok(server::Asked::Refused(reason)) => Err(reason),
+        Err(unanswered) => Err(format!(
+            "the server on {} gave no link: {}",
+            home.prepared().socket().display(),
+            unanswered.describe()
+        )),
+    }
+}
+
+/// Pairing goes through the socket, which Windows does not have yet (QUA-61).
+#[cfg(not(unix))]
+async fn pair(home: &Home, _open: bool) -> Result<quadratique_server::pairing::Issued, String> {
+    background::ensure(home)
+        .await
+        .map_err(|error| error.to_string())?;
+    Err(
+        "pairing the web app needs the server's socket, which Windows does not have yet (QUA-61)"
+            .to_owned(),
+    )
+}
+
+/// A new token for the web app: every browser is signed out, and `quadratique ui` pairs it again.
+async fn sign_out(home: &Home) -> Result<Value, String> {
+    background::ensure(home)
+        .await
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        match server::sign_out_over_socket(home.prepared()).await {
+            Ok(server::Asked::Answered(signed_out)) => Ok(located(
+                home,
+                json!({ "signedOut": signed_out.signed_out, "lasting": signed_out.lasting }),
+            )),
+            Ok(server::Asked::Refused(reason)) => Err(reason),
+            Err(unanswered) => Err(format!(
+                "the server on {} did not sign out: {}",
+                home.prepared().socket().display(),
+                unanswered.describe()
+            )),
+        }
+    }
+    #[cfg(not(unix))]
+    Err(
+        "signing out needs the server's socket, which Windows does not have yet (QUA-61)"
+            .to_owned(),
+    )
 }
 
 const OPENER: &str = if cfg!(target_os = "macos") {

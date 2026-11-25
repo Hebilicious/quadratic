@@ -38,6 +38,7 @@ test("the live connection opens only once the server has answered the subscripti
   const { port } = address;
   const quadratique = await openQuadratique({
     origin: `http://127.0.0.1:${String(port)}`,
+    access: { token: "the-token", unauthorized: () => undefined },
     modelContext: undefined,
     writable: () => true,
   });
@@ -77,6 +78,7 @@ test("while the page shows a past moment, no changing call leaves the page, and 
   }
   const quadratique = await openQuadratique({
     origin: `http://127.0.0.1:${String(address.port)}`,
+    access: { token: "the-token", unauthorized: () => undefined },
     modelContext: undefined,
     writable: () => false,
   });
@@ -97,4 +99,49 @@ test("while the page shows a past moment, no changing call leaves the page, and 
   await expect(quadratique.projects(signal)).rejects.toThrow();
 
   expect(asked).toEqual(["/web/capabilities/project.list"]);
+});
+
+test("every request, the event stream included, carries the bearer, and a 401 tells the page", async () => {
+  const bearers: (string | undefined)[] = [];
+  const server = createServer((request, response) => {
+    bearers.push(request.headers.authorization);
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ kind: "unavailable", message: "Not paired." }));
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  onTestFinished(async () => {
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("The test server has no port");
+  }
+  let refusals = 0;
+  const quadratique = await openQuadratique({
+    origin: `http://127.0.0.1:${String(address.port)}`,
+    access: {
+      token: "the-token",
+      unauthorized: () => {
+        refusals += 1;
+      },
+    },
+    modelContext: undefined,
+    writable: () => true,
+  });
+  onTestFinished(async () => {
+    await quadratique.dispose();
+  });
+  const signal = new AbortController().signal;
+
+  await expect(quadratique.projects(signal)).rejects.toThrow();
+  await expect(quadratique.changes(undefined, signal)).rejects.toThrow();
+
+  expect(bearers).toEqual(["Bearer the-token", "Bearer the-token"]);
+  expect(refusals).toBe(2);
 });

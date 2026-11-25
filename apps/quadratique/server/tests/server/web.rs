@@ -12,23 +12,23 @@ use tokio::net::TcpStream;
 
 use crate::support::within;
 
-struct Site {
-    server: Server,
-    _home: TempDir,
+pub struct Site {
+    pub server: Server,
+    pub home: TempDir,
     _app: TempDir,
 }
 
 impl Site {
-    fn address(&self) -> SocketAddr {
+    pub fn address(&self) -> SocketAddr {
         self.server.address()
     }
 
-    fn origin(&self) -> String {
+    pub fn origin(&self) -> String {
         format!("http://{}", self.address())
     }
 }
 
-async fn start(build: impl FnOnce(&Path)) -> Site {
+pub async fn start(build: impl FnOnce(&Path)) -> Site {
     let app = tempfile::tempdir().expect("a folder for the built app");
     build(app.path());
     let web_app = WebApp::Directory(app.path().to_path_buf());
@@ -51,12 +51,12 @@ async fn start_app(web_app: WebApp, app: TempDir) -> Site {
     .expect("the server starts");
     Site {
         server,
-        _home: home,
+        home,
         _app: app,
     }
 }
 
-fn built(directory: &Path) {
+pub fn built(directory: &Path) {
     std::fs::write(
         directory.join("index.html"),
         "<!doctype html><title>Quadratique</title>",
@@ -66,14 +66,14 @@ fn built(directory: &Path) {
     std::fs::write(directory.join("assets/app-1a2b.js"), "export {};").expect("a script");
 }
 
-struct Answer {
-    status: u16,
-    head: String,
-    body: String,
+pub struct Answer {
+    pub status: u16,
+    pub head: String,
+    pub body: String,
 }
 
 impl Answer {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub fn header(&self, name: &str) -> Option<&str> {
         self.head.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
             key.eq_ignore_ascii_case(name).then(|| value.trim())
@@ -81,7 +81,7 @@ impl Answer {
     }
 }
 
-async fn request(
+pub async fn request(
     address: SocketAddr,
     method: &str,
     path: &str,
@@ -146,7 +146,13 @@ fn unchunked(head: &str, body: &str) -> String {
 }
 
 impl Site {
-    async fn call(&self, route: &str, id: &str, input: Value, extra: &[(&str, &str)]) -> Answer {
+    pub async fn call(
+        &self,
+        route: &str,
+        id: &str,
+        input: Value,
+        extra: &[(&str, &str)],
+    ) -> Answer {
         let host = self.address().to_string();
         let origin = self.origin();
         let mut headers = vec![("Host", host.as_str())];
@@ -245,7 +251,10 @@ async fn a_page_of_another_origin_or_another_host_name_is_refused() {
         Some(json!({})),
     )
     .await;
-    assert_eq!(named.status, 200, "the server's own page under {localhost}");
+    assert_eq!(
+        named.status, 403,
+        "the server's own page under {localhost}, which may resolve to [::1]"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -329,6 +338,9 @@ async fn the_built_app_is_served_and_a_client_side_route_falls_back_to_its_index
     );
 
     assert_eq!(site.page("/assets/missing.js").await.status, 404);
+    for elsewhere in ["/elsewhere", "/projects/WEB/other", "/webx", "/now/x"] {
+        assert_eq!(site.page(elsewhere).await.status, 404, "{elsewhere}");
+    }
     assert_eq!(site.page("/../Cargo.toml").await.status, 404);
 }
 
@@ -460,7 +472,8 @@ async fn every_route_refuses_a_host_that_is_not_the_server_s_own_address() {
     let site = start(built).await;
     let port = site.address().port();
     let foreign_host = format!("rebound.example:{port}");
-    let own_hosts = [site.address().to_string(), format!("localhost:{port}")];
+    let own_hosts = [site.address().to_string()];
+    let localhost = format!("localhost:{port}");
     let routes = [
         ("POST", "/cli/capabilities/project.list"),
         ("GET", "/server"),
@@ -480,6 +493,15 @@ async fn every_route_refuses_a_host_that_is_not_the_server_s_own_address() {
         )
         .await;
         assert_eq!(rebound.status, 403, "{method} {path} under {foreign_host}");
+        let named = request(
+            site.address(),
+            method,
+            path,
+            &[("Host", localhost.as_str())],
+            body.clone(),
+        )
+        .await;
+        assert_eq!(named.status, 403, "{method} {path} under {localhost}");
 
         for own in &own_hosts {
             let answer = request(

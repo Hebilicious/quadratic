@@ -56,11 +56,14 @@ export class Workspace {
     return path;
   }
 
-  async start(port = 0): Promise<string> {
+  /** Starts `quadratique serve` on `port`, 0 letting the system choose; `"kept"` starts it as a person does, on the
+   * port the home kept. */
+  async start(port: number | "kept" = 0): Promise<string> {
     if (this.server !== undefined) {
       throw new Error("The workspace's server already runs");
     }
-    const child = spawn(BINARY, ["serve", "--port", String(port)], {
+    const args = port === "kept" ? ["serve"] : ["serve", "--port", String(port)];
+    const child = spawn(BINARY, args, {
       cwd: this.root,
       env: this.environment("human"),
       stdio: ["ignore", "ignore", "pipe"],
@@ -122,12 +125,36 @@ export class Workspace {
     return String(answered.revision);
   }
 
+  /** The address of `path` with a one-time code from `quadratique ui`, as a person's first visit opens it. */
   url(path = "/"): string {
-    const answer = this.quadratique("human", this.repository, "ui");
-    if (typeof answer !== "object" || answer === null || !("url" in answer)) {
-      throw new Error("quadratique ui gave no url");
+    const answer = this.ui();
+    const code = new URL(answer.link).hash;
+    if (!code.startsWith("#pair=")) {
+      throw new Error("quadratique ui gave a link without a code");
     }
-    return new URL(path, String(answer.url)).href;
+    const url = new URL(path, answer.url);
+    url.hash = code;
+    return url.href;
+  }
+
+  /** The address of `path` with no code, as a bookmark keeps it. */
+  bookmark(path = "/"): string {
+    return new URL(path, this.ui().url).href;
+  }
+
+  ui(): { readonly url: string; readonly link: string } {
+    const answer = this.quadratique("human", this.repository, "ui");
+    if (
+      typeof answer !== "object" ||
+      answer === null ||
+      !("url" in answer) ||
+      !("link" in answer) ||
+      typeof answer.url !== "string" ||
+      typeof answer.link !== "string"
+    ) {
+      throw new Error("quadratique ui gave no url and link");
+    }
+    return { url: answer.url, link: answer.link };
   }
 
   quadratique(who: Who, directory: string, ...args: string[]): unknown {

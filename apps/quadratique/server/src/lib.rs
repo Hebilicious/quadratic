@@ -8,6 +8,7 @@ pub mod credentials;
 pub mod domain;
 pub mod git;
 pub mod home;
+pub mod pairing;
 #[cfg(target_os = "linux")]
 pub mod peer;
 pub mod serve;

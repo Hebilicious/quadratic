@@ -14,6 +14,7 @@ use http_body_util::{BodyExt, Full};
 use crate::app::Context;
 use crate::assets::media_type;
 use crate::domain::{Actor, Binding, Caller, WorkingCopy};
+use crate::pairing::{self, BearerGuard, Pairing};
 use crate::store::Store;
 
 pub const WEB_TARGET: &str = "web";
@@ -101,13 +102,15 @@ impl Origin {
         let _ = self.0.set(address);
     }
 
+    pub fn address(&self) -> Option<SocketAddr> {
+        self.0.get().copied()
+    }
+
+    /// Only the numeric address: `localhost` may resolve to `[::1]`, where another account can listen on the same port.
     fn hosts(&self) -> Vec<String> {
         self.0
             .get()
-            .map(|address| {
-                let port = address.port();
-                vec![address.to_string(), format!("localhost:{port}")]
-            })
+            .map(|address| vec![address.to_string()])
             .unwrap_or_default()
     }
 }
@@ -124,7 +127,13 @@ pub fn caller(binding: Binding) -> Caller {
     }
 }
 
-pub fn routes(app: &Arc<Application<Context>>, store: &Store, web_app: WebApp) -> Routes {
+/// The web app's routes on TCP: the two data targets behind the bearer, and the app's files.
+pub fn routes(
+    app: &Arc<Application<Context>>,
+    store: &Store,
+    web_app: WebApp,
+    pairing: &Arc<Pairing>,
+) -> Routes {
     let target = |target: &str, base: &str, binding: Binding| {
         let context = Arc::new(Context::new(store.clone(), caller(binding)));
         let options = HttpOptions {
@@ -132,7 +141,12 @@ pub fn routes(app: &Arc<Application<Context>>, store: &Store, web_app: WebApp) -
             base: base.into(),
             ..HttpOptions::default()
         };
-        Arc::new(HttpBinding::new(app.clone(), context, options)) as Arc<dyn Handler>
+        let binding = Arc::new(HttpBinding::new(app.clone(), context, options));
+        Arc::new(BearerGuard {
+            pairing: Arc::clone(pairing),
+            requirement: pairing::REQUIRED,
+            inner: binding,
+        }) as Arc<dyn Handler>
     };
     vec![
         (WEB_BASE.into(), target(WEB_TARGET, WEB_BASE, Binding::Web)),
@@ -151,6 +165,8 @@ pub fn routes(app: &Arc<Application<Context>>, store: &Store, web_app: WebApp) -
 pub enum OriginHeader {
     Refused,
     OwnOnly,
+    /// Present, and exactly this server's own origin.
+    Required,
 }
 
 pub fn guarded(origin: &Origin, routes: Routes, origin_header: OriginHeader) -> Routes {
@@ -194,13 +210,13 @@ impl Handler for SameOrigin {
                 "No page can call this route: only the quadratique command line can.",
             )));
         }
+        let origins = request.headers().get_all(header::ORIGIN);
+        let present = origins.iter().next().is_some();
         let own_origin = own_host.is_some_and(|host| {
-            request
-                .headers()
-                .get_all(header::ORIGIN)
+            origins
                 .iter()
                 .all(|origin| origin.as_bytes() == format!("http://{host}").as_bytes())
-        });
+        }) && (present || self.origin_header != OriginHeader::Required);
         if !own_origin {
             return Box::pin(std::future::ready(text(
                 StatusCode::FORBIDDEN,
@@ -245,7 +261,7 @@ impl Files {
         {
             return file_response(file, relative.starts_with("assets"));
         }
-        if relative.extension().is_some() {
+        if relative.extension().is_some() || !is_deep_link(path) {
             return text(StatusCode::NOT_FOUND, "No such file.");
         }
         if let Some(index) = app.read(Path::new(INDEX)) {
@@ -264,6 +280,47 @@ impl Files {
             }
         }
     }
+}
+
+/// The paths of the app's pages (web/src/route.ts), which answer the app's shell. `/cli`, `/server`, `/session` and
+/// the data targets are never one of them, so no other route's path falls back to the shell.
+fn is_deep_link(path: &str) -> bool {
+    if path.contains("//") {
+        return false;
+    }
+    let path = path
+        .strip_suffix('/')
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(path);
+    let parts: Vec<&str> = path.split('/').skip(1).collect();
+    let page = |part: &str| matches!(part, "board" | "history");
+    match parts.as_slice() {
+        [""] | ["now"] | ["all"] => true,
+        ["all", part] => page(part),
+        ["projects", key] | ["issues", key] => !key.is_empty(),
+        ["projects", key, part] => !key.is_empty() && page(part),
+        _ => false,
+    }
+}
+
+/// The bootstrap pages that `quadratique ui` opens hold a one-time code: the data folder must never be served, so the
+/// built app and the data folder must not contain each other.
+pub fn refuse_overlap(web_app: &WebApp, folder: &Path) -> Result<(), String> {
+    let WebApp::Directory(directory) = web_app else {
+        return Ok(());
+    };
+    let resolved = directory
+        .canonicalize()
+        .or_else(|_| std::path::absolute(directory))
+        .unwrap_or_else(|_| directory.clone());
+    if resolved.starts_with(folder) || folder.starts_with(&resolved) {
+        return Err(format!(
+            "the web app at {} and the data folder {} are inside each other; set {APP_VARIABLE} to a folder outside the data folder",
+            resolved.display(),
+            folder.display()
+        ));
+    }
+    Ok(())
 }
 
 fn relative(path: &str) -> Option<PathBuf> {
@@ -326,4 +383,58 @@ fn text(status: StatusCode, message: &str) -> Response<ResponseBody> {
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     secure(headers);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{WebApp, is_deep_link, refuse_overlap};
+
+    #[test]
+    fn only_the_pages_of_the_app_are_deep_links() {
+        for page in [
+            "/",
+            "/now",
+            "/all",
+            "/all/",
+            "/all/board",
+            "/all/history",
+            "/projects/DEM",
+            "/projects/DEM/board",
+            "/projects/DEM/history/",
+            "/issues/DEM-1",
+        ] {
+            assert!(is_deep_link(page), "{page}");
+        }
+        for other in [
+            "/cli",
+            "/cli/capabilities",
+            "/server",
+            "/server/stop",
+            "/session",
+            "/web",
+            "/webmcp/x",
+            "/projects",
+            "/projects/DEM/other",
+            "/issues/DEM-1/more",
+            "/elsewhere",
+            "//",
+        ] {
+            assert!(!is_deep_link(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn the_web_app_and_the_data_folder_may_not_contain_each_other() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let home = folder.path().canonicalize().expect("its path");
+        let inside = home.join("dist");
+        let outside = tempfile::tempdir().expect("another folder");
+
+        assert!(refuse_overlap(&WebApp::Directory(inside), &home).is_err());
+        assert!(refuse_overlap(&WebApp::Directory(home.clone()), &home.join("data")).is_err());
+        assert!(refuse_overlap(&WebApp::Directory(outside.path().to_path_buf()), &home).is_ok());
+        assert!(refuse_overlap(&WebApp::Embedded(&[]), Path::new("/")).is_ok());
+    }
 }
