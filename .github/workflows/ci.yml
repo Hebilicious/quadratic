@@ -124,6 +124,11 @@ jobs:
             apps/quadratique/target/debug/quadratique.exe
           if-no-files-found: error
 
+      - name: Probe doltlite (temporary)
+        if: runner.os == 'Windows' && !cancelled()
+        working-directory: apps/quadratique
+        run: cargo test -p quadratique-server --test windows_probe -- --nocapture
+
       - name: Server tests
         if: ${{ !cancelled() }}
         run: moon run quadratique-server:test
