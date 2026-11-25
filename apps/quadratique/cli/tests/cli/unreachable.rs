@@ -54,8 +54,10 @@ fn hold_the_home(home: &Home) -> File {
     lock
 }
 
+/// A server from before the socket whose TCP listener answers only its own account: the command line asks TCP
+/// nothing, and refuses as for any server of release 0.1 that it cannot prove (record 0004, §3).
 #[test]
-fn a_command_that_cannot_reach_the_server_says_so_and_starts_nothing() {
+fn a_command_that_meets_a_server_from_before_the_socket_says_so_and_starts_nothing() {
     let home = Home::new();
     let elsewhere = outside();
     of_another_account(&home);
@@ -69,8 +71,9 @@ fn a_command_that_cannot_reach_the_server_says_so_and_starts_nothing() {
     assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
     let message = message_of(&refused);
     assert!(
-        message.contains("answers only processes of its own account")
-            && message.contains("Call the Quadratique MCP tool `issue.list`"),
+        message.contains("from before the socket (release 0.1)")
+            && message.contains("Nothing was started.")
+            && message.contains("systemctl --user stop quadratique.service"),
         "{message}"
     );
     assert!(
@@ -88,7 +91,8 @@ fn a_command_that_cannot_reach_the_server_says_so_and_starts_nothing() {
         .args(["server", "status"])
         .run()
         .ok();
-    assert_eq!(status["reachable"], false, "{status}");
+    assert_eq!(status["legacy"], true, "{status}");
+    assert_eq!(status["provenStop"], false, "{status}");
     assert!(status["reason"].is_string(), "{status}");
 
     let stop = home
@@ -317,8 +321,10 @@ fn entries(home: &Path) -> Vec<String> {
     names
 }
 
+/// A read-only home held by a server from before the socket: status says what holds it, a command refuses as for that
+/// server, and a stop, which must take `start.lock`, cannot reach it. Nothing in the home changes.
 #[test]
-fn a_caller_that_cannot_write_the_home_or_reach_its_server_says_it_cannot_reach_it() {
+fn a_caller_that_cannot_write_a_home_held_by_a_server_from_before_the_socket_changes_nothing() {
     let home = Home::new();
     let elsewhere = outside();
     of_another_account(&home);
@@ -331,18 +337,21 @@ fn a_caller_that_cannot_write_the_home_or_reach_its_server_says_it_cannot_reach_
     let listed = run(&["issue", "list"]);
     let stopped = run(&["server", "stop"]);
 
-    assert_eq!(status["reachable"], false, "{status}");
+    assert_eq!(status["legacy"], true, "{status}");
     assert_eq!(listed.code, UNAVAILABLE, "{listed:?}");
     assert!(
         listed
             .stderr
-            .contains("Cannot reach the Quadratique server from here")
+            .contains("from before the socket (release 0.1)")
             && listed.stderr.contains("Nothing was started"),
         "{listed:?}"
     );
     assert_eq!(stopped.code, UNAVAILABLE, "{stopped:?}");
     assert!(
-        stopped.stderr.contains("Nothing was stopped"),
+        stopped
+            .stderr
+            .contains("Cannot reach the Quadratique server from here")
+            && stopped.stderr.contains("Nothing was stopped"),
         "{stopped:?}"
     );
     assert_eq!(entries(home.path()), before);

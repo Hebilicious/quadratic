@@ -8,7 +8,6 @@
 //! restarted through systemd or stopped. Whatever cannot be inspected is left as it is: an unknown
 //! executable, a `systemctl` that fails, a platform without `/proc` or pidfds.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -17,6 +16,8 @@ use quadratique_server::server::identity;
 use serde_json::Value;
 
 use crate::background::{self, Found, Home};
+use crate::process::running_file;
+use crate::process::{FileId, file_id};
 
 const SERVICE: &str = "quadratique.service";
 const SYSTEMCTL_LIMIT: Duration = Duration::from_secs(120);
@@ -29,8 +30,6 @@ const POLL: Duration = Duration::from_millis(100);
 /// The store schema of every build before servers reported theirs.
 const SCHEMA_BEFORE_REPORTS: i64 = 1;
 
-pub type FileId = (u64, u64);
-
 /// What a process runs, compared with the installed binary and the file it replaced.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Runs {
@@ -38,21 +37,6 @@ pub enum Runs {
     Replaced,
     Other(PathBuf),
     Unknown,
-}
-
-pub fn file_id(path: &Path) -> Option<FileId> {
-    std::fs::metadata(path)
-        .ok()
-        .map(|meta| (meta.dev(), meta.ino()))
-}
-
-/// The device and inode of the file a process runs, from `/proc` (Linux only).
-fn running_file(pid: u32) -> Option<FileId> {
-    if cfg!(target_os = "linux") {
-        file_id(Path::new(&format!("/proc/{pid}/exe")))
-    } else {
-        None
-    }
 }
 
 pub fn what_runs(pid: u32, binary: &Path, replaced: Option<FileId>) -> Runs {
@@ -225,49 +209,28 @@ pub async fn bring_up(
 /// one pidfd, so the signal cannot reach another process that took the pid in between.
 #[cfg(target_os = "linux")]
 async fn stop_replaced(pid: u32, replaced: Option<FileId>) -> Result<(), String> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    use rustix::io::Errno;
-    use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
+    use crate::process::{Pinned, Signalled};
 
     let leave = |why: String| format!("{why}; nothing was stopped. Run: quadratique server stop");
-    let target = i32::try_from(pid)
-        .ok()
-        .and_then(Pid::from_raw)
-        .ok_or_else(|| leave(format!("{pid} is not a process id")))?;
-    let pidfd = match pidfd_open(target, PidfdFlags::empty()) {
-        Ok(pidfd) => pidfd,
-        Err(Errno::SRCH) => return Ok(()),
-        Err(error) => return Err(leave(format!("pid {pid} cannot be opened: {error}"))),
+    let Some(pinned) = Pinned::open(pid).map_err(leave)? else {
+        return Ok(());
     };
-    if replaced.is_none() || running_file(pid) != replaced {
+    if replaced.is_none() || pinned.runs() != replaced {
         return Err(leave(format!(
             "pid {pid} no longer runs the replaced binary"
         )));
     }
-    match pidfd_send_signal(&pidfd, Signal::TERM) {
-        Ok(()) => {}
-        Err(Errno::SRCH) => return Ok(()),
-        Err(error) => return Err(leave(format!("pid {pid} cannot be signalled: {error}"))),
+    if pinned.terminate().map_err(leave)? == Signalled::Gone {
+        return Ok(());
     }
-    tokio::task::spawn_blocking(move || {
-        let limit = Timespec {
-            tv_sec: STOP_LIMIT.as_secs() as i64,
-            tv_nsec: 0,
-        };
-        let mut watched = [PollFd::new(&pidfd, PollFlags::IN)];
-        poll(&mut watched, Some(&limit))
-    })
-    .await
-    .map_err(|error| error.to_string())
-    .and_then(|polled| polled.map_err(|error| error.to_string()))
-    .and_then(|ready| {
-        (ready == 1).then_some(()).ok_or_else(|| {
-            format!(
-                "the server of the earlier build (pid {pid}) was asked to stop and still runs after {} seconds. Run: quadratique server stop",
-                STOP_LIMIT.as_secs()
-            )
-        })
-    })
+    if pinned.exits_within(STOP_LIMIT).await? {
+        Ok(())
+    } else {
+        Err(format!(
+            "the server of the earlier build (pid {pid}) was asked to stop and still runs after {} seconds. Run: quadratique server stop",
+            STOP_LIMIT.as_secs()
+        ))
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

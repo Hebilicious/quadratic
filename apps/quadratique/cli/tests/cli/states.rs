@@ -114,6 +114,8 @@ enum OnStop {
     LoseAnswer,
     /// Answers `202` and stops listening, then keeps the lock until the test sends on the channel.
     HoldUntil(mpsc::Receiver<()>),
+    /// Answers `405`, as a build between the socket and the stop request does, and keeps serving.
+    NotServed,
 }
 
 /// A fake server on the socket: it answers `GET /server` with `answer`, a stop of the generation in `answer` as
@@ -161,6 +163,10 @@ impl Fake {
                 let named = json!({ "generation": generation }).to_string();
                 if asked["generation"] != generation.as_str() {
                     let _ = stream.write_all(http("409 Conflict", &named).as_bytes());
+                    continue;
+                }
+                if matches!(on_stop, OnStop::NotServed) {
+                    let _ = stream.write_all(http("405 Method Not Allowed", "").as_bytes());
                     continue;
                 }
                 if matches!(on_stop, OnStop::LoseAnswer) {
@@ -842,6 +848,39 @@ fn a_stop_whose_answer_is_lost_says_it_is_not_confirmed_and_what_the_lock_shows(
     );
 }
 
+/// A build between the socket and the stop request (pull requests 34 and 36 of main, never released) answers the
+/// identity but `405` to the stop: the message says how to end that server by hand, with the pid it gave, and nothing is
+/// stopped.
+#[test]
+fn a_server_that_does_not_serve_the_stop_request_is_named_with_how_to_end_it() {
+    let home = Home::new();
+    let held = hold_the_home(&home);
+    let serving = Fake::start_with(
+        fake_socket(&home),
+        http("200 OK", &this_build(&home).to_string()),
+        Some(held),
+        OnStop::NotServed,
+    );
+
+    let stopped = run(&home, &["server", "stop"]);
+
+    assert_eq!(stopped.code, UNAVAILABLE, "{stopped:?}");
+    let message = message(&stopped);
+    for expected in [
+        "the stop request got status 405",
+        "Nothing was stopped.",
+        "end it yourself, then run the command again",
+        "Ctrl-C",
+        &format!("ps -p {FAKE_PID} -o args"),
+    ] {
+        assert!(message.contains(expected), "{expected}: {message}");
+    }
+    assert_eq!(
+        serving.requests().last().map(String::as_str),
+        Some("POST /server/stop HTTP/1.1")
+    );
+}
+
 /// A lock that cannot be looked at is the row "reachable: false" with a reason that names it: status answers, and no
 /// command starts or stops anything.
 #[test]
@@ -869,62 +908,4 @@ fn a_lock_path_that_cannot_be_used_is_unreachable_and_named() {
         "{stopped:?}"
     );
     assert!(home.servers().is_empty());
-}
-
-/// A server that a legacy probe found must still be a legacy server when the signal goes: here the runtime file has
-/// no control version, as a release 0.1 server's, but the server on its TCP address answers with one. The stop leaves
-/// the signal path without a signal, and the socket alone decides from then on.
-#[test]
-fn the_legacy_stop_signals_no_server_that_answers_with_a_control_version() {
-    let home = Home::new();
-    let held = hold_the_home(&home);
-    // `cat` waits on the pipe the test holds and starts no process of its own, and its output goes nowhere: a signal
-    // ends it, and it leaves nothing behind that keeps the test's output open.
-    let mut process = std::process::Command::new("cat")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("a process for the server's pid");
-    let mut answer = this_build(&home);
-    answer["pid"] = json!(process.id());
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-    let address = listener.local_addr().expect("an address");
-    let (asked, identity_asked) = mpsc::channel();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { return };
-            let mut reader = BufReader::new(stream.try_clone().expect("a stream"));
-            let mut line = String::new();
-            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
-                line.clear();
-            }
-            let _ = stream.write_all(http("200 OK", &answer.to_string()).as_bytes());
-            let _ = asked.send(());
-        }
-    });
-    let runtime_without_control = json!({
-        "pid": process.id(),
-        "address": address.to_string(),
-        "url": format!("http://{address}/cli"),
-        "database": database_of(&home),
-    });
-    std::fs::write(home.runtime_path(), runtime_without_control.to_string())
-        .expect("a runtime file");
-
-    let stop = spawn(&home, &["server", "stop"]);
-    identity_asked
-        .recv_timeout(HANG_GUARD)
-        .expect("the legacy path asks the identity over TCP");
-    drop(held);
-    let stopped = stop.finish().ok();
-
-    assert_eq!(stopped["stopped"], false, "{stopped}");
-    let still_running = process.try_wait().expect("the process's state").is_none();
-    let _ = process.kill();
-    let _ = process.wait();
-    assert!(
-        still_running,
-        "the stop signalled a server that answers with a control version"
-    );
 }

@@ -266,10 +266,38 @@ A missing data folder, and any missing folder above it, is made with mode `0700`
 The server also listens on the Unix socket `server.sock` in the data folder, with mode `0600`.
 `server status` asks it there first, and reports one state: `running`, `starting` (a server holds
 the folder and does not answer yet), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
-command line), `reachable: false` with the reason, or `legacy: true` for a server of an earlier
-build, which only TCP reaches. `server stop` and `serve --take-over` ask the server on the socket to
-stop, and never signal it. A server of an earlier build, which has no socket, is still stopped with
-SIGTERM as before. The other commands still use the TCP listener.
+command line), `reachable: false` with the reason, or `legacy: true` for a server from before the
+socket (release 0.1), which only TCP reaches. `server stop` and `serve --take-over` ask the server on
+the socket to stop, and never signal it. The other commands still use the TCP listener.
+
+### A server of release 0.1
+
+A server of release 0.1, or of any build before the socket, holds the data folder's lock, has no
+socket, and leaves a `server.json` without a `control` field. No command uses it: each one fails
+with "Nothing was started." and says what to run. `server status` answers `legacy: true`, the pid
+that `server.json` names, `provenStop`, the `reason`, and in `stop` what to run.
+
+Anything can answer on a TCP port, and a pid alone proves nothing, so `server stop` and
+`serve --take-over` signal that server only with proof, on Linux: they open a pidfd on the pid that
+`server.json` names, and read in `/proc`, while the pidfd holds the process, that it runs the
+installed binary (`${XDG_BIN_HOME:-$HOME/.local/bin}/quadratique`, where `install.sh` of release 0.1
+put it) or the file that the last `quadratique upgrade` beside this binary replaced, and that it
+holds an open descriptor of this folder's `server.lock`. Then they send SIGTERM through the pidfd and
+wait up to 30 seconds for the folder to be free. Without that proof (another binary, a binary that
+was replaced since it started, no descriptor of the lock, another system) they signal nothing, and
+the message says what to run:
+
+```text
+Stop it yourself, then run the command again: if `quadratique.service` runs it (`systemctl --user status quadratique.service` names its main PID), run `systemctl --user stop quadratique.service`; if it runs in a terminal, press Ctrl-C there; otherwise check pid <pid>, which nothing has verified, with `ps -p <pid> -o args`, and end it with `kill <pid>`.
+```
+
+Release 0.1 was published for Linux only. On macOS the command line reads no `/proc`, so it always
+gives these instructions.
+
+A build of `main` between the socket and the stop request (never released) answers on the socket
+but not to `POST /server/stop`. `server stop` then says that the stop request got status 405,
+stops nothing, and says how to end that server yourself: Ctrl-C in its terminal, its supervisor,
+or `kill <pid>` after `ps -p <pid> -o args`.
 
 ### The control protocol
 

@@ -15,7 +15,10 @@ use quadratique_server::store::canonical_folder;
 use crate::process::detach;
 use crate::route::McpTool;
 
+#[cfg(unix)]
 mod legacy;
+#[cfg(not(unix))]
+mod over_tcp;
 
 pub const STOP_LIMIT: Duration = Duration::from_secs(30);
 /// Set in the environment of a server that a command starts, so that its identity says it was started on demand.
@@ -86,9 +89,18 @@ pub enum LifeError {
         asked: String,
         serving: Option<String>,
     },
-    /// The server does not serve the stop request.
+    /// The server does not serve the stop request: a build between the socket and the stop request answers `405`.
     CannotStop {
         reason: String,
+        pid: u32,
+    },
+    /// A server from before the socket (release 0.1) holds the home. `unproven` says why this command line will not
+    /// signal it; without it, `server stop` stops it.
+    Legacy {
+        home: PathBuf,
+        pid: Option<u32>,
+        unproven: Option<String>,
+        attempt: Attempt,
     },
     /// The whole stop request was sent and its answer was lost: the server may or may not be stopping.
     StopUnconfirmed {
@@ -112,6 +124,7 @@ pub enum TheirInterface {
 }
 
 impl TheirInterface {
+    #[cfg(not(unix))]
     pub fn named(&self) -> Option<&str> {
         match self {
             TheirInterface::Named(interface) => Some(interface),
@@ -246,11 +259,36 @@ impl std::fmt::Display for LifeError {
                 formatter,
                 "the stop of generation {generation} is not confirmed: {reason}. The home's lock is {lock}. Run `quadratique server status` to see what serves now."
             ),
-            LifeError::CannotStop { reason } => {
+            LifeError::CannotStop { reason, pid } => {
                 write!(
                     formatter,
-                    "the server of this home cannot be stopped from here: {reason}. Nothing was stopped."
+                    "the server of this home cannot be stopped from here: {reason}. Nothing was stopped. A server built between the socket and the stop request does not serve it: end it yourself, then run the command again. {}",
+                    recovery(Some(*pid))
                 )
+            }
+            LifeError::Legacy {
+                home,
+                pid,
+                unproven,
+                attempt,
+            } => {
+                write!(
+                    formatter,
+                    "a Quadratique server from before the socket (release 0.1) holds {} and serves only over TCP, which this command line does not use.",
+                    home.display()
+                )?;
+                match (unproven, attempt) {
+                    (None, Attempt::Start) => formatter.write_str(
+                        " Nothing was started. Run `quadratique server stop`, which stops it, then run the command again.",
+                    ),
+                    (None, Attempt::Stop) => write!(formatter, " {}", attempt.outcome()),
+                    (Some(why), attempt) => write!(
+                        formatter,
+                        " It sends no signal without proof that the process is that server, and has none: {why}. {} {}",
+                        attempt.outcome(),
+                        legacy_instructions(*pid)
+                    ),
+                }
             }
         }
     }
@@ -272,6 +310,19 @@ fn recovery(pid: Option<u32>) -> String {
     };
     format!(
         "To recover: press Ctrl-C in the terminal that runs `quadratique serve`, stop it with the supervisor that started it, or end the process ({check})."
+    )
+}
+
+/// What a person runs to stop a server from before the socket that this command line will not signal.
+fn legacy_instructions(pid: Option<u32>) -> String {
+    let process = match pid {
+        Some(pid) => format!(
+            "otherwise check pid {pid}, which nothing has verified, with `ps -p {pid} -o args`, and end it with `kill {pid}`"
+        ),
+        None => "otherwise find its process and end it".to_owned(),
+    };
+    format!(
+        "Stop it yourself, then run the command again: if `quadratique.service` runs it (`systemctl --user status quadratique.service` names its main PID), run `systemctl --user stop quadratique.service`; if it runs in a terminal, press Ctrl-C there; {process}."
     )
 }
 
@@ -452,6 +503,8 @@ pub enum Found {
     Ours(RuntimeFile),
     OtherInterface {
         runtime: RuntimeFile,
+        /// Read on Windows, where every server is found over TCP (QUA-61).
+        #[cfg_attr(unix, allow(dead_code))]
         theirs: TheirInterface,
     },
     /// The probe was refused (`EPERM`, `EACCES` or the owner-only `403`). It names a server of this home only while the
@@ -462,6 +515,7 @@ pub enum Found {
 }
 
 impl Found {
+    #[cfg(not(unix))]
     fn refusal(runtime: &RuntimeFile, theirs: TheirInterface) -> LifeError {
         LifeError::OtherInterface {
             pid: runtime.pid,
@@ -585,6 +639,12 @@ async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
         return OnSocket::Malformed("the identity lacks its start or its url".to_owned());
     }
     OnSocket::Serving(identity)
+}
+
+/// `server status` of a server from before the socket: what serves, and what stops it.
+#[cfg(unix)]
+pub fn legacy_status(home: &Home) -> serde_json::Value {
+    legacy::status(home)
 }
 
 /// One row of the record's state table (docs/decisions/0004-…, §2): what the socket shows, and behind a socket that is
@@ -808,10 +868,7 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, Life
                 };
             }
             Observed::Legacy => {
-                drop(child);
-                drop(start_lock);
-                let left = deadline.left().unwrap_or_default();
-                return legacy::ensure(home, left).await;
+                return Err(legacy::refusal(home, legacy::examine(home), Attempt::Start));
             }
             Observed::Free if start_lock.is_none() => {
                 let lock = home
@@ -880,7 +937,7 @@ fn not_ready_by_the_deadline(
 
 #[cfg(not(unix))]
 async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
-    legacy::ensure(home, limit).await
+    over_tcp::ensure(home, limit).await
 }
 
 /// `start.lock`, held: no command starts a server while its holder starts, stops or hands off one. It carries the
@@ -934,7 +991,7 @@ pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
 pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
     let deadline = Deadline::after(START_LIMIT);
     let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
-    legacy::stop(home, deadline.left().unwrap_or_default(), false).await?;
+    over_tcp::stop(home, deadline.left().unwrap_or_default(), false).await?;
     Ok(StartLockHeld {
         _start_lock: start_lock,
         deadline,
@@ -1010,11 +1067,11 @@ async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError>
 
 #[cfg(not(unix))]
 async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
-    legacy::stop(home, limit, false)
+    over_tcp::stop(home, limit, false)
         .await
         .map(|stopped| match stopped {
-            legacy::Stop::Done(stopped) => stopped,
-            legacy::Stop::NotLegacy => Stopped::NotRunning,
+            over_tcp::Stop::Done(stopped) => stopped,
+            over_tcp::Stop::NotLegacy => Stopped::NotRunning,
         })
 }
 
@@ -1035,8 +1092,8 @@ fn not_stopped_by_the_deadline(home: &Home, attempt: Attempt) -> LifeError {
 ///   refused, and nothing is stopped.
 /// - A take-over (`Start`) refuses a newer server even when it lists this control version, because it would replace
 ///   it with an older one.
-/// - A server of a build before the socket is stopped by the legacy path, which hands back as soon as the server
-///   answers with a control version; from then on the socket alone decides.
+/// - A server from before the socket is stopped by the legacy path only with its proof, and only while the home still
+///   shows that row; otherwise it hands back, and from then on the socket alone decides.
 #[cfg(unix)]
 async fn stop_holding(
     home: &Home,
@@ -1061,8 +1118,7 @@ async fn stop_holding(
                 });
             }
             Observed::Legacy if legacy_possible && asked.is_none() => {
-                let left = deadline.left().unwrap_or_default();
-                match legacy::stop(home, left, true).await? {
+                match legacy::stop(home, deadline, attempt).await? {
                     legacy::Stop::Done(stopped) => return Ok(stopped),
                     legacy::Stop::NotLegacy => {
                         legacy_possible = false;
@@ -1107,7 +1163,10 @@ async fn stop_holding(
                         });
                     }
                     Ok(StopAnswer::Refused(reason)) => {
-                        return Err(LifeError::CannotStop { reason });
+                        return Err(LifeError::CannotStop {
+                            reason,
+                            pid: identity.pid,
+                        });
                     }
                     Ok(StopAnswer::Unconfirmed(reason)) => {
                         return Err(LifeError::StopUnconfirmed {

@@ -90,13 +90,29 @@ impl Lock {
 
     /// The device and inode of the file that the last run replaced, when it recorded one.
     pub fn replaced(&mut self) -> Option<(u64, u64)> {
-        let mut text = String::new();
         self.file.rewind().ok()?;
-        (&self.file).take(256).read_to_string(&mut text).ok()?;
-        let mut words = text.split_whitespace();
-        (words.next()? == "replaced")
-            .then(|| Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?)))?
+        replaced_in(&self.file)
     }
+}
+
+/// The file that the last upgrade in `folder` replaced, as its lock file records it, read without taking the lock:
+/// the device and inode of a binary that this install ran before.
+#[cfg(target_os = "linux")]
+pub fn recorded_replaced(folder: &Path) -> Option<(u64, u64)> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(folder.join(LOCK_NAME))
+        .ok()?;
+    replaced_in(&file)
+}
+
+fn replaced_in(file: &File) -> Option<(u64, u64)> {
+    let mut text = String::new();
+    file.take(256).read_to_string(&mut text).ok()?;
+    let mut words = text.split_whitespace();
+    (words.next()? == "replaced")
+        .then(|| Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?)))?
 }
 
 /// What `remove_leftovers` did with the staging-like folders beside the binary.
@@ -270,6 +286,8 @@ impl Drop for Staging {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(target_os = "linux")]
+    use super::{LOCK_NAME, recorded_replaced};
     use super::{Lock, Staging, check, remove_leftovers};
 
     fn folder() -> tempfile::TempDir {
@@ -367,5 +385,20 @@ mod tests {
             Lock::take(install.path()).unwrap().replaced(),
             Some((7, 42))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    /// A command that is not an upgrade reads the replaced file without the lock, so that it never waits for an
+    /// upgrade and never creates the lock file.
+    #[test]
+    fn the_replaced_file_is_read_without_the_lock_and_a_folder_without_one_records_none() {
+        let install = folder();
+        assert_eq!(recorded_replaced(install.path()), None);
+        assert!(!install.path().join(LOCK_NAME).exists());
+
+        let mut held = Lock::take(install.path()).unwrap();
+        held.record_replaced((7, 42)).unwrap();
+
+        assert_eq!(recorded_replaced(install.path()), Some((7, 42)));
     }
 }

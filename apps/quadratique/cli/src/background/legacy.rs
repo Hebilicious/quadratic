@@ -1,264 +1,274 @@
-//! A server of a build before the Unix socket (release 0.1): the lock of the home is held, no socket answers, and a
-//! runtime file without a control version names its TCP address. The command line finds it over TCP, uses it, and
-//! stops it with SIGTERM to the process number it answers with, as release 0.1 did. This is the only code that signals
-//! a process; QUA-55 replaces it with the proven legacy stop of docs/decisions/0004-…, §3. On Windows, which has no
-//! socket yet (QUA-61), every server is reached this way.
+//! A server of release 0.1, or of any build before the socket (docs/decisions/0004-…, §2 and §3): the home's lock is
+//! held, no socket answers, and a runtime file without a control version names a TCP address. Finding it is cheap and
+//! stays. This command line never uses it, and stops it only with proof: on Linux, a pidfd pins the process that the
+//! runtime file names, and `/proc` shows, while it is pinned, that the process runs a binary this install ran before
+//! (the installed binary, or the file that `quadratique upgrade` replaced) and holds an open descriptor of this home's
+//! `server.lock`. Then SIGTERM goes through the pidfd. Nothing the server answers over TCP counts: any process can
+//! listen on a port.
+//!
+//! Without that proof nothing is signalled, and the person reads what to stop. Release 0.1 was published for Linux
+//! only, and its code refuses no system, so a server built from its source can run on macOS: there this command line
+//! reads no `/proc`, and always gives the instructions. Delete the proven stop no earlier than two minor releases after
+//! the cutover (QUA-58), and only once the instructions cover every case.
 
-use std::fs::File;
-use std::fs::TryLockError;
-use std::time::{Duration, Instant};
+use serde_json::{Value, json};
 
-use quadratique_server::server::RuntimeFile;
+use super::{
+    Attempt, Deadline, Home, LifeError, Observed, Stopped, legacy_instructions, observe_by,
+};
 
-use super::{Attempt, Found, Home, LifeError, OwnedChild, POLL, Stopped, find, log_tail};
-use crate::process::{alive, ask_to_stop};
+/// What the command line can say about the process that the runtime file names.
+pub enum Evidence {
+    Proven(Proof),
+    Unproven { pid: Option<u32>, why: String },
+}
 
-pub(super) async fn ensure(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
-    match drive(home, Phase::Finding, limit, false).await? {
-        Settled::Running(runtime) => Ok(runtime),
-        Settled::NotRunning
-        | Settled::Stopped { .. }
-        | Settled::Closing { .. }
-        | Settled::NotLegacy => Err(LifeError::NoAnswer {
+/// A process pinned by a pidfd, which runs a binary this install ran before and holds this home's lock.
+#[cfg(target_os = "linux")]
+pub struct Proof {
+    pinned: crate::process::Pinned,
+    runs: String,
+}
+
+/// No system but Linux gives the evidence, so there is never a proof.
+#[cfg(not(target_os = "linux"))]
+pub enum Proof {}
+
+impl Proof {
+    #[cfg(target_os = "linux")]
+    fn pid(&self) -> u32 {
+        self.pinned.pid()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn pid(&self) -> u32 {
+        match *self {}
+    }
+
+    #[cfg(target_os = "linux")]
+    fn describe(&self) -> String {
+        format!(
+            "pid {} runs {} and holds this home's lock",
+            self.pinned.pid(),
+            self.runs
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn describe(&self) -> String {
+        match *self {}
+    }
+
+    /// True when the signal was sent, false when the process had exited already.
+    #[cfg(target_os = "linux")]
+    fn terminate(&self) -> Result<bool, String> {
+        Ok(self.pinned.terminate()? == crate::process::Signalled::Sent)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn terminate(&self) -> Result<bool, String> {
+        match *self {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn examine(home: &Home) -> Evidence {
+    use crate::process::{Pinned, file_id};
+
+    let Some(pid) = home.pid_hint() else {
+        return Evidence::Unproven {
             pid: None,
-            log: home.log(),
-        }),
-    }
-}
-
-pub(super) enum Stop {
-    Done(Stopped),
-    /// The server answered with a control version: it is not a build before the socket, and this path signals
-    /// nothing. The caller goes on through the socket.
-    NotLegacy,
-}
-
-/// Signals the process number that the server's identity gives. With `only_legacy`, the identity is checked again
-/// right before the signal, and one with a control version ends this path without a signal.
-pub(super) async fn stop(
-    home: &Home,
-    limit: Duration,
-    only_legacy: bool,
-) -> Result<Stop, LifeError> {
-    Ok(
-        match drive(home, Phase::FindingToStop, limit, only_legacy).await? {
-            Settled::Stopped { pid } => Stop::Done(Stopped::Ended {
-                pid,
-                generation: None,
-            }),
-            Settled::Closing { pid } => Stop::Done(Stopped::Closing {
-                pid,
-                generation: None,
-            }),
-            Settled::NotRunning | Settled::Running(_) => Stop::Done(Stopped::NotRunning),
-            Settled::NotLegacy => Stop::NotLegacy,
-        },
-    )
-}
-
-enum Phase {
-    Finding,
-    AwaitingStartLock,
-    Rechecking { start_lock: File },
-    Starting { start_lock: File, child: OwnedChild },
-    FindingToStop,
-    Stopping { pid: u32 },
-}
-
-enum Settled {
-    Running(RuntimeFile),
-    NotRunning,
-    Stopped { pid: u32 },
-    Closing { pid: Option<u32> },
-    NotLegacy,
-}
-
-enum Next {
-    Now(Phase),
-    AfterPoll(Phase),
-    Settled(Settled),
-}
-
-async fn drive(
-    home: &Home,
-    first: Phase,
-    limit: Duration,
-    only_legacy: bool,
-) -> Result<Settled, LifeError> {
-    let deadline = Instant::now() + limit;
-    let mut phase = first;
-    loop {
-        phase = match step(home, phase, only_legacy).await? {
-            Next::Settled(settled) => return Ok(settled),
-            Next::Now(next) => next,
-            Next::AfterPoll(next) => {
-                if Instant::now() > deadline {
-                    if let Some(stopping) = next.still_stopping(home)? {
-                        return Ok(stopping);
-                    }
-                    return Err(LifeError::NoAnswer {
-                        pid: next
-                            .pid()
-                            .or_else(|| home.runtime_file().map(|runtime| runtime.pid)),
-                        log: home.log(),
-                    });
-                }
-                tokio::time::sleep(POLL).await;
-                next
-            }
+            why: "its runtime file names no process".to_owned(),
         };
+    };
+    let unproven = |why: String| Evidence::Unproven {
+        pid: Some(pid),
+        why,
+    };
+    let lock_path = home.prepared.lock();
+    let Some(lock) = file_id(&lock_path) else {
+        return unproven(format!("{} cannot be read", lock_path.display()));
+    };
+    let pinned = match Pinned::open(pid) {
+        Ok(Some(pinned)) => pinned,
+        Ok(None) => return unproven(format!("no process has pid {pid}")),
+        Err(why) => return unproven(why),
+    };
+    let expected = Expected::of_this_install();
+    let runs_path = pinned.runs_path().map_or_else(
+        || "a file that /proc does not name".to_owned(),
+        |path| path.display().to_string(),
+    );
+    if !pinned
+        .runs()
+        .is_some_and(|runs| expected.files.contains(&runs))
+    {
+        return unproven(format!(
+            "pid {pid} runs {runs_path}, which is neither the installed binary {} nor a binary that `quadratique upgrade` replaced",
+            expected.installed
+        ));
     }
-}
-
-async fn step(home: &Home, phase: Phase, only_legacy: bool) -> Result<Next, LifeError> {
-    Ok(match phase {
-        Phase::Finding => match find(home).await? {
-            Found::Ours(runtime) => Next::Settled(Settled::Running(runtime)),
-            Found::OtherInterface { runtime, theirs } => {
-                return Err(Found::refusal(&runtime, theirs));
-            }
-            Found::Refused { reason } => {
-                unreachable_if_held(home, reason)?;
-                Next::Now(Phase::AwaitingStartLock)
-            }
-            Found::Nobody => Next::Now(Phase::AwaitingStartLock),
-        },
-        Phase::AwaitingStartLock => {
-            let start_lock = home
-                .open_lock(&home.start_lock())
-                .map_err(|error| home.unusable(error, Attempt::Start))?;
-            match start_lock.try_lock() {
-                Ok(()) => Next::Now(Phase::Rechecking { start_lock }),
-                Err(TryLockError::WouldBlock) => Next::AfterPoll(Phase::AwaitingStartLock),
-                Err(TryLockError::Error(error)) => return Err(error.into()),
-            }
-        }
-        Phase::Rechecking { start_lock } => match find(home).await? {
-            Found::Ours(runtime) => Next::Settled(Settled::Running(runtime)),
-            Found::OtherInterface { runtime, theirs } => {
-                return Err(Found::refusal(&runtime, theirs));
-            }
-            Found::Refused { reason } => {
-                unreachable_if_held(home, reason)?;
-                Next::AfterPoll(Phase::Starting {
-                    start_lock,
-                    child: OwnedChild::spawn(home)
-                        .map_err(|error| home.unusable(error, Attempt::Start))?,
-                })
-            }
-            Found::Nobody => Next::AfterPoll(Phase::Starting {
-                start_lock,
-                child: OwnedChild::spawn(home)
-                    .map_err(|error| home.unusable(error, Attempt::Start))?,
-            }),
-        },
-        Phase::Starting {
-            start_lock,
-            mut child,
-        } => match find(home).await? {
-            Found::Ours(runtime) => {
-                if runtime.pid == child.id() {
-                    child.hand_off();
-                }
-                Next::Settled(Settled::Running(runtime))
-            }
-            Found::OtherInterface { runtime, theirs } => {
-                return Err(Found::refusal(&runtime, theirs));
-            }
-            Found::Refused { .. } | Found::Nobody => match child.try_wait()? {
-                Some(status) => match find(home).await? {
-                    Found::Ours(runtime) => Next::Settled(Settled::Running(runtime)),
-                    Found::OtherInterface { runtime, theirs } => {
-                        return Err(Found::refusal(&runtime, theirs));
-                    }
-                    Found::Refused { .. } | Found::Nobody => {
-                        return Err(LifeError::Exited {
-                            status,
-                            log: home.log(),
-                            tail: log_tail(&home.log()),
-                        });
-                    }
-                },
-                None => Next::AfterPoll(Phase::Starting { start_lock, child }),
-            },
-        },
-        Phase::FindingToStop => {
-            if !home
-                .held()
-                .map_err(|error| home.unusable(error, Attempt::Stop))?
-            {
-                remove_runtime(home, None);
-                return Ok(Next::Settled(Settled::NotRunning));
-            }
-            match find(home).await? {
-                Found::Ours(runtime) | Found::OtherInterface { runtime, .. }
-                    if only_legacy && runtime.control.is_some() =>
-                {
-                    Next::Settled(Settled::NotLegacy)
-                }
-                Found::Ours(runtime) | Found::OtherInterface { runtime, .. } => {
-                    ask_to_stop(runtime.pid)?;
-                    Next::AfterPoll(Phase::Stopping { pid: runtime.pid })
-                }
-                Found::Refused { reason } => return Err(LifeError::UnreachableToStop { reason }),
-                Found::Nobody => Next::AfterPoll(Phase::FindingToStop),
-            }
-        }
-        Phase::Stopping { pid } => {
-            if home
-                .held()
-                .map_err(|error| home.unusable(error, Attempt::Stop))?
-            {
-                Next::AfterPoll(Phase::Stopping { pid })
-            } else {
-                remove_runtime(home, Some(pid));
-                Next::Settled(Settled::Stopped { pid })
-            }
-        }
+    if !pinned.holds(lock) {
+        return unproven(format!(
+            "pid {pid} holds no descriptor of this home's lock, {}",
+            lock_path.display()
+        ));
+    }
+    Evidence::Proven(Proof {
+        pinned,
+        runs: runs_path,
     })
 }
 
-fn unreachable_if_held(home: &Home, reason: String) -> Result<(), LifeError> {
-    if home
-        .held()
-        .map_err(|error| home.unusable(error, Attempt::Start))?
-    {
-        return Err(LifeError::Unreachable { reason });
+#[cfg(not(target_os = "linux"))]
+pub fn examine(home: &Home) -> Evidence {
+    Evidence::Unproven {
+        pid: home.pid_hint(),
+        why: "only on Linux can this command line see what a process runs and holds".to_owned(),
     }
-    Ok(())
 }
 
-impl Phase {
-    fn still_stopping(&self, home: &Home) -> Result<Option<Settled>, LifeError> {
-        let pid = match self {
-            Phase::FindingToStop => None,
-            Phase::Stopping { pid } => Some(*pid),
-            _ => return Ok(None),
-        };
-        Ok(home
-            .held()
-            .map_err(|error| home.unusable(error, Attempt::Stop))?
-            .then_some(Settled::Closing { pid }))
-    }
+/// The binaries that this install ran before: what `install.sh` of release 0.1 installed
+/// (`${XDG_BIN_HOME:-$HOME/.local/bin}/quadratique`), and the file that the last `quadratique upgrade` beside this
+/// binary replaced. This binary itself is never one: it serves on the socket.
+#[cfg(target_os = "linux")]
+struct Expected {
+    installed: String,
+    files: Vec<crate::process::FileId>,
+}
 
-    fn pid(&self) -> Option<u32> {
-        match self {
-            Phase::Starting { child, .. } => Some(child.id()),
-            Phase::Stopping { pid } => Some(*pid),
-            Phase::Finding
-            | Phase::AwaitingStartLock
-            | Phase::Rechecking { .. }
-            | Phase::FindingToStop => None,
+#[cfg(target_os = "linux")]
+impl Expected {
+    fn of_this_install() -> Expected {
+        use std::path::PathBuf;
+
+        use crate::process::file_id;
+
+        let variable = |name: &str| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let installed = variable("XDG_BIN_HOME")
+            .or_else(|| variable("HOME").map(|home| home.join(".local/bin")))
+            .map(|folder| folder.join("quadratique"));
+        let this = std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .ok();
+        let replaced = this
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .and_then(crate::upgrade::recorded_replaced);
+        let this = this.as_deref().and_then(file_id);
+        let files = [installed.as_deref().and_then(file_id), replaced]
+            .into_iter()
+            .flatten()
+            .filter(|file| Some(*file) != this)
+            .collect();
+        Expected {
+            installed: installed.map_or_else(
+                || "(neither XDG_BIN_HOME nor HOME is set)".to_owned(),
+                |path| path.display().to_string(),
+            ),
+            files,
         }
     }
 }
 
-fn remove_runtime(home: &Home, stopped: Option<u32>) {
-    let stale = home.runtime_file().is_some_and(|runtime| match stopped {
-        Some(pid) => runtime.pid == pid,
-        None => !alive(runtime.pid),
+/// The refusal of a command that meets this row. A start names `server stop` when a stop would be proven, and the
+/// instructions otherwise.
+pub fn refusal(home: &Home, evidence: Evidence, attempt: Attempt) -> LifeError {
+    let (pid, unproven) = match evidence {
+        Evidence::Proven(proof) => (Some(proof.pid()), None),
+        Evidence::Unproven { pid, why } => (pid, Some(why)),
+    };
+    LifeError::Legacy {
+        home: home.prepared.folder().to_path_buf(),
+        pid,
+        unproven,
+        attempt,
+    }
+}
+
+/// `server status` for this row: what serves, and what stops it. The pid is the runtime file's, verified only when the
+/// stop is proven.
+pub fn status(home: &Home) -> Value {
+    let runtime = home.runtime_file();
+    let mut value = json!({
+        "running": true,
+        "legacy": true,
+        "sameInterface": false,
+        "pid": runtime.as_ref().map(|runtime| runtime.pid),
+        "url": runtime.as_ref().map(|runtime| runtime.url.clone()),
+        "database": home.prepared.database(),
     });
-    if stale {
-        let _ = std::fs::remove_file(home.prepared.runtime());
+    match examine(home) {
+        Evidence::Proven(proof) => {
+            value["provenStop"] = json!(true);
+            value["reason"] = json!(format!(
+                "a server from before the socket (release 0.1) serves this home over TCP only; {}",
+                proof.describe()
+            ));
+            value["stop"] = json!("quadratique server stop");
+        }
+        Evidence::Unproven { pid, why } => {
+            value["provenStop"] = json!(false);
+            value["reason"] = json!(format!(
+                "a server from before the socket (release 0.1) serves this home over TCP only, and this command line will not signal it: {why}"
+            ));
+            value["stop"] = json!(legacy_instructions(pid));
+        }
+    }
+    value
+}
+
+pub enum Stop {
+    Done(Stopped),
+    /// The home no longer shows this row right before the signal: the caller observes again.
+    NotLegacy,
+}
+
+/// Called with `start.lock` held, after an observation of this row. Signals the process only with the proof, and only
+/// if the home still shows this row right before the signal; then waits for the home's lock to be free within the
+/// deadline.
+pub async fn stop(home: &Home, deadline: Deadline, attempt: Attempt) -> Result<Stop, LifeError> {
+    let proof = match examine(home) {
+        Evidence::Proven(proof) => proof,
+        unproven @ Evidence::Unproven { .. } => return Err(refusal(home, unproven, attempt)),
+    };
+    if !matches!(observe_by(home, deadline).await?, Some(Observed::Legacy)) {
+        return Ok(Stop::NotLegacy);
+    }
+    let pid = proof.pid();
+    proof.terminate().map_err(|why| {
+        refusal(
+            home,
+            Evidence::Unproven {
+                pid: Some(pid),
+                why,
+            },
+            attempt,
+        )
+    })?;
+    loop {
+        if !home.held().map_err(|error| home.unusable(error, attempt))? {
+            if home
+                .runtime_file()
+                .is_some_and(|runtime| runtime.pid == pid)
+            {
+                let _ = std::fs::remove_file(home.prepared.runtime());
+            }
+            return Ok(Stop::Done(Stopped::Ended {
+                pid,
+                generation: None,
+            }));
+        }
+        if !deadline.pause().await {
+            return Ok(Stop::Done(Stopped::Closing {
+                pid: Some(pid),
+                generation: None,
+            }));
+        }
     }
 }

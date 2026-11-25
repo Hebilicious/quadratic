@@ -18,6 +18,10 @@ mod server;
 mod skills;
 mod target;
 
+/// The legacy stop (`background::legacy`) takes the file that the last upgrade replaced as a binary this install ran.
+#[cfg(target_os = "linux")]
+pub use folder::recorded_replaced;
+
 use std::path::Path;
 use std::process::Stdio;
 

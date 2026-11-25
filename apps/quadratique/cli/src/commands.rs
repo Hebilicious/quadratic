@@ -11,7 +11,9 @@ use quadratique_server::domain::Binding;
 use quadratique_server::server::{self, Paths, ServerError};
 use serde_json::{Value, json};
 
-use crate::background::{self, Found, Home, Stopped};
+#[cfg(not(unix))]
+use crate::background::Found;
+use crate::background::{self, Home, Stopped};
 use crate::{caller, mcp};
 
 const OUTPUT_FLAG: &str = "--json";
@@ -245,36 +247,9 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
             value
         }
         Observed::Free => json!({ "running": false, "database": database }),
-        Observed::Legacy => legacy_status(home).await?,
+        Observed::Legacy => background::legacy_status(home),
     };
     Ok(located(home, value))
-}
-
-/// A server of a build before the socket, which its runtime file and TCP still find (QUA-55 replaces this).
-#[cfg(unix)]
-async fn legacy_status(home: &Home) -> Result<Value, background::LifeError> {
-    let database = home.prepared().database();
-    Ok(match background::find(home).await? {
-        Found::Ours(runtime) => json!({
-            "running": true,
-            "legacy": true,
-            "sameInterface": true,
-            "pid": runtime.pid,
-            "url": runtime.url,
-            "database": runtime.database,
-        }),
-        Found::OtherInterface { runtime, theirs } => json!({
-            "running": true,
-            "legacy": true,
-            "sameInterface": false,
-            "interface": theirs.named(),
-            "pid": runtime.pid,
-            "url": runtime.url,
-            "database": runtime.database,
-        }),
-        Found::Refused { reason } => unreachable(home, reason),
-        Found::Nobody => json!({ "running": false, "starting": true, "database": database }),
-    })
 }
 
 /// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
