@@ -130,7 +130,79 @@ async fn any_agent_releases_a_claim_in_review_and_the_issue_keeps_its_status_and
     let text = note["text"].as_str().expect("a note's text");
     assert!(text.contains(&lead.name()), "{text}");
     assert!(text.contains(&holder.name()), "{text}");
+    assert!(text.contains("branch audit"), "{text}");
+    assert!(text.contains(&holder.worktree()), "{text}");
     assert!(text.contains("the audit ended without a merge"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn any_agent_frees_a_claim_at_a_status_after_review_and_the_issue_keeps_its_assignee() {
+    let board = start().await;
+    board.project("DEM").await;
+    let statuses: Vec<Value> = [
+        ("backlog", "backlog"),
+        ("todo", "unstarted"),
+        ("in-progress", "started"),
+        ("in-review", "started"),
+        ("qa", "started"),
+        ("merged", "started"),
+        ("done", "completed"),
+        ("canceled", "canceled"),
+    ]
+    .iter()
+    .map(|(key, category)| json!({ "key": key, "name": key, "category": category }))
+    .collect();
+    board
+        .ok(
+            &board.human(),
+            "project.update",
+            json!({
+                "project": "DEM",
+                "workflow": {
+                    "statuses": statuses,
+                    "moves": { "claim": "in-progress", "review": "in-review", "merge": "merged", "release": "todo" },
+                },
+            }),
+        )
+        .await;
+    let assignee = json!({ "kind": "agent", "role": "audit" });
+    let issue = board
+        .issue_with(json!({ "title": "Audit the parser", "acceptance": "-", "assignee": assignee }))
+        .await;
+    let mut holder = board.agent("audit");
+    holder.actor.as_mut().expect("an actor")["role"] = json!("audit");
+    board
+        .ok(&holder, "issue.claim", json!({ "issue": issue }))
+        .await;
+    board
+        .ok(
+            &holder,
+            "issue.close",
+            json!({ "issue": issue, "evidence": "read every branch of the parser" }),
+        )
+        .await;
+    board
+        .ok(
+            &holder,
+            "issue.update",
+            json!({ "issue": issue, "revision": revision(&board, &issue).await, "status": "qa" }),
+        )
+        .await;
+    let lead = board.agent("lead");
+
+    let released = board
+        .ok(&lead, "issue.release", json!({ "issue": issue }))
+        .await;
+
+    assert_eq!(released["issue"]["status"], "qa", "{released}");
+    let shown = board.get(&issue).await;
+    assert_eq!(shown["assignee"], assignee, "{shown}");
+    assert_eq!(shown["evidence"], "read every branch of the parser");
+    assert!(shown.get("claim").is_none(), "{shown}");
+    let text = shown["notes"][0]["text"].as_str().expect("a note's text");
+    assert!(text.contains(&holder.name()), "{text}");
+    assert!(text.contains("branch audit"), "{text}");
+    assert!(text.contains(&holder.worktree()), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
