@@ -27,7 +27,9 @@ export interface PairingStart {
 /**
  * The page's pairing: `unpaired` (no token: the page shows the one sentence), `redeeming` (a code from `quadratique
  * ui` is being exchanged for the token), `paired` (the app runs with the token) and `refused` (the code was used or
- * expired, and no token was saved). A `401` from any target leaves `paired`; a token another tab saves enters it.
+ * expired, and no token was saved). A `401` from any target leaves `paired`; a token another tab saves enters it. A
+ * code that reaches a paired tab is exchanged while the app keeps running (`paired.exchanging`): the app restarts only
+ * when the token it runs with is refused.
  */
 export function pairingMachine(ports: PairingPorts, start: PairingStart) {
   const redeem = createAsyncLogic<string, { readonly code: string }>({
@@ -43,7 +45,12 @@ export function pairingMachine(ports: PairingPorts, start: PairingStart) {
 
   return setup({
     schemas: {
-      context: types<{ token: string | undefined; code: string | undefined }>(),
+      context: types<{
+        token: string | undefined;
+        code: string | undefined;
+        /** A token a code gave while the app ran with another; the app takes it once its own is refused. */
+        next: string | undefined;
+      }>(),
       events: {
         code: types<{ code: string }>(),
         unauthorized: types<void>(),
@@ -54,7 +61,7 @@ export function pairingMachine(ports: PairingPorts, start: PairingStart) {
     actors: { redeem, app },
   }).createMachine({
     id: "pairing",
-    context: { token: start.saved, code: start.code },
+    context: { token: start.saved, code: start.code, next: undefined },
     initial: "starting",
     states: {
       starting: {
@@ -88,19 +95,59 @@ export function pairingMachine(ports: PairingPorts, start: PairingStart) {
           src: "app",
           input: ({ context }) => ({ token: context.token ?? "" }),
         },
+        initial: "running",
+        states: {
+          running: {
+            on: {
+              code: ({ event }) => ({ target: "exchanging", context: { code: event.code } }),
+            },
+          },
+          // The app keeps running, with what the person typed, while a code from another link is exchanged.
+          exchanging: {
+            invoke: {
+              src: "redeem",
+              input: ({ context }) => ({ code: context.code ?? "" }),
+              onDone: ({ context, event }, enq) => {
+                if (event.output === context.token) {
+                  return { target: "running", context: { code: undefined } };
+                }
+                enq(ports.save, event.output);
+                return { target: "running", context: { code: undefined, next: event.output } };
+              },
+              onError: () => ({ target: "running", context: { code: undefined } }),
+            },
+            on: {
+              code: ({ event }) => ({
+                target: "exchanging",
+                reenter: true,
+                context: { code: event.code },
+              }),
+            },
+          },
+        },
         on: {
           unauthorized: ({ context }, enq) => {
+            if (context.next !== undefined && context.next !== context.token) {
+              return {
+                target: "paired",
+                reenter: true,
+                context: { token: context.next, next: undefined },
+              };
+            }
             if (context.token !== undefined) {
               enq(ports.drop, context.token);
             }
-            return { target: "unpaired", context: { token: undefined } };
+            return { target: "unpaired", context: { token: undefined, next: undefined } };
           },
           stored: ({ context, event }) =>
             event.token === context.token
               ? undefined
-              : { target: "paired", reenter: true, context: { token: event.token } },
-          cleared: () => ({ target: "unpaired", context: { token: undefined } }),
-          code: ({ event }) => ({ target: "redeeming", context: { code: event.code } }),
+              : {
+                  target: "paired",
+                  reenter: true,
+                  context: { token: event.token, next: undefined },
+                },
+          cleared: () => ({ target: "unpaired", context: { token: undefined, next: undefined } }),
         },
       },
       unpaired: {

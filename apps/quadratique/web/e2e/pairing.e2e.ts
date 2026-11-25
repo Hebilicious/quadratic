@@ -157,3 +157,37 @@ test("in strict mode a restart signs the browser out, and quadratique ui lets it
     await expect(live(page)).toHaveText("Live");
   });
 });
+
+test("a second link of quadratique ui, or a fake one, reaches an open tab without losing what the person typed", async ({
+  page,
+  workspace,
+}) => {
+  seed(workspace);
+  const issue = page.getByRole("article");
+  const description = issue.getByRole("textbox", { name: "Description" });
+  await page.goto(workspace.url("/issues/DEM-1"));
+  await expect(issue).toContainText("Serve the web app");
+  await issue.getByRole("button", { name: "Edit description" }).click();
+  await description.fill("Typed and not saved");
+
+  await test.step("a second link of quadratique ui is exchanged while the page keeps the draft", async () => {
+    const exchanged = page.waitForResponse(
+      (answer) => new URL(answer.url()).pathname === "/session",
+    );
+    await page.goto(workspace.url("/issues/DEM-1"));
+    expect((await exchanged).status()).toBe(200);
+    await expect(page).toHaveURL(/\/issues\/DEM-1$/u);
+    await expect(description).toHaveValue("Typed and not saved");
+  });
+
+  await test.step("a fake code is refused and changes nothing but the address", async () => {
+    const refused = page.waitForResponse((answer) => new URL(answer.url()).pathname === "/session");
+    await page.evaluate(() => {
+      location.hash = "#pair=fake";
+    });
+    expect((await refused).status()).toBe(403);
+    await expect(page).toHaveURL(/\/issues\/DEM-1$/u);
+    await expect(description).toHaveValue("Typed and not saved");
+    await expect(notPaired(page)).toHaveCount(0);
+  });
+});

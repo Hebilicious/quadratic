@@ -134,6 +134,52 @@ test("a code that arrives in an open tab is redeemed there, and the app reopens 
   expect(ports.opened).toEqual(["token-for-later"]);
 });
 
+describe("a code that arrives in a paired tab", () => {
+  test("is exchanged while the app keeps running, and a token it already has changes nothing", async () => {
+    const ports = new Ports();
+    ports.saved = "token-for-again";
+    const actor = started(ports, { code: undefined, saved: "token-for-again" });
+
+    actor.send({ type: "code", code: "again" });
+
+    await waitFor(actor, () => ports.redeemed.length === 1, HANG_GUARD);
+    await waitFor(actor, (snapshot) => snapshot.matches({ paired: "running" }), HANG_GUARD);
+    expect(ports.opened).toEqual(["token-for-again"]);
+    expect(ports.ended).toEqual([]);
+  });
+
+  test("that is refused, a fake one included, changes nothing", async () => {
+    const ports = new Ports();
+    ports.refuse = true;
+    const actor = started(ports, { code: undefined, saved: "kept" });
+
+    actor.send({ type: "code", code: "fake" });
+
+    await waitFor(actor, () => ports.redeemed.length === 1, HANG_GUARD);
+    await waitFor(actor, (snapshot) => snapshot.matches({ paired: "running" }), HANG_GUARD);
+    expect(ports.opened).toEqual(["kept"]);
+    expect(ports.ended).toEqual([]);
+    expect(ports.saved).toBeUndefined();
+  });
+
+  test("that gives a new token saves it, and the app restarts with it only once its token is refused", async () => {
+    const ports = new Ports();
+    const actor = started(ports, { code: undefined, saved: "old" });
+
+    actor.send({ type: "code", code: "new" });
+    await waitFor(actor, (snapshot) => snapshot.matches({ paired: "running" }), HANG_GUARD);
+    await waitFor(actor, () => ports.saved === "token-for-new", HANG_GUARD);
+    expect(ports.ended).toEqual([]);
+
+    ports.unauthorized?.();
+
+    expect(actor.getSnapshot().matches("paired")).toBe(true);
+    expect(ports.ended).toEqual(["old"]);
+    expect(ports.opened).toEqual(["old", "token-for-new"]);
+    expect(ports.saved).toBe("token-for-new");
+  });
+});
+
 describe("the code in the address", () => {
   test("is read and cleared from the address, keeping the path and the query", () => {
     const replaced: string[] = [];
