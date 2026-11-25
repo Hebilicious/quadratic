@@ -23,13 +23,17 @@ embedded-web = ["quadratique-server/embedded-web"]
 acid-cat-core.workspace = true
 futures.workspace = true
 quadratique-server.workspace = true
-rustix.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
-rustix = { workspace = true, features = ["event"] }
 tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["event"] }
 
 # Lets `cargo binstall` download the archive of a GitHub release instead of building.
 [package.metadata.binstall]
