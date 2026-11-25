@@ -649,9 +649,9 @@ fn remove_runtime(home: &Home, stopped: Option<u32>) {
 mod tests {
     use std::time::Duration;
 
-    use quadratique_server::server::{Paths, RuntimeFile, Unanswered};
+    use quadratique_server::server::Paths;
 
-    use super::{Found, Home, LifeError, Stopped, ensure_within, stop_within};
+    use super::{Home, LifeError, Stopped, ensure_within, stop_within};
 
     const HANG_GUARD: Duration = Duration::from_secs(20);
 
@@ -680,14 +680,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_connect_that_is_not_permitted_is_refused_and_a_refused_connection_is_nobody() {
+        use quadratique_server::server::{RuntimeFile, Unanswered};
+        use rustix::io::Errno;
+
+        use super::Found;
+
         let runtime = RuntimeFile {
             pid: 1,
             address: "127.0.0.1:9".parse().expect("an address"),
             url: String::new(),
             database: "/home/workspace.db".into(),
         };
-        use rustix::io::Errno;
-
         let after =
             |errno: Errno| Found::unanswered(&runtime, Unanswered::of_connect(errno.into()));
 
