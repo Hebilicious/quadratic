@@ -84,5 +84,7 @@ fn actor_of(record: &str) -> Result<Actor, Refusal> {
     if !ACTOR_SCHEMA.is_valid(&value) {
         return Err(invalid("it does not agree with the catalog's Actor"));
     }
-    serde_json::from_value(value).map_err(|error| invalid(&error.to_string()))
+    serde_json::from_value(value)
+        .map(Actor::without_blank_ids)
+        .map_err(|error| invalid(&error.to_string()))
 }

@@ -9,7 +9,7 @@ use super::issues::whole_issue;
 use super::model::{self, Issue, IssueAnswer, IssueSummary};
 use super::{Context, IssueReader, Refused, finish};
 use crate::domain::{
-    Actor, Caller, Change, ClaimAfter, Event, Failure, Landing, Outcome, WorkingCopy, decide,
+    Actor, Caller, Change, Claim, ClaimAfter, Event, Failure, Landing, Outcome, WorkingCopy, decide,
 };
 use crate::git::repository::{GIT_LIMIT, Repository};
 use crate::store::{AsOf, ClaimStart, IssueFields, Tx};
@@ -21,7 +21,7 @@ pub(super) fn apply(
     evidence: Option<&str>,
 ) -> Result<(), Refused> {
     tx.set_status(id, &change.status)?;
-    if change.claim != ClaimAfter::Kept {
+    if matches!(change.claim, ClaimAfter::Started(_) | ClaimAfter::Ended) {
         tx.end_held_merge(id)?;
     }
     match &change.claim {
@@ -35,7 +35,7 @@ pub(super) fn apply(
                 )));
             }
         }
-        ClaimAfter::Ended => {
+        ClaimAfter::Ended | ClaimAfter::Freed(_) => {
             tx.clear_claim(id)?;
         }
     }
@@ -144,7 +144,7 @@ async fn move_issue<R: Send + 'static>(
     let (started, answered) = context
         .write_then_read(
             request.operation(),
-            reason,
+            reason.clone(),
             move |tx| {
                 let record = board::issue(tx, &id)?;
                 let project = model::domain_project(&board::project(tx, &record.project)?)?;
@@ -154,6 +154,9 @@ async fn move_issue<R: Send + 'static>(
                 let mut started = None;
                 if let Outcome::Changed(change) = decide(&event, &issue, &caller, &project)? {
                     apply(tx, &id, &change, request.evidence())?;
+                    if let ClaimAfter::Freed(former) = &change.claim {
+                        note_freed(tx, &id, &caller, former, &change.status, reason.as_deref())?;
+                    }
                     let in_bound_repository = project.repository.is_some()
                         && project.repository == caller.working_copy.repository;
                     if let ClaimAfter::Started(claim) = &change.claim
@@ -175,6 +178,27 @@ async fn move_issue<R: Send + 'static>(
         record_start(context, started).await;
     }
     Ok(IssueAnswer { issue: answered })
+}
+
+/// The note an issue keeps when an agent that did not hold its claim released it.
+fn note_freed(
+    tx: &mut Tx<'_>,
+    id: &str,
+    caller: &Caller,
+    former: &Claim,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<(), Refused> {
+    let author = serde_json::to_string(&caller.actor).map_err(Refused::defect)?;
+    let mut text = format!(
+        "{} released the claim of {} (branch {}, worktree {}); the issue stays in {}.",
+        caller.actor.name, former.holder.name, former.branch, former.worktree, status
+    );
+    if let Some(reason) = reason {
+        text.push_str(&format!(" Reason: {reason}"));
+    }
+    tx.add_note(id, &text, &author)?;
+    Ok(())
 }
 
 struct Started {
