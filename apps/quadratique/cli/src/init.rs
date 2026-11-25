@@ -395,7 +395,7 @@ fn indexed_as(root: &Path, path: &str, digests: &[&str]) -> bool {
         .is_ok_and(|output| output.status.success() && shipped::is_listed(&output.stdout, digests))
 }
 
-fn shell_word(path: &str) -> String {
+pub fn shell_word(path: &str) -> String {
     if path
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
@@ -1103,6 +1103,66 @@ fn add_agents_line(plan: &Plan, progress: &mut Progress) -> Result<String, StepF
         AGENTS_PATH,
         progress,
     ))
+}
+
+/// A repository's setup as `init --dry-run` classifies it, read without writing: whether `init`
+/// would bring it to this build's text, the warnings for the files it would keep, and the files
+/// it could not read.
+#[derive(Default)]
+pub struct Setup {
+    /// It holds a skill file of Quadratique, or of Quadratic before the rename.
+    pub present: bool,
+    /// `init` would write or remove a file: one holds an earlier build's text, or one of the
+    /// skill files is missing beside another.
+    pub older: bool,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+pub fn setup_of(root: &Path) -> Result<Setup, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", root.display()))?;
+    let mut setup = Setup::default();
+    let mut missing = false;
+    for file in &SKILL_FILES {
+        match File::plan(&root, file.path, &skill_content(file)).map(|planned| planned.content) {
+            Ok(Content::Absent) => missing = true,
+            Ok(Content::Same(_)) => setup.present = true,
+            Ok(Content::Earlier(_)) => {
+                setup.present = true;
+                setup.older = true;
+            }
+            Ok(Content::Different(_)) => {
+                setup.present = true;
+                setup.warnings.push(kept_warning(file.path));
+            }
+            Err(problem) => setup.errors.push(problem),
+        }
+    }
+    for (path, digests) in shipped::QUADRATIC_SKILL_FILES {
+        match Retired::plan(&root, path, digests) {
+            Ok(Retired::Remove { .. }) => {
+                setup.present = true;
+                setup.older = true;
+            }
+            Ok(Retired::Keep { shown, what }) => {
+                setup.present = true;
+                setup.warnings.push(Retired::kept_warning(shown, &what));
+            }
+            Ok(Retired::Absent { .. }) => {}
+            Err(error) => setup.errors.push(format!("{path}: {error}")),
+        }
+    }
+    if setup.present && missing {
+        setup.older = true;
+    }
+    match File::plan(&root, AGENTS_PATH, &agents_content).map(|planned| planned.content) {
+        Ok(Content::Earlier(_)) => setup.older = true,
+        Ok(_) => {}
+        Err(problem) => setup.errors.push(problem),
+    }
+    Ok(setup)
 }
 
 #[cfg(test)]

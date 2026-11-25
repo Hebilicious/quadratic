@@ -312,6 +312,46 @@ async fn a_read_of_a_started_issue_asks_for_a_look_and_answers_while_git_still_s
     within("the watcher's stop", watcher.stop()).await;
 }
 
+/// A read waits at most its read wait for the look it asks for, and git may take longer on a loaded machine: the read
+/// wait here is the hang guard, so that the answer does not depend on how fast git runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_read_of_an_issue_after_its_merge_waits_for_its_look_and_answers_merged() {
+    let board = Board::open();
+    let repository = Repository::new();
+    board.project("ABC", &repository).await;
+    let issue = board
+        .issue_in("ABC", "Parse the headers", "in-review")
+        .await;
+    let watcher = Watcher::start(board.store.clone(), HANG_GUARD * 10, GIT_LIMIT, HANG_GUARD);
+    within("the first look", watcher.look()).await;
+    repository.commit(
+        &repository.root,
+        "parser.rs",
+        &format!("Parse the headers\n\nRefs: {issue}"),
+    );
+    let app = application().expect("the application");
+    let human = Caller {
+        actor: Actor::without_header(),
+        working_copy: WorkingCopy::default(),
+    };
+    let context = Context::watching(board.store.clone(), human, watcher.looks());
+    let session = Session::open(&app, "cli", Arc::new(context));
+
+    let read = session
+        .invoke(
+            "issue.get",
+            json!({ "issue": issue }),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    match read {
+        Outcome::Value(answer) => assert_eq!(answer["issue"]["status"], "merged", "{answer}"),
+        other => panic!("the read failed: {other:?}"),
+    }
+    within("the watcher's stop", watcher.stop()).await;
+}
+
 fn git_running_on(repository: &str) -> Vec<String> {
     let wanted = format!("--git-dir={repository}");
     std::fs::read_dir("/proc")

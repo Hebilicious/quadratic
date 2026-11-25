@@ -36,6 +36,9 @@ pub fn all() -> Vec<CliCommand<Context>> {
         command("init", crate::init::USAGE, |args, io| {
             async move { crate::init::init(&words(&args), io).await }.boxed()
         }),
+        command("upgrade", crate::upgrade::USAGE, |args, io| {
+            async move { crate::upgrade::upgrade(&words(&args), io).await }.boxed()
+        }),
         command(
             "mcp",
             "Serve the MCP tools of agents over standard input and output, as a client of the server.",

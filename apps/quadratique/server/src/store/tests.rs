@@ -588,3 +588,45 @@ fn a_store_ended_with_sigkill_while_a_write_is_in_flight_keeps_every_answered_wr
     let in_flight = matches!(projects[1], Ok(true));
     assert_eq!(in_flight, listed.contains(&"ABC"), "{listed:?}");
 }
+
+#[tokio::test]
+async fn a_store_is_read_without_writing_and_a_newer_schema_lists_no_repository() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("workspace.db");
+    assert!(super::read_recorded(&path).expect("no store").is_none());
+    assert!(!path.exists(), "reading created a store");
+
+    let store = Store::open(&path).expect("the store opens");
+    let author = Author::new(r#"{"kind":"human","name":"sam"}"#).expect("an author");
+    let mut bound = project("REP");
+    bound.repository = Some("/somewhere/.git".into());
+    store
+        .write(Call::new(author, "project.create"), move |tx| {
+            tx.create_project(&bound)
+        })
+        .await
+        .expect("the project is created");
+    create(&store, "NONE")
+        .await
+        .expect("a project without a repository");
+    let recorded = super::read_recorded(&path)
+        .expect("the store reads")
+        .expect("a store");
+    assert_eq!(recorded.schema, super::SCHEMA_VERSION);
+    assert_eq!(
+        recorded.repositories,
+        vec![std::path::PathBuf::from("/somewhere/.git")]
+    );
+    drop(store);
+
+    let newer = directory.path().join("newer.db");
+    drop(
+        Store::open_with(&newer, &[super::migrate::MIGRATIONS[0], TEST_COLUMN])
+            .expect("a store of a newer binary"),
+    );
+    let recorded = super::read_recorded(&newer)
+        .expect("the store reads")
+        .expect("a store");
+    assert_eq!(recorded.schema, super::SCHEMA_VERSION + 1);
+    assert!(recorded.repositories.is_empty());
+}

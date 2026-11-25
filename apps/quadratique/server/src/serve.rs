@@ -41,6 +41,7 @@ pub type Admit = Arc<dyn Fn(Connection) -> bool + Send + Sync>;
 
 pub struct Served {
     pub address: SocketAddr,
+    listener: Arc<TcpListener>,
     stop: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -57,12 +58,26 @@ impl Served {
 }
 
 /// Dropping the server without `close` still stops it: the token ends the accept loop and every connection, and their
-/// tasks then drop the routes, and with them the store.
+/// tasks then drop the routes, and with them the store and the home's lock.
+///
+/// The listener stops listening here, before any of that. Closing this process's descriptor is not enough: a child
+/// process holds a copy of it from its `fork` to its `exec`, and the socket listens until the last copy closes, which
+/// can come after the home's lock is free.
 impl Drop for Served {
     fn drop(&mut self) {
         self.stop.cancel();
+        stop_listening(&self.listener);
     }
 }
+
+/// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it.
+#[cfg(target_os = "linux")]
+fn stop_listening(listener: &TcpListener) {
+    let _ = rustix::net::shutdown(listener, rustix::net::Shutdown::Both);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stop_listening(_listener: &TcpListener) {}
 
 pub async fn serve(address: SocketAddr, routes: Routes, admit: Admit) -> std::io::Result<Served> {
     serve_with(address, routes, admit, REFUSALS).await
@@ -77,13 +92,15 @@ pub async fn serve_with(
     serve_on(TcpListener::bind(address).await?, routes, admit, refusals)
 }
 
-/// Serves on a listener bound beforehand: connections wait in its backlog until this starts accepting them.
+/// Serves on a listener bound beforehand: connections wait in its backlog until this starts accepting them. From here
+/// the listener belongs to the returned `Served`, which stops it listening when it is dropped.
 pub fn serve_on(
     listener: TcpListener,
     routes: Routes,
     admit: Admit,
     refusals: Refusals,
 ) -> std::io::Result<Served> {
+    let listener = Arc::new(listener);
     let address = listener.local_addr()?;
     let mut routes = routes;
     routes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
@@ -91,11 +108,13 @@ pub fn serve_on(
     let draining = Arc::new(Semaphore::new(refusals.draining));
     let stop = CancellationToken::new();
     let stopped = stop.clone();
+    let accepting = Arc::clone(&listener);
     let task = tokio::spawn(async move {
         loop {
             let accepted = tokio::select! {
+                biased;
                 () = stopped.cancelled() => return,
-                accepted = listener.accept() => accepted,
+                accepted = accepting.accept() => accepted,
             };
             let Ok((stream, peer)) = accepted else {
                 continue;
@@ -118,6 +137,7 @@ pub fn serve_on(
     });
     Ok(Served {
         address,
+        listener,
         stop,
         task,
     })
