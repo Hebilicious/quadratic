@@ -351,18 +351,21 @@ mod callers {
     use super::ServerError;
     use crate::serve::Admit;
 
-    pub fn own_account() -> Result<(), ServerError> {
+    /// Never made: `own_account` always fails here.
+    pub struct NoAccount;
+
+    pub fn own_account() -> Result<NoAccount, ServerError> {
         Err(ServerError::CallersUnknown(format!(
             "Quadratique cannot yet tell which account connects to its local listener on {}, so it does not serve there: another account of this machine could read and change your issues. Linux is supported; macOS is QUA-33, Windows QUA-34",
             std::env::consts::OS
         )))
     }
 
-    pub fn owner_only((): ()) -> Admit {
+    pub fn owner_only(_: NoAccount) -> Admit {
         Arc::new(|_| false)
     }
 
-    pub fn check_own_connection((): &()) -> Result<(), ServerError> {
+    pub fn check_own_connection(_: &NoAccount) -> Result<(), ServerError> {
         Ok(())
     }
 }
