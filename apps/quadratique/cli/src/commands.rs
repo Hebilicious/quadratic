@@ -99,6 +99,17 @@ pub fn home() -> Result<Home, String> {
     Home::new(paths)
 }
 
+/// The home when its data folder exists, for a command that only reads: it creates nothing. A missing data folder has
+/// no server and no store.
+pub fn existing_home() -> Result<Option<Home>, String> {
+    let paths = Paths::from_env().map_err(|error| error.to_string())?;
+    let folder = paths.database.parent().unwrap_or(std::path::Path::new("/"));
+    match std::fs::symlink_metadata(folder) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => Home::new(paths).map(Some),
+    }
+}
+
 const TAKE_OVER_FLAG: &str = "--take-over";
 
 async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
