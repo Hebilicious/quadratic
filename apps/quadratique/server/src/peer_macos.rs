@@ -1,66 +1,28 @@
 //! The caller check of the local listener on macOS (docs/decisions/0003-the-caller-check-on-macos-and-windows.md).
 //!
-//! macOS has no call that maps a TCP connection to an account. The server lists the processes of its own account
-//! (`proc_listpids` with `PROC_UID_ONLY`), their socket descriptors (`proc_pidinfo(PROC_PIDLISTFDS)`) and each
-//! socket's state and endpoints (`proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`), through the `libproc` crate. It admits a
-//! connection when exactly one established socket of those processes is the connection seen from the other side.
-//! A process of another account is not listed, and the kernel refuses to show its descriptors to any account but its
-//! own and root, so its connection is refused.
+//! For each accepted connection the server reads the kernel's table of TCP connections (the sysctl
+//! `net.inet.tcp.pcblist_n`, which any account may read) and finds the caller's socket in it: the accepted connection
+//! seen from the other side. It admits the connection when that socket's own account (`so_uid`, from the socket's
+//! credential) is the server's, as Linux does with `idiag_uid`.
 
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use libproc::bsd_info::BSDInfo;
-use libproc::file_info::{ListFDs, PIDFDInfo, PIDFDInfoFlavor, ProcFDInfo, ProcFDType, pidfdinfo};
-use libproc::proc_pid::{listpidinfo, pidinfo};
-use libproc::processes::{ProcFilter, pids_by_type};
+use sysctl::{Ctl, Sysctl, SysctlError};
 
 use crate::serve::{Admit, Connection};
-use crate::socket_fdinfo::{self, Found, TcpSocket};
+use crate::tcp_table::{self, Found, Record};
 
-/// The build stops when the `libproc` crate's declaration of `struct socket_fdinfo` places a field this check reads
-/// elsewhere than `socket_fdinfo` does.
-const _: () = {
-    use std::mem::offset_of;
-
-    use libproc::net_info::{InSockInfo, SocketFDInfo, SocketInfo, TcpSockInfo};
-
-    let socket = offset_of!(SocketFDInfo, psi);
-    let proto = socket + offset_of!(SocketInfo, soi_proto);
-    let in_sockinfo = proto + offset_of!(TcpSockInfo, tcpsi_ini);
-    assert!(socket + offset_of!(SocketInfo, soi_so) == socket_fdinfo::SOCKET_AT);
-    assert!(socket + offset_of!(SocketInfo, soi_kind) == socket_fdinfo::KIND_AT);
-    assert!(proto == socket_fdinfo::PROTO_AT);
-    assert!(in_sockinfo + offset_of!(InSockInfo, insi_fport) == socket_fdinfo::REMOTE_PORT_AT);
-    assert!(in_sockinfo + offset_of!(InSockInfo, insi_lport) == socket_fdinfo::LOCAL_PORT_AT);
-    assert!(in_sockinfo + offset_of!(InSockInfo, insi_vflag) == socket_fdinfo::VERSION_AT);
-    assert!(
-        in_sockinfo + offset_of!(InSockInfo, insi_faddr) + 12 == socket_fdinfo::REMOTE_ADDRESS_AT
-    );
-    assert!(
-        in_sockinfo + offset_of!(InSockInfo, insi_laddr) + 12 == socket_fdinfo::LOCAL_ADDRESS_AT
-    );
-    assert!(proto + offset_of!(TcpSockInfo, tcpsi_state) == socket_fdinfo::STATE_AT);
-};
-
-/// The kernel writes `struct socket_fdinfo` into these bytes. Any bytes are a valid value, so a structure that does
-/// not match makes the lookup find nothing, never undefined behaviour.
-struct SocketBytes([u8; socket_fdinfo::BYTES]);
-
-impl Default for SocketBytes {
-    fn default() -> SocketBytes {
-        SocketBytes([0; socket_fdinfo::BYTES])
-    }
-}
-
-impl PIDFDInfo for SocketBytes {
-    fn flavor() -> PIDFDInfoFlavor {
-        PIDFDInfoFlavor::SocketInfo
-    }
-}
+const TABLE: &str = "net.inet.tcp.pcblist_n";
+/// The kernel sizes its answer for the connections it has, plus an eighth; when more connections open between the
+/// size and the copy, it answers `ENOMEM` and the table is read again, at most this many times.
+const READS: usize = 4;
+/// Lookups that may run at once. A connection that comes while this many are running is refused: it costs the server
+/// nothing, and its client may connect again.
+const IN_FLIGHT: usize = 16;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PeerSocket {
@@ -73,11 +35,11 @@ pub type Lookup = Arc<dyn Fn(PeerSocket) -> io::Result<Option<u32>> + Send + Syn
 #[derive(Debug, thiserror::Error)]
 pub enum CallersUnknown {
     #[error(
-        "macOS cannot tell this server who is connecting: listing the processes of this account failed ({0}). Quadratique does not serve without knowing who connects; start it from a normal session of your account, outside any sandbox"
+        "macOS cannot tell this server who is connecting: reading its table of TCP connections ({TABLE}) failed ({0}). Quadratique does not serve without knowing who connects; start it from a normal session of your account, outside any sandbox, and if it still refuses, report your macOS version at https://github.com/Hebilicious/quadratique/issues"
     )]
     LookupFailed(io::Error),
     #[error(
-        "macOS did not show this server the socket of a test connection it made to itself (proc_pidfdinfo), so it cannot tell who connects. Quadratique does not serve without knowing who connects. Start it from a normal session of your account, outside any sandbox; if it still refuses, report your macOS version at https://github.com/Hebilicious/quadratique/issues"
+        "macOS's table of TCP connections ({TABLE}) does not show a test connection that this server made to itself, so it cannot tell who connects. Quadratique does not serve without knowing who connects; report your macOS version at https://github.com/Hebilicious/quadratique/issues"
     )]
     NoSocket,
     #[error(
@@ -86,14 +48,77 @@ pub enum CallersUnknown {
     OtherUid { found: u32, own: u32 },
 }
 
-/// The effective uid: the one the kernel compares when it lists processes by account and shows their descriptors.
+/// The effective uid: the account whose credential the server's own sockets carry.
 pub fn own_account() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
+/// The table, read once.
+pub fn table() -> io::Result<Vec<Record>> {
+    let control = Ctl::new(TABLE).map_err(as_io)?;
+    read_table(&control)
+}
+
+fn read_table(control: &Ctl) -> io::Result<Vec<Record>> {
+    let mut reads = 0;
+    let bytes = loop {
+        reads += 1;
+        match control.value_as_bytes() {
+            Err(error) if reads < READS && is_out_of_room(&error) => continue,
+            answer => break answer.map_err(as_io)?,
+        }
+    };
+    tcp_table::records(&bytes)
+        .map_err(|malformed| io::Error::new(io::ErrorKind::InvalidData, malformed))
+}
+
+trait AsBytes {
+    fn value_as_bytes(&self) -> Result<Vec<u8>, SysctlError>;
+}
+
+impl AsBytes for Ctl {
+    fn value_as_bytes(&self) -> Result<Vec<u8>, SysctlError> {
+        match self.value()? {
+            sysctl::CtlValue::Struct(bytes) | sysctl::CtlValue::Node(bytes) => Ok(bytes),
+            _ => Err(SysctlError::ExtractionError),
+        }
+    }
+}
+
+fn is_out_of_room(error: &SysctlError) -> bool {
+    matches!(error, SysctlError::IoError(error) if error.raw_os_error() == Some(rustix::io::Errno::NOMEM.raw_os_error()))
+}
+
+fn as_io(error: SysctlError) -> io::Error {
+    match error {
+        SysctlError::IoError(error) => error,
+        other => io::Error::other(other.to_string()),
+    }
+}
+
+/// What the table says of `socket`, for the tests and the start-up check.
+pub fn find(socket: PeerSocket) -> io::Result<Found> {
+    Ok(tcp_table::caller(socket.peer, socket.server, &table()?))
+}
+
+/// The account of the caller's socket, when the table shows exactly one.
+fn uid_of_peer_socket(control: &Ctl, socket: PeerSocket) -> io::Result<Option<u32>> {
+    match tcp_table::caller(socket.peer, socket.server, &read_table(control)?) {
+        Found::Caller { uid } => Ok(Some(uid)),
+        Found::Nothing | Found::NotEstablished(_) | Found::Several | Found::AcceptedSideGone => {
+            Ok(None)
+        }
+    }
+}
+
+fn lookup() -> io::Result<Lookup> {
+    let control = Ctl::new(TABLE).map_err(as_io)?;
+    Ok(Arc::new(move |socket| uid_of_peer_socket(&control, socket)))
+}
+
 /// One loopback connection of this process, looked up as a caller's would be.
 pub fn check_own_connection(own_uid: u32) -> Result<(), CallersUnknown> {
-    check_own_connection_with(lookup_for(own_uid), own_uid)
+    check_own_connection_with(lookup().map_err(CallersUnknown::LookupFailed)?, own_uid)
 }
 
 fn check_own_connection_with(lookup: Lookup, own_uid: u32) -> Result<(), CallersUnknown> {
@@ -104,6 +129,7 @@ fn check_own_connection_with(lookup: Lookup, own_uid: u32) -> Result<(), Callers
         .map_err(CallersUnknown::LookupFailed)?;
     let test_connection =
         std::net::TcpStream::connect(server).map_err(CallersUnknown::LookupFailed)?;
+    let _accepted = listener.accept().map_err(CallersUnknown::LookupFailed)?;
     let peer = test_connection
         .local_addr()
         .map_err(CallersUnknown::LookupFailed)?;
@@ -121,16 +147,22 @@ fn check_own_connection_with(lookup: Lookup, own_uid: u32) -> Result<(), Callers
     }
 }
 
+/// The admission of the server. `check_own_connection` has read the table once before, so the sysctl exists; if it
+/// cannot be named now, every connection is refused.
 pub fn owner_only(own_uid: u32) -> Admit {
-    admit_with(
-        lookup_for(own_uid),
-        own_uid,
-        Arc::new(|error: &io::Error| {
-            eprintln!(
-                "quadratique serve: macOS cannot list the processes of this account ({error}); this server refuses every connection until it can"
-            );
-        }),
-    )
+    let report = Arc::new(|error: &io::Error| {
+        eprintln!(
+            "quadratique serve: the account of a caller cannot be read from macOS's table of TCP connections ({error}); this server refuses every connection until it can"
+        );
+    });
+    match lookup() {
+        Ok(lookup) => admit_with(lookup, own_uid, report),
+        Err(error) => {
+            report(&error);
+            let refuse_all: Admit = Arc::new(|_| false);
+            refuse_all
+        }
+    }
 }
 
 pub fn admit_with(
@@ -139,12 +171,16 @@ pub fn admit_with(
     report_first_failure: Arc<dyn Fn(&io::Error) + Send + Sync>,
 ) -> Admit {
     let reported = AtomicBool::new(false);
+    let running = Arc::new(AtomicUsize::new(0));
     Arc::new(move |connection: Connection| {
         let (SocketAddr::V4(server), SocketAddr::V4(peer)) = (connection.local, connection.peer)
         else {
             return false;
         };
-        match lookup(PeerSocket { peer, server }) {
+        let Some(_slot) = Slot::take(&running) else {
+            return false;
+        };
+        match off_the_runtime(|| lookup(PeerSocket { peer, server })) {
             Ok(uid) => uid == Some(own_uid),
             Err(error) => {
                 if !reported.swap(true, Ordering::Relaxed) {
@@ -156,115 +192,61 @@ pub fn admit_with(
     })
 }
 
-fn lookup_for(own_uid: u32) -> Lookup {
-    Arc::new(move |socket| uid_of_peer_socket(own_uid, socket))
-}
+/// One of the `IN_FLIGHT` lookups that may run at once, given back when dropped.
+struct Slot(Arc<AtomicUsize>);
 
-/// The account of the processes that hold the other end of the connection, among this account's processes, read
-/// again after the scan (`account_of_holders`).
-fn uid_of_peer_socket(own_uid: u32, socket: PeerSocket) -> io::Result<Option<u32>> {
-    match holder_among(processes_of(own_uid)?, socket) {
-        Found::Holders(holders) => Ok(socket_fdinfo::account_of_holders(
-            &holders, own_uid, account_of,
-        )),
-        Found::Nothing | Found::NotEstablished(_) | Found::Several => Ok(None),
+impl Slot {
+    fn take(running: &Arc<AtomicUsize>) -> Option<Slot> {
+        running
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < IN_FLIGHT).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Slot(Arc::clone(running)))
     }
 }
 
-/// What a scan of `processes` finds for `socket`. A process that ends during the scan, or whose descriptors the
-/// kernel does not show, holds no socket for the scan.
-pub fn holder_among(processes: Vec<u32>, socket: PeerSocket) -> Found {
-    let sockets = processes.into_iter().flat_map(|pid| {
-        tcp_sockets_of(pid)
-            .into_iter()
-            .map(move |found| (pid, found))
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// On a multi-threaded runtime, the worker that runs the lookup hands its other tasks to the other workers first, so
+/// a slow lookup does not stall them. A single-threaded runtime (some tests) has no other worker to hand them to.
+fn off_the_runtime<T>(work: impl FnOnce() -> T) -> T {
+    let multi_threaded = tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
+        runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
     });
-    socket_fdinfo::holder_of(socket.peer, socket.server, sockets)
-}
-
-/// The processes whose effective uid is `uid`.
-pub fn processes_of(uid: u32) -> io::Result<Vec<u32>> {
-    pids_by_type(ProcFilter::ByUID { uid })
-}
-
-/// Every process of the machine, for the test that shows another account's sockets are hidden from this one.
-pub fn holder_among_every_process(socket: PeerSocket) -> io::Result<Found> {
-    Ok(holder_among(pids_by_type(ProcFilter::All)?, socket))
-}
-
-fn account_of(pid: u32) -> Option<u32> {
-    let pid = i32::try_from(pid).ok()?;
-    pidinfo::<BSDInfo>(pid, 0).ok().map(|info| info.pbi_uid)
-}
-
-/// The TCP sockets over IPv4 that `pid`'s descriptors show; none when the kernel refuses to show them.
-pub fn tcp_sockets_of(pid: u32) -> Vec<TcpSocket> {
-    let Ok(pid) = i32::try_from(pid) else {
-        return Vec::new();
-    };
-    let Ok(info) = pidinfo::<BSDInfo>(pid, 0) else {
-        return Vec::new();
-    };
-    let Some(descriptors) = descriptors_of(pid, info.pbi_nfiles as usize) else {
-        return Vec::new();
-    };
-    descriptors
-        .into_iter()
-        .filter(|descriptor| descriptor.proc_fdtype == ProcFDType::Socket as u32)
-        .filter_map(|descriptor| pidfdinfo::<SocketBytes>(pid, descriptor.proc_fd).ok())
-        .filter_map(|bytes| socket_fdinfo::tcp_over_ipv4(&bytes.0))
-        .collect()
-}
-
-const MOST_DESCRIPTORS: usize = 1 << 20;
-
-/// Every descriptor of `pid`. `pbi_nfiles` is the size of the process's descriptor table, but the table can grow
-/// between that read and the listing, and the kernel stops when the buffer is full: a full answer is asked again
-/// with twice the room, so no descriptor is left out.
-fn descriptors_of(pid: i32, files: usize) -> Option<Vec<ProcFDInfo>> {
-    let mut room = files.saturating_mul(2).max(64);
-    while room <= MOST_DESCRIPTORS {
-        let descriptors = listpidinfo::<ListFDs>(pid, room).ok()?;
-        if descriptors.len() < room {
-            return Some(descriptors);
-        }
-        room *= 2;
+    if multi_threaded {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
     }
-    None
 }
 
-/// `pbi_nfiles` of `pid`, the number of its open descriptors and its highest descriptor, for the measure: they show
-/// what `pbi_nfiles` counts on this macOS.
-pub fn descriptor_counts(pid: u32) -> Option<(u32, usize, i32)> {
-    let pid = i32::try_from(pid).ok()?;
-    let files = pidinfo::<BSDInfo>(pid, 0).ok()?.pbi_nfiles;
-    let descriptors = descriptors_of(pid, files as usize)?;
-    let highest = descriptors
-        .iter()
-        .map(|descriptor| descriptor.proc_fd)
-        .max()?;
-    Some((files, descriptors.len(), highest))
-}
-
-/// How long `count` lookups of `socket` take, for the measure of the check's cost.
-pub fn time_lookups(own_uid: u32, socket: PeerSocket, count: usize) -> Vec<Duration> {
-    (0..count)
+/// How long `count` reads of the table take and how many connections it holds, for the measure of the check's cost.
+pub fn time_lookups(socket: PeerSocket, count: usize) -> io::Result<(Vec<Duration>, usize)> {
+    let control = Ctl::new(TABLE).map_err(as_io)?;
+    let size = read_table(&control)?.len();
+    let times = (0..count)
         .map(|_| {
-            let started = std::time::Instant::now();
-            let _ = uid_of_peer_socket(own_uid, socket);
+            let started = Instant::now();
+            let _ = uid_of_peer_socket(&control, socket);
             started.elapsed()
         })
-        .collect()
+        .collect();
+    Ok((times, size))
 }
 
 #[cfg(test)]
 mod tests {
     use std::io;
     use std::net::{SocketAddr, TcpListener, TcpStream};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
-    use super::{CallersUnknown, admit_with, own_account, owner_only};
+    use super::{CallersUnknown, IN_FLIGHT, admit_with, own_account, owner_only};
     use crate::serve::Connection;
 
     fn accepted() -> (TcpStream, TcpStream, Connection) {
@@ -292,6 +274,14 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_whose_accepted_side_is_gone_is_refused() {
+        let (_client, server_side, connection) = accepted();
+        drop(server_side);
+
+        assert!(!owner_only(own_account())(connection));
+    }
+
+    #[test]
     fn a_peer_unknown_to_the_kernel_or_naming_a_listener_is_refused() {
         let (_client, _server_side, connection) = accepted();
         let gone = Connection {
@@ -308,6 +298,13 @@ mod tests {
 
         assert!(!owner_only(own_account())(gone));
         assert!(!owner_only(own_account())(no_connection));
+    }
+
+    #[test]
+    fn a_connection_of_this_account_is_refused_by_a_server_of_another() {
+        let (_client, _server_side, connection) = accepted();
+
+        assert!(!owner_only(own_account() + 1)(connection));
     }
 
     #[test]
@@ -350,11 +347,45 @@ mod tests {
         assert_eq!(reports.load(Ordering::Relaxed), 1);
     }
 
+    /// The first `IN_FLIGHT` lookups wait on a barrier until the test has seen one more connection refused without a
+    /// lookup.
     #[test]
-    fn the_lookup_of_another_uid_does_not_find_this_accounts_connection() {
+    fn a_connection_that_comes_while_every_lookup_slot_is_taken_is_refused() {
         let (_client, _server_side, connection) = accepted();
-        let another = own_account() + 1;
+        let own_uid = own_account();
+        let started = Arc::new(Barrier::new(IN_FLIGHT + 1));
+        let release = Arc::new(Barrier::new(IN_FLIGHT + 1));
+        let looked_up = Arc::new(AtomicUsize::new(0));
+        let lookup: super::Lookup = {
+            let (started, release, looked_up) =
+                (started.clone(), release.clone(), looked_up.clone());
+            Arc::new(move |_| {
+                if looked_up.fetch_add(1, Ordering::SeqCst) < IN_FLIGHT {
+                    started.wait();
+                    release.wait();
+                }
+                Ok(Some(own_uid))
+            })
+        };
+        let admit = admit_with(lookup, own_uid, Arc::new(|_: &io::Error| {}));
+        let waiting: Vec<_> = (0..IN_FLIGHT)
+            .map(|_| {
+                let admit = admit.clone();
+                std::thread::spawn(move || admit(connection))
+            })
+            .collect();
+        started.wait();
 
-        assert!(!owner_only(another)(connection));
+        let overloaded = admit(connection);
+        release.wait();
+        let admitted: Vec<bool> = waiting
+            .into_iter()
+            .map(|thread| thread.join().expect("a lookup thread"))
+            .collect();
+
+        assert!(!overloaded);
+        assert_eq!(looked_up.load(Ordering::SeqCst), IN_FLIGHT);
+        assert!(admitted.into_iter().all(|admitted| admitted));
+        assert!(admit(connection), "a slot is given back after its lookup");
     }
 }

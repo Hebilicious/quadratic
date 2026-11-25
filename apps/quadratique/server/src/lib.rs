@@ -13,7 +13,7 @@ pub mod peer;
 pub mod peer_macos;
 pub mod serve;
 pub mod server;
-#[cfg(any(test, target_os = "macos"))]
-pub mod socket_fdinfo;
 pub mod store;
+#[cfg(any(test, target_os = "macos"))]
+pub mod tcp_table;
 pub mod web;

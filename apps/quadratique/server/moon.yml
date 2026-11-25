@@ -33,8 +33,14 @@ tasks:
     inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
     options:
       cache: false
+  test-other-accounts:
+    description: "Needs `sudo -n -u nobody` to work without a password, and python3: runs the ignored tests of tests/server/other_accounts.rs, in which a TCP socket created by one account is passed to a process of the other, which connects it to the server. Linux and macOS. Not part of `test`."
+    command: "cargo test -p quadratique-server --test server -- --ignored --nocapture --test-threads=1 other_accounts::"
+    inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
+    options:
+      cache: false
   test-callers-macos:
-    description: "macOS only. Needs `sudo -n -u nobody` to work without a password: runs the ignored tests of tests/callers_macos.rs, in which a process of the account nobody holds a connection that the caller check must refuse and whose socket the kernel must hide, and the measure of what the check costs. Not part of `test`."
+    description: "macOS only. Needs `sudo -n -u nobody` to work without a password: runs the ignored tests of tests/callers_macos.rs, in which a process of the account nobody holds a connection that the caller check must refuse and that the kernel's table must name as nobody's, and the measure of what the check costs. Not part of `test`."
     command: "cargo test -p quadratique-server --test callers_macos -- --ignored --nocapture --test-threads=1"
     inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
     options:

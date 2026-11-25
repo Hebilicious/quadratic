@@ -242,6 +242,11 @@ pub async fn start_with(
     if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
         return Err(ServerError::NotLoopback(address));
     }
+    // The macOS check looks up its own test connection on 127.0.0.1, as the command line connects.
+    #[cfg(target_os = "macos")]
+    if address.ip() != std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST) {
+        return Err(ServerError::NotLoopback(address));
+    }
     let own_account = callers::own_account()?;
     callers::check_own_connection(&own_account)?;
     let owner: closing::HomeLock = Arc::new(own(paths, waits).await?);

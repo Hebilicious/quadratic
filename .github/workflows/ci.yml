@@ -70,6 +70,12 @@ jobs:
           quadratique-catalog:check
           quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test quadratique-web:e2e
 
+      # The runner's account may use sudo without a password, so processes of the account nobody can connect: the
+      # caller check must refuse them, and must judge a socket passed between accounts by the account that created it
+      # (docs/decisions/0003-the-caller-check-on-macos-and-windows.md).
+      - name: Caller check against another account
+        run: moon run quadratique-server:test-as-nobody quadratique-server:test-other-accounts
+
   # The same checks on macOS and Windows, one step per area, so that each platform reports every area that fails and
   # not only the first. The server serves only on Linux and macOS until it can check who connects to its local listener
   # on Windows (docs/decisions/0003-the-caller-check-on-macos-and-windows.md), and the installer is Linux-only until the
@@ -170,9 +176,7 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: ${{ matrix.os == 'windows-latest' }}
         run: moon run quadratique-web:e2e
-      # The runner's account may use sudo without a password, so a process of the account nobody can connect: the
-      # caller check must refuse it (docs/decisions/0003-the-caller-check-on-macos-and-windows.md). The second task
-      # also prints what the check costs on the runner.
+      # As in the Linux job; the last task also prints what the check costs on the runner.
       - name: Caller check against another account
         if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
-        run: moon run quadratique-server:test-as-nobody quadratique-server:test-callers-macos
+        run: moon run quadratique-server:test-as-nobody quadratique-server:test-other-accounts quadratique-server:test-callers-macos

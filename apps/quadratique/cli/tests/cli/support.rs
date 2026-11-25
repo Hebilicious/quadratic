@@ -54,34 +54,92 @@ pub fn await_exit(pid: u32) {
     );
 }
 
-/// macOS has no pidfd: the process has ended once `ps` no longer lists it, or lists it as a zombie.
+/// macOS has no pidfd: the process has ended once the kernel no longer knows it, or knows it as a zombie.
 #[cfg(target_os = "macos")]
 pub fn await_exit(pid: u32) {
     await_until(&format!("the exit of process {pid}"), || {
+        macos::has_ended(pid)
+    });
+}
+
+/// The processes of this account on macOS, with their arguments and environment as the kernel keeps them
+/// (`KERN_PROCARGS2`), one string each, so a space in a path changes nothing.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::process::Command;
+
+    use rustix::io::Errno;
+    use rustix::process::{Pid, test_kill_process};
+    use sysctl::{Ctl, CtlValue, Sysctl};
+
+    const CTL_KERN: i32 = 1;
+    const KERN_PROCARGS2: i32 = 49;
+
+    pub struct Arguments {
+        pub argv: Vec<Vec<u8>>,
+        pub environment: Vec<Vec<u8>>,
+    }
+
+    /// The process ids of this account; a `ps` that fails fails the test.
+    pub fn pids() -> Vec<u32> {
+        let listed = Command::new("ps")
+            .args(["-x", "-o", "pid="])
+            .output()
+            .expect("ps runs");
+        assert!(listed.status.success(), "ps fails: {listed:?}");
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(|line| line.trim().parse().expect("a process id"))
+            .collect()
+    }
+
+    /// `None` when the process has ended, or the kernel does not show its arguments.
+    pub fn arguments(pid: u32) -> Option<Arguments> {
+        let control = Ctl::Oid(vec![CTL_KERN, KERN_PROCARGS2, i32::try_from(pid).ok()?]);
+        let (CtlValue::Node(bytes) | CtlValue::Struct(bytes)) = control.value().ok()? else {
+            return None;
+        };
+        parse(&bytes)
+    }
+
+    /// `argc`, the path of the executable, NUL padding, then `argc` arguments and the environment, each ending with
+    /// a NUL.
+    fn parse(bytes: &[u8]) -> Option<Arguments> {
+        let count = usize::try_from(i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?)).ok()?;
+        let mut strings = bytes[4..].split(|byte| *byte == 0);
+        strings.next()?;
+        let mut rest = strings.skip_while(|string| string.is_empty());
+        let argv: Vec<Vec<u8>> = rest.by_ref().take(count).map(<[u8]>::to_vec).collect();
+        if argv.len() != count {
+            return None;
+        }
+        let environment = rest
+            .take_while(|string| !string.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        Some(Arguments { argv, environment })
+    }
+
+    pub fn has_ended(pid: u32) -> bool {
+        let Some(raw) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+            return true;
+        };
+        match test_kill_process(raw) {
+            Err(Errno::SRCH) => return true,
+            Ok(()) | Err(Errno::PERM) => {}
+            Err(error) => panic!("kill -0 {pid} fails: {error}"),
+        }
         let state = Command::new("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
             .expect("ps runs");
-        let state = String::from_utf8_lossy(&state.stdout);
-        state.trim().is_empty() || state.trim_start().starts_with('Z')
-    });
-}
-
-/// The processes of this account with their command line, the environment of each as words after it (`ps -E`).
-#[cfg(target_os = "macos")]
-fn process_table() -> Vec<(u32, Vec<String>)> {
-    let table = Command::new("ps")
-        .args(["-E", "-ww", "-x", "-o", "pid=", "-o", "command="])
-        .output()
-        .expect("ps runs");
-    String::from_utf8_lossy(&table.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace().map(str::to_owned);
-            let pid = words.next()?.parse().ok()?;
-            Some((pid, words.collect()))
-        })
-        .collect()
+        let stat = String::from_utf8_lossy(&state.stdout);
+        match state.status.code() {
+            Some(0) => stat.trim_start().starts_with('Z'),
+            Some(1) if stat.trim().is_empty() => true,
+            _ => panic!("ps -p {pid} fails: {state:?}"),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -139,40 +197,54 @@ impl Home {
         Quadratique { command }
     }
 
+    fn marker(&self) -> String {
+        format!("HOME={}", self.path().display())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn is_ours(&self, pid: u32) -> bool {
+        let marker = self.marker();
+        macos::arguments(pid).is_some_and(|arguments| {
+            arguments
+                .environment
+                .iter()
+                .any(|variable| variable == marker.as_bytes())
+        })
+    }
+
     #[cfg(target_os = "macos")]
     pub fn processes(&self) -> Vec<u32> {
-        let marker = format!("HOME={}", self.path().display());
-        process_table()
+        macos::pids()
             .into_iter()
-            .filter(|(_, words)| words.contains(&marker))
-            .map(|(pid, _)| pid)
+            .filter(|pid| self.is_ours(*pid))
             .collect()
     }
 
     #[cfg(target_os = "macos")]
     pub fn servers(&self) -> Vec<u32> {
-        let marker = format!("HOME={}", self.path().display());
-        process_table()
+        self.processes()
             .into_iter()
-            .filter(|(_, words)| {
-                words.contains(&marker)
-                    && words.len() >= 2
-                    && words[0].ends_with("quadratique")
-                    && words[1] == "serve"
+            .filter(|pid| {
+                macos::arguments(*pid).is_some_and(|arguments| {
+                    arguments.argv.len() >= 2
+                        && arguments.argv[0].ends_with(b"quadratique")
+                        && arguments.argv[1] == b"serve"
+                })
             })
-            .map(|(pid, _)| pid)
             .collect()
     }
 
     #[cfg(target_os = "linux")]
+    fn is_ours(&self, pid: u32) -> bool {
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        words(&environ).contains(&self.marker().as_bytes())
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn processes(&self) -> Vec<u32> {
-        let marker = format!("HOME={}", self.path().display());
         proc_entries()
             .into_iter()
-            .filter(|pid| {
-                let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
-                words(&environ).contains(&marker.as_bytes())
-            })
+            .filter(|pid| self.is_ours(*pid))
             .collect()
     }
 
@@ -193,7 +265,10 @@ impl Drop for Home {
     fn drop(&mut self) {
         let left = self.processes();
         for pid in &left {
-            kill(*pid);
+            // The list is a snapshot: a process id that ended since may name another process now.
+            if self.is_ours(*pid) {
+                kill(*pid);
+            }
         }
         for pid in left {
             await_exit(pid);

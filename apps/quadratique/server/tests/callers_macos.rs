@@ -1,17 +1,26 @@
-//! The caller check on macOS against the real kernel, with a process of the owner and a process of another account
-//! that each hold a connection open with `nc`. The tests that act as the account `nobody` need `sudo -n` and are
-//! ignored by `test`; `moon run quadratique-server:test-callers-macos` runs them, and so does CI on macOS.
+//! The caller check on macOS against the real kernel's table of TCP connections, with a process of the owner and a
+//! process of another account that each hold a connection open with `nc`. The tests that act as the account
+//! `nobody` need `sudo -n` and are ignored by `test`; `moon run quadratique-server:test-callers-macos` runs them, and
+//! so does CI on macOS.
 #![cfg(target_os = "macos")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quadratique_server::peer_macos::{self, PeerSocket};
 use quadratique_server::serve::Connection;
 use quadratique_server::server::{self, Paths};
-use quadratique_server::socket_fdinfo::Found;
+use quadratique_server::tcp_table::Found;
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+/// Only stops a hang: nc connects at once.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+const LOOK_EVERY: Timespec = Timespec {
+    tv_sec: 0,
+    tv_nsec: 50_000_000,
+};
 
 /// A process that holds one connection to `listener` open until it is dropped: `nc` keeps it while its standard input
 /// stays open.
@@ -23,6 +32,7 @@ struct Holder {
 }
 
 impl Holder {
+    /// Waits for nc's connection and fails, instead of waiting for ever, when nc or sudo exits without connecting.
     fn start(mut command: Command, listener: &TcpListener) -> Holder {
         let address = listener.local_addr().expect("the listener's address");
         let mut child = command
@@ -32,6 +42,20 @@ impl Holder {
             .spawn()
             .expect("nc starts");
         let stdin = child.stdin.take().expect("nc's standard input");
+        let deadline = Instant::now() + HANG_GUARD;
+        loop {
+            if let Some(status) = child.try_wait().expect("nc can be waited on") {
+                panic!("nc exited without connecting: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nc did not connect within the hang guard"
+            );
+            let mut ready = [PollFd::new(listener, PollFlags::IN)];
+            if poll(&mut ready, Some(&LOOK_EVERY)).expect("poll on the listener") == 1 {
+                break;
+            }
+        }
         let (accepted, peer) = listener.accept().expect("nc's connection is accepted");
         let local = accepted.local_addr().expect("the accepted side's address");
         Holder {
@@ -68,6 +92,7 @@ fn uid_of(account: &str) -> u32 {
         .args(["-u", account])
         .output()
         .expect("id runs");
+    assert!(output.status.success(), "{output:?}");
     String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse()
@@ -75,25 +100,30 @@ fn uid_of(account: &str) -> u32 {
 }
 
 #[test]
-fn a_connection_held_by_another_process_of_the_owner_is_admitted() {
+fn a_connection_of_another_process_of_the_owner_is_admitted() {
     let listener = listener();
     let holder = Holder::start(Command::new("/usr/bin/env"), &listener);
 
     let admitted = peer_macos::owner_only(peer_macos::own_account())(holder.connection);
-    let found = peer_macos::holder_among_every_process(holder.peer_socket())
-        .expect("the processes can be listed");
+    let found = peer_macos::find(holder.peer_socket()).expect("the table can be read");
 
     println!(
-        "the owner's nc {}: admitted {admitted}, found {found:?}",
-        holder.child.id()
+        "the owner (uid {}) connects with nc from {}: admitted {admitted}; the table finds {found:?}",
+        peer_macos::own_account(),
+        holder.connection.peer
     );
     assert!(admitted);
-    assert_eq!(found, Found::Holders(vec![holder.child.id()]));
+    assert_eq!(
+        found,
+        Found::Caller {
+            uid: peer_macos::own_account()
+        }
+    );
 }
 
 #[test]
 #[ignore = "needs sudo to act as the account nobody"]
-fn a_connection_held_by_a_process_of_another_account_is_refused_and_its_socket_is_hidden() {
+fn a_connection_of_another_account_is_refused_and_the_table_names_that_account() {
     let listener = listener();
     let mut as_nobody = Command::new("sudo");
     as_nobody.args(["-n", "-u", "nobody"]);
@@ -101,26 +131,15 @@ fn a_connection_held_by_a_process_of_another_account_is_refused_and_its_socket_i
     let nobody = uid_of("nobody");
 
     let admitted = peer_macos::owner_only(peer_macos::own_account())(holder.connection);
-    let found = peer_macos::holder_among_every_process(holder.peer_socket())
-        .expect("the processes can be listed");
-    let nobodys_processes = peer_macos::processes_of(nobody).expect("nobody's processes");
-    let shown: Vec<_> = nobodys_processes
-        .iter()
-        .map(|pid| (*pid, peer_macos::tcp_sockets_of(*pid)))
-        .collect();
+    let found = peer_macos::find(holder.peer_socket()).expect("the table can be read");
 
     println!(
-        "the owner is uid {}; nobody (uid {nobody}) connects from {}: admitted {admitted}; a scan of every process finds {found:?}; nobody's processes and the TCP sockets the kernel shows this account: {shown:?}",
+        "the owner is uid {}; nobody (uid {nobody}) connects with nc from {}: admitted {admitted}; the table finds {found:?}",
         peer_macos::own_account(),
         holder.connection.peer,
     );
     assert!(!admitted, "a connection of nobody was admitted");
-    assert_eq!(found, Found::Nothing);
-    assert!(
-        !nobodys_processes.is_empty(),
-        "nobody's nc is not among the processes of nobody"
-    );
-    assert!(shown.iter().all(|(_, sockets)| sockets.is_empty()));
+    assert_eq!(found, Found::Caller { uid: nobody });
 }
 
 const LOOKUPS: usize = 200;
@@ -140,26 +159,12 @@ fn summary(mut times: Vec<Duration>) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "a measure, read from its output"]
 async fn the_cost_of_the_caller_check() {
-    let own = peer_macos::own_account();
-    let processes = peer_macos::processes_of(own).expect("this account's processes");
-    let sockets: usize = processes
-        .iter()
-        .map(|pid| peer_macos::tcp_sockets_of(*pid).len())
-        .sum();
-    let all = processes.len();
     let listener = listener();
     let holder = Holder::start(Command::new("/usr/bin/env"), &listener);
-    let _many: Vec<_> = (0..100)
-        .filter_map(|_| std::fs::File::open("/dev/null").ok())
-        .collect();
-    let (files, listed, highest) =
-        peer_macos::descriptor_counts(std::process::id()).expect("this process's descriptors");
+    let (lookups, connections) =
+        peer_macos::time_lookups(holder.peer_socket(), LOOKUPS).expect("the table can be read");
     println!(
-        "this process with 100 more descriptors: pbi_nfiles {files}, open descriptors {listed}, highest descriptor {highest}"
-    );
-    let lookups = peer_macos::time_lookups(own, holder.peer_socket(), LOOKUPS);
-    println!(
-        "{LOOKUPS} lookups over {all} processes of this account holding {sockets} TCP sockets over IPv4: {}",
+        "{LOOKUPS} lookups, each a read of the whole table of {connections} TCP connections over IPv4: {}",
         summary(lookups)
     );
 
@@ -181,7 +186,7 @@ async fn the_cost_of_the_caller_check() {
         };
         let fresh: Vec<Duration> = (0..LOOKUPS)
             .map(|_| {
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let mut stream = TcpStream::connect(address).expect("a connection");
                 request(&mut stream, true);
                 let mut answer = String::new();
@@ -193,7 +198,7 @@ async fn the_cost_of_the_caller_check() {
         let mut stream = TcpStream::connect(address).expect("a connection");
         let kept: Vec<Duration> = (0..LOOKUPS)
             .map(|_| {
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 request(&mut stream, false);
                 read_one_answer(&mut stream);
                 started.elapsed()

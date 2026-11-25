@@ -36,6 +36,8 @@ mod instructions;
 mod links;
 #[path = "server/notes.rs"]
 mod notes;
+#[path = "server/other_accounts.rs"]
+mod other_accounts;
 #[path = "server/process.rs"]
 mod process;
 #[path = "server/projects.rs"]

@@ -44,10 +44,10 @@ tokio-util.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["net"] }
 
-# The caller check on macOS (src/peer_macos.rs) lists the sockets of this account's processes through libproc.
+# The caller check on macOS (src/peer_macos.rs) reads the kernel's table of TCP connections through sysctl.
 [target.'cfg(target_os = "macos")'.dependencies]
-libproc.workspace = true
 rustix.workspace = true
+sysctl.workspace = true
 
 # doltlite links zlib by name and Windows has none: this builds one from source for it to link.
 [target.'cfg(windows)'.dependencies]
@@ -63,4 +63,4 @@ tokio-util.workspace = true
 rustix = { workspace = true, features = ["event", "fs"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["event", "fs"] }

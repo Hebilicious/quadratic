@@ -38,6 +38,7 @@ rustix = { workspace = true, features = ["event"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
+sysctl.workspace = true
 
 # Lets `cargo binstall` download the archive of a GitHub release instead of building.
 [package.metadata.binstall]
