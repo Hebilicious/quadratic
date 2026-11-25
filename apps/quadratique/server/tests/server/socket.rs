@@ -9,6 +9,11 @@ use quadratique_server::server::{self, CONTROL, Paths, RuntimeFile, ServerError,
 
 use crate::support::within;
 
+fn prepared_at(home: &Path) -> home::Prepared {
+    home::prepare(&Paths::in_home(home).expect("an absolute home"))
+        .expect("the home passes the policy")
+}
+
 fn mode(path: &Path) -> u32 {
     std::fs::symlink_metadata(path)
         .expect("the entry")
@@ -137,7 +142,7 @@ async fn the_socket_answers_the_identity_with_the_generation_and_the_control_ver
 
     let identity = within(
         "the identity over the socket",
-        server::identity_over_socket(home.path()),
+        server::identity_over_socket(&prepared_at(home.path())),
     )
     .await
     .expect("the server answers on its socket");
@@ -177,7 +182,7 @@ async fn the_socket_answers_the_identity_with_the_generation_and_the_control_ver
     let again = server::start(&paths, server::loopback())
         .await
         .expect("the next server starts");
-    let next = server::identity_over_socket(home.path())
+    let next = server::identity_over_socket(&prepared_at(home.path()))
         .await
         .expect("the next server answers");
     assert_ne!(next.generation, Some(generation));
@@ -202,7 +207,7 @@ async fn a_stale_socket_of_this_account_is_replaced() {
         .await
         .expect("the server starts over a stale socket");
 
-    let identity = server::identity_over_socket(home.path())
+    let identity = server::identity_over_socket(&prepared_at(home.path()))
         .await
         .expect("the socket at the same name answers");
     assert_eq!(identity.pid, std::process::id());
@@ -218,7 +223,7 @@ async fn a_socket_whose_mode_is_not_0600_is_not_trusted() {
         .expect("the server starts");
     set_mode(running.socket_path(), 0o660);
 
-    let probed = server::identity_over_socket(home.path()).await;
+    let probed = server::identity_over_socket(&prepared_at(home.path())).await;
 
     assert!(
         matches!(&probed, Err(server::Unanswered::NotReady(why)) if why.contains("mode 660")),
@@ -235,7 +240,9 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
     use std::os::fd::AsFd;
 
     let home = crate::support::private_home();
-    let (listener, file) = home::bind_socket(home.path()).expect("the socket binds");
+    let (listener, file) = home::bind_socket(&prepared_at(home.path()))
+        .await
+        .expect("the socket binds");
     let copy = listener
         .as_fd()
         .try_clone_to_owned()
@@ -256,6 +263,181 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
         "{refused:?}"
     );
     drop(copy);
+}
+
+/// A process of this account that listens on the socket's name without the home's lock keeps its socket: the server
+/// removes a socket only after a connection to it is refused.
+#[tokio::test]
+async fn a_socket_on_which_a_process_still_listens_is_not_removed() {
+    let home = crate::support::private_home();
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let socket = home.path().join(SOCKET_FILE);
+    let listening = std::os::unix::net::UnixListener::bind(&socket).expect("a listening socket");
+
+    let refused = server::start(&paths, server::loopback()).await;
+
+    let Err(ServerError::Home(HomeError::SocketEntry { what, .. })) = &refused else {
+        panic!(
+            "the server did not refuse the socket in use: {:?}",
+            refused.err()
+        );
+    };
+    assert!(what.contains("a process of this account listens"), "{what}");
+    std::os::unix::net::UnixStream::connect(&socket).expect("the socket still reaches its process");
+    drop(listening);
+}
+
+/// The runtime file is written through a FIFO whose pipe this test fills first, so the server's write blocks in the
+/// middle of publishing its runtime file. The test knows it has reached that point when a descriptor of this process
+/// other than its own two names the FIFO. Meanwhile the socket queues connections and answers none.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_socket_answers_only_once_the_runtime_file_is_written() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let nonblocking = rustix::fs::OFlags::NONBLOCK.bits() as i32;
+    let home = crate::support::private_home();
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let partial = home
+        .path()
+        .join(format!("server.json.{}", std::process::id()));
+    let made = std::process::Command::new("mkfifo")
+        .arg(&partial)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    let mut reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblocking)
+        .open(&partial)
+        .expect("the FIFO's reading end");
+    let mut filler = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(nonblocking)
+        .open(&partial)
+        .expect("a writing end of the test's own");
+    let chunk = [b' '; 4096];
+    let mut filled = 0;
+    loop {
+        match filler.write(&chunk) {
+            Ok(written) => filled += written,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("filling the pipe: {error}"),
+        }
+    }
+    drop(filler);
+    let prepared = prepared_at(home.path());
+    // From a thread outside the runtime's workers, the tasks that the start spawns go to the shared queue: other
+    // workers run them while this thread blocks in the write, as they would in a server that is not under test.
+    let starting = {
+        let paths = paths.clone();
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            runtime.block_on(server::start(&paths, server::loopback()))
+        })
+    };
+    within("the server's write into the full pipe", async {
+        while descriptors_of(&partial) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+
+    let while_publishing =
+        server::identity_over_socket_within(&prepared, std::time::Duration::from_millis(300)).await;
+
+    let mut written = Vec::new();
+    within("the runtime file's text", async {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => written.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("reading the pipe: {error}"),
+            }
+        }
+    })
+    .await;
+    let running = within("the start", starting)
+        .await
+        .expect("the start's task")
+        .expect("the server starts");
+    std::fs::remove_file(&paths.runtime).expect("the FIFO, renamed to the runtime file, goes");
+    std::fs::write(&paths.runtime, &written[filled..])
+        .expect("the runtime file, as a regular file");
+    let after = server::identity_over_socket(&prepared).await;
+    running.shutdown().await;
+    assert!(
+        matches!(while_publishing, Err(server::Unanswered::Stalled)),
+        "the socket answered before the runtime file was written: {while_publishing:?}"
+    );
+    assert!(after.is_ok(), "{after:?}");
+}
+
+/// How many descriptors of this process name `path`.
+fn descriptors_of(path: &Path) -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("this process's descriptors")
+        .flatten()
+        .filter(|entry| std::fs::read_link(entry.path()).is_ok_and(|target| target == path))
+        .count()
+}
+
+/// An answer of one byte more than the limit is refused before it is parsed, even when it holds a valid identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_answer_longer_than_the_limit_is_refused_unparsed() {
+    use std::io::{Read, Write};
+
+    let home = crate::support::private_home();
+    let socket = home.path().join(SOCKET_FILE);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("a fake server");
+    set_mode(&socket, 0o600);
+    let identity = serde_json::json!({
+        "pid": 1,
+        "database": home.path().join("workspace.db"),
+        "control": CONTROL,
+    })
+    .to_string();
+    let head_and_body = |padding: usize| {
+        let body = format!("{identity}{}", " ".repeat(padding));
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let mut padding = server::IDENTITY_LIMIT - head_and_body(0).len();
+    while head_and_body(padding).len() > server::IDENTITY_LIMIT {
+        padding -= 1;
+    }
+    let at_the_limit = head_and_body(padding);
+    let over_the_limit = head_and_body(padding + 1);
+    assert_eq!(
+        (at_the_limit.len(), over_the_limit.len()),
+        (server::IDENTITY_LIMIT, server::IDENTITY_LIMIT + 1)
+    );
+    let answers = vec![at_the_limit, over_the_limit];
+    let serving = std::thread::spawn(move || {
+        for answer in answers {
+            let (mut stream, _) = listener.accept().expect("a connection");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(answer.as_bytes());
+        }
+    });
+    let prepared = prepared_at(home.path());
+
+    let at_the_limit = server::identity_over_socket(&prepared).await;
+    let over_the_limit = server::identity_over_socket(&prepared).await;
+
+    serving.join().expect("the fake server");
+    assert!(at_the_limit.is_ok(), "{at_the_limit:?}");
+    assert!(
+        matches!(&over_the_limit, Err(server::Unanswered::Malformed(why)) if why.contains("longer than")),
+        "{over_the_limit:?}"
+    );
 }
 
 /// What `connect` gives the account nobody on `socket`: `connected`, or the name of the errno.

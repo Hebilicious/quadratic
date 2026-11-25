@@ -27,6 +27,8 @@ mod mcp;
 mod other_build;
 #[path = "cli/server_life.rs"]
 mod server_life;
+#[path = "cli/status.rs"]
+mod status;
 #[path = "cli/tokens.rs"]
 mod tokens;
 #[path = "cli/traces.rs"]

@@ -6,6 +6,13 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use quadratique_server::home::{self, HomeError, SOCKET_FILE, SOCKET_PATH_LIMIT};
+use quadratique_server::server::Paths;
+
+/// The policy on the home at `path`: the resolved folder it gives, or its refusal.
+fn prepare(path: &Path) -> Result<PathBuf, HomeError> {
+    let paths = Paths::in_home(path).expect("an absolute home");
+    home::prepare(&paths).map(|prepared| prepared.folder().to_path_buf())
+}
 
 fn mode(path: &Path) -> u32 {
     std::fs::symlink_metadata(path)
@@ -25,7 +32,7 @@ fn safe_folder() -> (tempfile::TempDir, PathBuf) {
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
         .expect("a temporary folder");
-    let resolved = home::prepare(folder.path()).expect("the temporary folder passes the policy");
+    let resolved = prepare(folder.path()).expect("the temporary folder passes the policy");
     (folder, resolved)
 }
 
@@ -38,7 +45,7 @@ fn a_missing_home_is_made_private_with_every_missing_folder_above_it() {
     let (_folder, base) = safe_folder();
     let wanted = base.join("data/quadratique");
 
-    let made = home::prepare(&wanted).expect("the home is made");
+    let made = prepare(&wanted).expect("the home is made");
 
     assert_eq!(made, wanted);
     assert_eq!(mode(&base.join("data")), 0o700);
@@ -53,7 +60,7 @@ fn a_folder_above_the_home_that_others_may_write_is_refused_unless_it_is_sticky(
     std::fs::create_dir(&shared).expect("a shared folder");
     set_mode(&shared, 0o777);
 
-    let refused = home::prepare(&shared.join("home"));
+    let refused = prepare(&shared.join("home"));
 
     let Err(HomeError::Replaceable { path, .. }) = &refused else {
         panic!("not refused as replaceable: {refused:?}");
@@ -67,7 +74,7 @@ fn a_folder_above_the_home_that_others_may_write_is_refused_unless_it_is_sticky(
     assert!(!shared.join("home").exists(), "the home was made");
 
     set_mode(&shared, 0o1777);
-    home::prepare(&shared.join("home")).expect("a sticky folder is safe above the home");
+    prepare(&shared.join("home")).expect("a sticky folder is safe above the home");
 }
 
 #[test]
@@ -79,10 +86,7 @@ fn a_link_is_followed_only_when_no_other_account_can_change_it() {
     let safe_link = base.join("safe");
     symlink(&real, &safe_link).expect("a link in a safe folder");
 
-    assert_eq!(
-        home::prepare(&safe_link).expect("the link is followed"),
-        real
-    );
+    assert_eq!(prepare(&safe_link).expect("the link is followed"), real);
 
     let shared = base.join("shared");
     std::fs::create_dir(&shared).expect("a shared folder");
@@ -90,7 +94,7 @@ fn a_link_is_followed_only_when_no_other_account_can_change_it() {
     symlink(&real, &exposed_link).expect("a link in a folder others may write");
     set_mode(&shared, 0o777);
 
-    let refused = home::prepare(&exposed_link);
+    let refused = prepare(&exposed_link);
 
     let Err(HomeError::ForeignLink { link, .. }) = &refused else {
         panic!("not refused as a foreign link: {refused:?}");
@@ -114,7 +118,7 @@ fn a_home_that_a_group_or_other_accounts_may_use_is_refused_and_left_as_it_is() 
     for loose in [0o770, 0o750, 0o705] {
         set_mode(&shared, loose);
 
-        let refused = home::prepare(&shared);
+        let refused = prepare(&shared);
 
         let Err(HomeError::NotPrivate { .. }) = &refused else {
             panic!("mode {loose:o} was not refused: {refused:?}");
@@ -135,7 +139,7 @@ fn anything_but_a_socket_of_this_account_at_the_socket_name_is_refused() {
     let socket = base.join(SOCKET_FILE);
 
     std::fs::write(&socket, "notes").expect("a regular file");
-    let refused = home::prepare(&base);
+    let refused = prepare(&base);
     assert!(
         matches!(&refused, Err(HomeError::SocketEntry { what, .. }) if what == "a regular file"),
         "{refused:?}"
@@ -143,7 +147,7 @@ fn anything_but_a_socket_of_this_account_at_the_socket_name_is_refused() {
     std::fs::remove_file(&socket).expect("the file goes");
 
     std::fs::create_dir(&socket).expect("a folder");
-    let refused = home::prepare(&base);
+    let refused = prepare(&base);
     assert!(
         matches!(&refused, Err(HomeError::SocketEntry { what, .. }) if what == "a folder"),
         "{refused:?}"
@@ -151,7 +155,7 @@ fn anything_but_a_socket_of_this_account_at_the_socket_name_is_refused() {
     std::fs::remove_dir(&socket).expect("the folder goes");
 
     symlink("/dev/null", &socket).expect("a link");
-    let refused = home::prepare(&base);
+    let refused = prepare(&base);
     assert!(
         matches!(&refused, Err(HomeError::SocketEntry { what, .. }) if what == "a link"),
         "{refused:?}"
@@ -160,7 +164,7 @@ fn anything_but_a_socket_of_this_account_at_the_socket_name_is_refused() {
 
     let stale = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
     drop(stale);
-    home::prepare(&base).expect("a stale socket of this account is accepted");
+    prepare(&base).expect("a stale socket of this account is accepted");
 }
 
 /// Making a socket of another account needs root; tests/server/socket.rs does that where `sudo` works.
@@ -179,12 +183,23 @@ fn a_socket_of_another_account_is_named_as_such() {
     );
 }
 
-/// The home whose socket path is `length` bytes long, in a safe folder.
+/// A short folder that this test controls, so that the limit is reached whatever the system's temporary folder is.
+fn short_folder() -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::Builder::new()
+        .prefix("q")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in("/tmp")
+        .expect("a folder in /tmp");
+    let resolved = prepare(folder.path()).expect("the folder passes the policy");
+    (folder, resolved)
+}
+
+/// The home whose socket path is `length` bytes long, in `base`.
 fn home_with_socket_path_of(base: &Path, length: usize) -> PathBuf {
     let fixed = base.as_os_str().len() + 1 + 1 + SOCKET_FILE.len();
     assert!(
         length > fixed,
-        "the temporary folder {} is too long for this test",
+        "{} is too long for this test",
         base.display()
     );
     base.join("h".repeat(length - fixed))
@@ -192,21 +207,19 @@ fn home_with_socket_path_of(base: &Path, length: usize) -> PathBuf {
 
 #[tokio::test]
 async fn the_socket_path_may_be_as_long_as_the_system_allows_and_not_one_byte_longer() {
-    let (_folder, base) = safe_folder();
+    let (_folder, base) = short_folder();
     let at_the_limit = home_with_socket_path_of(&base, SOCKET_PATH_LIMIT);
     let over_the_limit = home_with_socket_path_of(&base, SOCKET_PATH_LIMIT + 1);
 
-    let made = home::prepare(&at_the_limit).expect("a socket path at the limit is accepted");
-    let socket = made.join(SOCKET_FILE);
-    assert_eq!(socket.as_os_str().len(), SOCKET_PATH_LIMIT);
-    let bound = tokio::net::UnixListener::bind(&socket);
-    assert!(
-        bound.is_ok(),
-        "tokio cannot bind at the limit: {:?}",
-        bound.err()
-    );
+    let prepared = home::prepare(&Paths::in_home(&at_the_limit).expect("a home"))
+        .expect("a socket path at the limit is accepted");
+    assert_eq!(prepared.socket().as_os_str().len(), SOCKET_PATH_LIMIT);
+    let (_listener, file) = home::bind_socket(&prepared)
+        .await
+        .expect("the server's bind works at the limit");
+    std::os::unix::net::UnixStream::connect(file.path()).expect("a connect works at the limit");
 
-    let refused = home::prepare(&over_the_limit);
+    let refused = prepare(&over_the_limit);
 
     let Err(error @ HomeError::SocketPathTooLong { length, limit, .. }) = &refused else {
         panic!("one byte over the limit was not refused: {refused:?}");
@@ -230,9 +243,24 @@ async fn the_socket_path_may_be_as_long_as_the_system_allows_and_not_one_byte_lo
     );
 }
 
-/// The ACL is written as the kernel stores it: `struct posix_acl_xattr_header`, then (tag, perm, id) entries.
+#[test]
+fn a_missing_folder_followed_by_dot_dot_is_refused_before_anything_is_made() {
+    let (_folder, base) = safe_folder();
+    let wanted = base.join("missing/../home");
+
+    let refused = prepare(&wanted);
+
+    assert!(
+        matches!(&refused, Err(HomeError::MissingThenParent(path)) if path == &base.join("missing")),
+        "{refused:?}"
+    );
+    assert!(empty(&base), "something was made in {}", base.display());
+}
+
+/// The ACL is written as the kernel stores it: `struct posix_acl_xattr_header`, then (tag, perm, id) entries. `false`
+/// when the file system takes no extended attributes.
 #[cfg(target_os = "linux")]
-fn write_acl(path: &Path, named_user_perm: u16, mask: u16) {
+fn write_acl(path: &Path, name: &str, named_user_perm: u16, mask: u16) -> bool {
     const UNDEFINED: u32 = u32::MAX;
     let entries: [(u16, u16, u32); 5] = [
         (0x01, 0o7, UNDEFINED),
@@ -247,14 +275,21 @@ fn write_acl(path: &Path, named_user_perm: u16, mask: u16) {
         value.extend(perm.to_le_bytes());
         value.extend(id.to_le_bytes());
     }
-    rustix::fs::setxattr(
-        path,
-        "system.posix_acl_access",
-        &value,
-        rustix::fs::XattrFlags::empty(),
-    )
-    .unwrap_or_else(|error| panic!("{} takes no ACL: {error}", path.display()));
+    match rustix::fs::setxattr(path, name, &value, rustix::fs::XattrFlags::empty()) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::NOTSUP) => {
+            println!(
+                "skipped: the file system of {} takes no extended attributes, so it holds no ACL to refuse",
+                path.display()
+            );
+            false
+        }
+        Err(error) => panic!("{} takes no ACL: {error}", path.display()),
+    }
 }
+
+#[cfg(target_os = "linux")]
+const ACCESS: &str = "system.posix_acl_access";
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -263,33 +298,62 @@ fn an_acl_that_gives_another_account_access_is_refused_whatever_the_mode_says() 
     let leaf = base.join("home");
     std::fs::create_dir(&leaf).expect("a home");
     set_mode(&leaf, 0o700);
-    write_acl(&leaf, 0o5, 0);
+    if !write_acl(&leaf, ACCESS, 0o5, 0) {
+        return;
+    }
     assert_eq!(mode(&leaf), 0o700, "the mask leaves the mode private");
 
-    let refused = home::prepare(&leaf);
+    let refused = prepare(&leaf);
 
     assert!(
         matches!(&refused, Err(HomeError::SharedAccess { path, .. }) if path == &leaf),
         "{refused:?}"
     );
+    let message = refused.unwrap_err().to_string();
     assert!(
-        refused
-            .unwrap_err()
-            .to_string()
-            .contains("gives access to another account: its ACL lets user 65534 use it"),
+        message.contains("gives access to another account: its ACL lets user 65534 use it")
+            && message.contains(&format!("setfacl -b {}", leaf.display())),
+        "{message}"
     );
 
     let parent = base.join("parent");
     std::fs::create_dir(&parent).expect("a folder above the home");
     set_mode(&parent, 0o755);
-    write_acl(&parent, 0o7, 0o5);
+    write_acl(&parent, ACCESS, 0o7, 0o5);
     assert_eq!(mode(&parent), 0o750, "the mask gives the group no write");
 
-    let refused = home::prepare(&parent.join("home"));
+    let refused = prepare(&parent.join("home"));
 
     assert!(
         matches!(&refused, Err(HomeError::SharedAccess { path, .. }) if path == &parent),
         "{refused:?}"
+    );
+}
+
+/// A default ACL gives its entries to everything made in the folder later, the store and the socket included.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_default_acl_that_gives_another_account_access_is_refused() {
+    let (_folder, base) = safe_folder();
+    let leaf = base.join("home");
+    std::fs::create_dir(&leaf).expect("a home");
+    set_mode(&leaf, 0o700);
+    if !write_acl(&leaf, "system.posix_acl_default", 0o6, 0o6) {
+        return;
+    }
+    assert_eq!(mode(&leaf), 0o700, "a default ACL leaves the mode as it is");
+
+    let refused = prepare(&leaf);
+
+    let message = refused.as_ref().map_err(ToString::to_string).unwrap_err();
+    assert!(
+        matches!(&refused, Err(HomeError::SharedAccess { path, .. }) if path == &leaf),
+        "{refused:?}"
+    );
+    assert!(
+        message.contains("user 65534, in its default ACL,")
+            && message.contains(&format!("setfacl -k {}", leaf.display())),
+        "{message}"
     );
 }
 
@@ -312,10 +376,10 @@ fn an_acl_entry_that_allows_access_is_refused_and_a_deny_entry_is_not() {
     set_mode(&leaf, 0o700);
     add_acl(&leaf, "everyone deny delete");
 
-    home::prepare(&leaf).expect("a deny entry gives no access");
+    prepare(&leaf).expect("a deny entry gives no access");
 
     add_acl(&leaf, "everyone allow list");
-    let refused = home::prepare(&leaf);
+    let refused = prepare(&leaf);
     assert!(
         matches!(&refused, Err(HomeError::SharedAccess { path, .. }) if path == &leaf),
         "{refused:?}"
@@ -325,9 +389,34 @@ fn an_acl_entry_that_allows_access_is_refused_and_a_deny_entry_is_not() {
     std::fs::create_dir(&parent).expect("a folder above the home");
     set_mode(&parent, 0o755);
     add_acl(&parent, "everyone allow add_subdirectory");
-    let refused = home::prepare(&parent.join("home"));
+    let refused = prepare(&parent.join("home"));
     assert!(
         matches!(&refused, Err(HomeError::SharedAccess { path, .. }) if path == &parent),
         "{refused:?}"
+    );
+}
+
+/// A macOS ACL entry can let an account remove what a folder holds whatever its sticky bit says, so the ACL of a
+/// sticky folder above the home is read too.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acl_entry_on_a_sticky_folder_above_the_home_is_refused() {
+    let (_folder, base) = safe_folder();
+    let sticky = base.join("sticky");
+    std::fs::create_dir(&sticky).expect("a folder above the home");
+    set_mode(&sticky, 0o1777);
+    prepare(&sticky.join("home")).expect("a sticky folder without an ACL is safe");
+
+    add_acl(&sticky, "everyone allow delete_child");
+    let refused = prepare(&sticky.join("other"));
+
+    assert!(
+        matches!(&refused, Err(HomeError::SharedAccess { path, .. }) if path == &sticky),
+        "{refused:?}"
+    );
+    let message = refused.unwrap_err().to_string();
+    assert!(
+        message.contains(&format!("chmod -N {}", sticky.display())),
+        "{message}"
     );
 }

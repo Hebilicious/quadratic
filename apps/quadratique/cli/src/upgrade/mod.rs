@@ -339,7 +339,7 @@ async fn store_schema(home: &Home) -> Result<Option<i64>, String> {
     if let Some(server) = server::home_server(home).await? {
         return Ok(Some(server.schema));
     }
-    let database = &home.paths.database;
+    let database = &home.prepared().database();
     read_recorded(database)
         .map(|recorded| recorded.map(|recorded| recorded.schema))
         .map_err(|error| format!("the store {} cannot be read: {error}", database.display()))
@@ -351,7 +351,7 @@ async fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result
     match store_schema(home).await? {
         Some(schema) if schema > known => Err(format!(
             "the store {} has schema {schema}, and release {latest} is known to open schema {known} at most: its server could not start",
-            home.paths.database.display(),
+            home.prepared().database().display(),
         )),
         _ => Ok(()),
     }

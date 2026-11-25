@@ -42,7 +42,7 @@ async fn projects() -> Result<Vec<PathBuf>, String> {
     if let Some(repositories) = from_the_server(&home).await? {
         return Ok(repositories);
     }
-    let database = &home.paths.database;
+    let database = &home.prepared().database();
     match read_recorded(database).map_err(|error| error.to_string())? {
         None => Ok(Vec::new()),
         Some(recorded) if recorded.schema > SCHEMA_VERSION => Err(format!(

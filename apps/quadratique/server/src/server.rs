@@ -19,9 +19,9 @@ use crate::app::{Context, application, caller_of, interface};
 use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
 use crate::git::repository::GIT_LIMIT;
 use crate::git::watcher::{self, Watcher};
-use crate::home::{self, HomeError};
+use crate::home::{self, HomeError, Prepared};
 use crate::serve::{self, Admit, Connection, OWNER_ONLY};
-use crate::store::{Store, StoreError, canonical_folder, refuse_git_work_tree};
+use crate::store::{Store, StoreError, canonical_folder};
 use crate::web::{self, WebApp};
 
 mod closing;
@@ -34,9 +34,9 @@ pub const IDENTITY: &str = "/server";
 pub const CONTROL: u32 = 1;
 /// The authority that a request on the Unix socket names: the socket, not a host, decides where it goes.
 pub const SOCKET_AUTHORITY: &str = "quadratique.invalid";
-const DATABASE_FILE: &str = "workspace.db";
-const RUNTIME_FILE: &str = "server.json";
-const LOCK_FILE: &str = "server.lock";
+pub(crate) const DATABASE_FILE: &str = "workspace.db";
+pub(crate) const RUNTIME_FILE: &str = "server.json";
+pub(crate) const LOCK_FILE: &str = "server.lock";
 const DIRECTORY: &str = "quadratique";
 /// How long a server may take to start: a command waits this long for the server it started, and a server waits
 /// this long for a holder of the lock that is not a server to let go.
@@ -99,21 +99,6 @@ impl Paths {
 
     pub fn credentials(&self) -> PathBuf {
         self.database.with_file_name(CREDENTIALS_FILE)
-    }
-
-    /// The folder that holds the store, the lock and the socket.
-    pub fn folder(&self) -> &Path {
-        self.database.parent().unwrap_or(Path::new("."))
-    }
-
-    /// The same files in `folder`, which `home::prepare` resolved.
-    fn within(&self, folder: &Path) -> Paths {
-        let name = |path: &Path| path.file_name().map(PathBuf::from).unwrap_or_default();
-        Paths {
-            database: folder.join(name(&self.database)),
-            runtime: folder.join(name(&self.runtime)),
-            home: self.home.clone(),
-        }
     }
 
     pub fn in_home(home: &Path) -> Result<Paths, ServerError> {
@@ -326,14 +311,14 @@ pub async fn start(paths: &Paths, address: SocketAddr) -> Result<Server, ServerE
     .await
 }
 
-/// As `start`, saying who started the server.
+/// As `start`, in a home that the caller prepared, saying who started the server.
 pub async fn start_by(
-    paths: &Paths,
+    home: &Prepared,
     address: SocketAddr,
     started: Started,
 ) -> Result<Server, ServerError> {
-    start_as(
-        paths,
+    start_prepared(
+        home,
         address,
         WebApp::from_env(),
         watcher::EVERY,
@@ -366,14 +351,60 @@ pub async fn start_as(
     }
     let own_account = callers::own_account()?;
     callers::check_own_connection(&own_account)?;
-    refuse_git_work_tree(paths.folder())?;
-    let folder = home::prepare(paths.folder())?;
-    let paths = &paths.within(&folder);
-    let owner: closing::HomeLock = Arc::new(own(paths, waits).await?);
+    let home = home::prepare(paths)?;
+    start_checked(
+        &home,
+        own_account,
+        address,
+        web_app,
+        look_every,
+        waits,
+        started,
+    )
+    .await
+}
+
+async fn start_prepared(
+    home: &Prepared,
+    address: SocketAddr,
+    web_app: WebApp,
+    look_every: Duration,
+    waits: Waits,
+    started: Started,
+) -> Result<Server, ServerError> {
+    if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
+        return Err(ServerError::NotLoopback(address));
+    }
+    let own_account = callers::own_account()?;
+    callers::check_own_connection(&own_account)?;
+    start_checked(
+        home,
+        own_account,
+        address,
+        web_app,
+        look_every,
+        waits,
+        started,
+    )
+    .await
+}
+
+/// Every file of the home is named through `home`, which only `home::prepare` makes.
+#[allow(clippy::too_many_arguments)]
+async fn start_checked(
+    home: &Prepared,
+    own_account: callers::Account,
+    address: SocketAddr,
+    web_app: WebApp,
+    look_every: Duration,
+    waits: Waits,
+    started: Started,
+) -> Result<Server, ServerError> {
+    let owner: closing::HomeLock = Arc::new(own(home, waits).await?);
     #[cfg(unix)]
-    let (socket_listener, socket_file) = home::bind_socket(&folder)?;
-    let credentials = Credentials::open(paths.credentials())?.holding(Arc::clone(&owner));
-    let store = Store::open(&paths.database)?;
+    let (socket_listener, socket_file) = home::bind_socket(home).await?;
+    let credentials = Credentials::open(home.credentials())?.holding(Arc::clone(&owner));
+    let store = Store::open(home.database())?;
     store.hold_until_closed(Arc::clone(&owner));
     let database = store.path().to_path_buf();
     let app = application().map_err(ServerError::Application)?;
@@ -441,24 +472,22 @@ pub async fn start_as(
     let _ = answer.set(Bytes::from(
         serde_json::to_vec(&identity).map_err(std::io::Error::from)?,
     ));
+    if let Err(error) = write_runtime(&home.runtime(), &runtime) {
+        watcher.stop().await;
+        served.close().await;
+        return Err(error.into());
+    }
     #[cfg(unix)]
     let socket = serve::serve_socket(
         socket_listener,
         socket_file,
         vec![(IDENTITY.into(), identify)],
     );
-    if let Err(error) = write_runtime(&paths.runtime, &runtime) {
-        watcher.stop().await;
-        #[cfg(unix)]
-        socket.close().await;
-        served.close().await;
-        return Err(error.into());
-    }
     Ok(Server {
         #[cfg(unix)]
         socket,
         served,
-        published: closing::Published::new(paths.runtime.clone(), &runtime),
+        published: closing::Published::new(home.runtime(), &runtime),
         runtime,
         watcher,
         _home: owner,
@@ -472,6 +501,8 @@ mod callers {
     use super::ServerError;
     use crate::peer;
     use crate::serve::Admit;
+
+    pub type Account = u32;
 
     fn unknown(error: peer::CallersUnknown) -> ServerError {
         ServerError::CallersUnknown(error.to_string())
@@ -502,6 +533,8 @@ mod callers {
     /// Never made: `own_account` always fails here.
     pub struct NoAccount;
 
+    pub type Account = NoAccount;
+
     pub fn own_account() -> Result<NoAccount, ServerError> {
         Err(ServerError::CallersUnknown(format!(
             "Quadratique cannot yet tell which account connects to its local listener on {}, so it does not serve there: another account of this machine could read and change your issues. Linux is supported; macOS is QUA-33, Windows QUA-34",
@@ -520,15 +553,13 @@ mod callers {
 
 /// Every child process between its `fork` and its `exec` holds the lock too, because a `flock` stays taken while any
 /// copy of its descriptor is open.
-async fn own(paths: &Paths, waits: Waits) -> Result<File, ServerError> {
-    let directory = paths.folder();
-    let database =
-        canonical_folder(directory)?.join(paths.database.file_name().unwrap_or_default());
+async fn own(home: &Prepared, waits: Waits) -> Result<File, ServerError> {
+    let database = canonical_folder(home.folder())?.join(DATABASE_FILE);
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(paths.lock())?;
+        .open(home.lock())?;
     let deadline = Instant::now() + waits.start;
     loop {
         match lock.try_lock() {
@@ -537,8 +568,8 @@ async fn own(paths: &Paths, waits: Waits) -> Result<File, ServerError> {
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() || answers_for(&paths.runtime, &database, waits.probe.min(left)).await {
-            return Err(ServerError::Owned(paths.database.clone()));
+        if left.is_zero() || answers_for(&home.runtime(), &database, waits.probe.min(left)).await {
+            return Err(ServerError::Owned(home.database()));
         }
         tokio::time::sleep(POLL).await;
     }
@@ -556,15 +587,24 @@ async fn answers_for(runtime: &Path, database: &Path, limit: Duration) -> bool {
         .is_ok_and(|identity| identity.pid == runtime.pid && identity.database == database)
 }
 
+/// Why a server gave no identity. A probe over the socket keeps these apart, as the record's state table needs them;
+/// the TCP path takes all but a refusal as nobody.
 #[derive(Debug)]
 pub enum Unanswered {
+    /// Confirmed absence or refusal: no entry at the socket's name, `ENOENT` or `ECONNREFUSED` at `connect`, or a
+    /// connection that the server closed. Over TCP, any failed `connect` but a denied one.
     NotListening(std::io::Error),
-    /// The connect failed with `EPERM` or `EACCES`: a sandbox forbids it.
+    /// `EPERM` or `EACCES`: a sandbox, or another account's folder.
     NotPermitted(std::io::Error),
-    OwnerOnly,
-    NoIdentity,
-    /// The entry at the socket's name is not yet one to trust: not a socket of this account with mode 0600.
+    /// Any other failure to reach the socket: `ENOTDIR`, `ELOOP`, `ENAMETOOLONG`, …
+    PathError(std::io::Error),
+    /// The entry at the socket's name is not one to trust yet: not a socket of this account with mode 0600.
     NotReady(String),
+    OwnerOnly,
+    /// It accepted the connection and gave no full answer within the probe limit.
+    Stalled,
+    /// It answered with something that is not an identity.
+    Malformed(String),
 }
 
 impl Unanswered {
@@ -575,7 +615,21 @@ impl Unanswered {
             Unanswered::NotListening(error)
         }
     }
+
+    #[cfg(unix)]
+    fn of_socket_connect(error: std::io::Error) -> Unanswered {
+        match error.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                Unanswered::NotListening(error)
+            }
+            std::io::ErrorKind::PermissionDenied => Unanswered::NotPermitted(error),
+            _ => Unanswered::PathError(error),
+        }
+    }
 }
+
+/// The longest identity answer, head and body, that a probe reads.
+pub const IDENTITY_LIMIT: usize = 64 * 1024;
 
 /// The answer of the server at `address` to `GET /server` within the probe limit, or why it gave none.
 pub async fn identity(address: SocketAddr) -> Result<Identity, Unanswered> {
@@ -585,7 +639,7 @@ pub async fn identity(address: SocketAddr) -> Result<Identity, Unanswered> {
 async fn identity_within(address: SocketAddr, limit: Duration) -> Result<Identity, Unanswered> {
     tokio::time::timeout(limit, ask_identity(address))
         .await
-        .unwrap_or(Err(Unanswered::NoIdentity))
+        .unwrap_or(Err(Unanswered::Stalled))
 }
 
 async fn ask_identity(address: SocketAddr) -> Result<Identity, Unanswered> {
@@ -595,55 +649,96 @@ async fn ask_identity(address: SocketAddr) -> Result<Identity, Unanswered> {
     ask_identity_on(stream, &address.to_string()).await
 }
 
-/// The answer of the server whose socket is in `folder` to `GET /server` within the probe limit, or why it gave none.
-/// The socket is trusted only as a socket of this account with mode 0600.
+/// The answer of the server of `home` to `GET /server` on its socket within the probe limit, or why it gave none.
+/// The socket is trusted only as a socket of this account with mode 0600. `EINTR` and `EAGAIN` at `connect` are
+/// tried again within the same limit.
 #[cfg(unix)]
-pub async fn identity_over_socket(folder: &Path) -> Result<Identity, Unanswered> {
-    let socket = folder.join(home::SOCKET_FILE);
-    match home::socket_ready(&socket) {
-        Ok(()) => {}
-        Err(home::NotReady::Missing) => {
+pub async fn identity_over_socket(home: &Prepared) -> Result<Identity, Unanswered> {
+    identity_over_socket_within(home, PROBE_LIMIT).await
+}
+
+#[cfg(unix)]
+pub async fn identity_over_socket_within(
+    home: &Prepared,
+    limit: Duration,
+) -> Result<Identity, Unanswered> {
+    let socket = home.socket();
+    match home::socket_entry(&socket) {
+        home::Entry::Ready => {}
+        home::Entry::Missing => {
             return Err(Unanswered::NotListening(
                 std::io::ErrorKind::NotFound.into(),
             ));
         }
-        Err(home::NotReady::Denied(error)) => return Err(Unanswered::NotPermitted(error)),
-        Err(home::NotReady::Untrusted(why)) => return Err(Unanswered::NotReady(why)),
-        Err(home::NotReady::Io(error)) => return Err(Unanswered::NotListening(error)),
+        home::Entry::Denied(error) => return Err(Unanswered::NotPermitted(error)),
+        home::Entry::Untrusted(why) => return Err(Unanswered::NotReady(why)),
+        home::Entry::PathError(error) => return Err(Unanswered::PathError(error)),
     }
     let asking = async {
-        let stream = tokio::net::UnixStream::connect(&socket)
-            .await
-            .map_err(Unanswered::of_connect)?;
+        let stream = loop {
+            match tokio::net::UnixStream::connect(&socket).await {
+                Ok(stream) => break stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    tokio::time::sleep(POLL).await;
+                }
+                Err(error) => return Err(Unanswered::of_socket_connect(error)),
+            }
+        };
         ask_identity_on(stream, SOCKET_AUTHORITY).await
     };
-    tokio::time::timeout(PROBE_LIMIT, asking)
+    tokio::time::timeout(limit, asking)
         .await
-        .unwrap_or(Err(Unanswered::NoIdentity))
+        .unwrap_or(Err(Unanswered::Stalled))
 }
 
+/// The one reader of an identity answer, for both transports: it reads at most `IDENTITY_LIMIT` bytes and one more,
+/// and refuses a longer answer before it parses anything.
 async fn ask_identity_on(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     host: &str,
 ) -> Result<Identity, Unanswered> {
+    let gone = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::BrokenPipe
+        | std::io::ErrorKind::ConnectionAborted => Unanswered::NotListening(error),
+        _ => Unanswered::Malformed(format!("the connection failed: {error}")),
+    };
     let request = format!("GET {IDENTITY} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|_| Unanswered::NoIdentity)?;
+    stream.write_all(request.as_bytes()).await.map_err(gone)?;
     let mut answer = Vec::new();
-    stream
+    (&mut stream)
+        .take(IDENTITY_LIMIT as u64 + 1)
         .read_to_end(&mut answer)
         .await
-        .map_err(|_| Unanswered::NoIdentity)?;
-    let answer = String::from_utf8(answer).map_err(|_| Unanswered::NoIdentity)?;
+        .map_err(gone)?;
+    if answer.is_empty() {
+        return Err(Unanswered::NotListening(
+            std::io::ErrorKind::UnexpectedEof.into(),
+        ));
+    }
+    if answer.len() > IDENTITY_LIMIT {
+        return Err(Unanswered::Malformed(format!(
+            "the answer is longer than {IDENTITY_LIMIT} bytes"
+        )));
+    }
+    let malformed = |why: &str| Unanswered::Malformed(why.to_owned());
+    let answer = String::from_utf8(answer).map_err(|_| malformed("the answer is not UTF-8"))?;
     let (head, body) = answer
         .split_once("\r\n\r\n")
-        .ok_or(Unanswered::NoIdentity)?;
+        .ok_or_else(|| malformed("the answer is not HTTP"))?;
     match head.split_whitespace().nth(1) {
-        Some("200") => serde_json::from_str(body).map_err(|_| Unanswered::NoIdentity),
+        Some("200") => serde_json::from_str(body)
+            .map_err(|error| Unanswered::Malformed(format!("the identity is not valid: {error}"))),
         Some("403") if body == OWNER_ONLY => Err(Unanswered::OwnerOnly),
-        _ => Err(Unanswered::NoIdentity),
+        Some(status) => Err(Unanswered::Malformed(format!(
+            "the answer has status {status}"
+        ))),
+        None => Err(malformed("the answer has no status")),
     }
 }
 
