@@ -5,11 +5,13 @@ use std::time::{Duration, Instant};
 
 use quadratique_server::app::interface;
 use quadratique_server::home::{self, Prepared};
+#[cfg(not(unix))]
+use quadratique_server::server::identity;
 #[cfg(unix)]
 use quadratique_server::server::{
     CONTROL, Identity, PROBE_LIMIT, StopAnswer, identity_over_socket_within, stop_over_socket,
 };
-use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered, identity};
+use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered};
 use quadratique_server::store::canonical_folder;
 
 use crate::process::detach;
@@ -32,6 +34,8 @@ const LOG_TAIL: usize = 2000;
 #[derive(Debug)]
 pub enum LifeError {
     Io(std::io::Error),
+    /// The runtime file names another database: only Windows reads it to find a server (QUA-61).
+    #[cfg(not(unix))]
     OtherDatabase {
         runtime: PathBuf,
         database: PathBuf,
@@ -151,6 +155,7 @@ impl std::fmt::Display for LifeError {
             LifeError::Io(error) => {
                 write!(formatter, "the Quadratique home is not usable: {error}")
             }
+            #[cfg(not(unix))]
             LifeError::OtherDatabase { runtime, database } => write!(
                 formatter,
                 "the runtime file {} names a server of another database, {}: stop that server, or set QUADRATIQUE_HOME",
@@ -514,13 +519,13 @@ fn cannot_write(error: &std::io::Error) -> bool {
     )
 }
 
+/// What the runtime file and TCP show. Only Windows, which has no socket yet (QUA-61), finds a server this way.
+#[cfg(not(unix))]
 pub enum Found {
     Nobody,
     Ours(RuntimeFile),
     OtherInterface {
         runtime: RuntimeFile,
-        /// Read on Windows, where every server is found over TCP (QUA-61).
-        #[cfg_attr(unix, allow(dead_code))]
         theirs: TheirInterface,
     },
     /// The probe was refused (`EPERM`, `EACCES` or the owner-only `403`). It names a server of this home only while the
@@ -530,8 +535,8 @@ pub enum Found {
     },
 }
 
+#[cfg(not(unix))]
 impl Found {
-    #[cfg(not(unix))]
     fn refusal(runtime: &RuntimeFile, theirs: TheirInterface) -> LifeError {
         LifeError::OtherInterface {
             pid: runtime.pid,
@@ -559,6 +564,7 @@ impl Found {
     }
 }
 
+#[cfg(not(unix))]
 pub async fn find(home: &Home) -> Result<Found, LifeError> {
     let Some(runtime) = home.runtime_file() else {
         return Ok(Found::Nobody);
@@ -725,6 +731,10 @@ impl Deadline {
         Deadline(Instant::now() + limit)
     }
 
+    pub fn at(instant: Instant) -> Deadline {
+        Deadline(instant)
+    }
+
     /// What is left, or nothing once the deadline has passed.
     pub fn left(self) -> Option<Duration> {
         Some(self.0.checked_duration_since(Instant::now())?).filter(|left| !left.is_zero())
@@ -792,7 +802,7 @@ fn runtime_of(identity: &Identity) -> Option<RuntimeFile> {
 }
 
 #[cfg(unix)]
-fn lists_this_control(identity: &Identity) -> bool {
+pub fn lists_this_control(identity: &Identity) -> bool {
     identity
         .controls
         .as_deref()
@@ -1089,6 +1099,32 @@ async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError>
     };
     let _start_lock = await_start_lock(home, deadline, Attempt::Stop).await?;
     stop_holding(home, deadline, Attempt::Stop, meant, proof).await
+}
+
+/// Stops generation `generation` of this home's server, and no other: `quadratique upgrade` saw it before it replaced
+/// the binary. Under `start.lock`, within `deadline`. Another generation that serves now is refused (`409`, or seen
+/// before the request), a server from before the socket is never signalled, and a free home is `NotRunning`.
+#[cfg(unix)]
+pub async fn stop_generation(
+    home: &Home,
+    generation: &str,
+    deadline: Deadline,
+) -> Result<Stopped, LifeError> {
+    let _start_lock = await_start_lock(home, deadline, Attempt::Stop).await?;
+    stop_holding(
+        home,
+        deadline,
+        Attempt::Stop,
+        Some(generation.to_owned()),
+        None,
+    )
+    .await
+}
+
+/// Why nothing may be stopped in a row that refuses a stop, as `server stop` says it.
+#[cfg(unix)]
+pub fn refused_to_stop(home: &Home, observed: Observed) -> String {
+    refusal(home, observed, Attempt::Stop).to_string()
 }
 
 #[cfg(not(unix))]
@@ -1423,31 +1459,6 @@ mod tests {
             matches!(started, Ok(Err(LifeError::NoAnswer { .. }))),
             "the start did not end at its deadline: {started:?}"
         );
-    }
-
-    /// The errno values are Unix's; on Windows a connect is refused with `WSAEACCES`, which std reads as the same
-    /// `PermissionDenied` and nothing tests yet.
-    #[cfg(unix)]
-    #[test]
-    fn a_connect_that_is_not_permitted_is_refused_and_a_refused_connection_is_nobody() {
-        use quadratique_server::server::{RuntimeFile, Unanswered};
-        use rustix::io::Errno;
-
-        use super::Found;
-
-        let runtime = RuntimeFile {
-            pid: 1,
-            address: "127.0.0.1:9".parse().expect("an address"),
-            url: String::new(),
-            database: "/home/workspace.db".into(),
-            control: None,
-        };
-        let after =
-            |errno: Errno| Found::unanswered(&runtime, Unanswered::of_connect(errno.into()));
-
-        assert!(matches!(after(Errno::PERM), Found::Refused { .. }));
-        assert!(matches!(after(Errno::ACCESS), Found::Refused { .. }));
-        assert!(matches!(after(Errno::CONNREFUSED), Found::Nobody));
     }
 
     /// A held home with no socket and no runtime file is the row "starting": the stop waits for it to answer or to

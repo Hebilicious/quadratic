@@ -274,9 +274,9 @@ the socket to stop, and never signal it. The other commands still use the TCP li
 
 A server of release 0.1, or of any build before the socket, holds the data folder's lock, has no
 socket, and leaves a `server.json` without a `control` field. No command that needs the server uses
-it: each one fails with "Nothing was started." and says what to run. (`upgrade`, `upgrade --skills`
-and `init --dry-run` still look for a server over TCP, and `upgrade` still restarts or stops one that
-runs the file it replaced; QUA-56 changes that.) `server status` answers `legacy: true`, the pid that
+it: each one fails with "Nothing was started." and says what to run. `upgrade --skills` reads the
+store file instead, `init --dry-run` says that it asks no server, and `upgrade` stops nothing and
+says what to stop (see "Upgrade"). `server status` answers `legacy: true`, the pid that
 `server.json` names, `provenStop`, the `reason`, and in `stop` what to run. `provenStop` is the
 evidence about the process; a stop still has to reserve `start.lock`, and checks the evidence again
 under it.
@@ -315,8 +315,11 @@ Stop it yourself, then run the command again: if `quadratique.service` runs it (
 ```
 
 The process commands appear only for a valid pid other than the command's own; `kill 0` would
-signal your own process group. After `quadratique upgrade` replaced the binary, an old server still
-runs the replaced file, so it gets these instructions: nothing durable records which file that was.
+signal your own process group. A server whose binary was replaced since it started (by `install.sh`,
+mise or a copy) runs a file that no longer has a name, so it gets these instructions. That is never
+a file that `quadratique upgrade` replaced: an upgrade replaces the binary it runs from, and release
+0.1 has no `upgrade`, so a record of the files it replaced would prove nothing about a server of
+release 0.1, and none is kept for it.
 
 Release 0.1 was published for Linux only, but its code refuses no system. On macOS the command line
 reads no `/proc`, so it always gives these instructions.
@@ -549,7 +552,7 @@ When the release is newer, it:
    every folder above it belong to you or to root, no group and no other account can write the
    folder, and a folder above it may be writable by a group or by others only when it is sticky,
    as `/tmp` is;
-2. takes a lock in that folder (`.quadratique-upgrade.lock`), held until the server is restarted
+2. takes a lock in that folder (`.quadratique-upgrade.lock`), held until the server is stopped
    and the repositories are reported, so that one upgrade at a time works on the binary;
 3. downloads the archive for this platform from github.com, which redirects to
    `release-assets.githubusercontent.com` (or `objects.githubusercontent.com`,
@@ -559,15 +562,38 @@ When the release is newer, it:
    Linux through its open descriptor) with `--version` in an empty environment from `/`, checks
    the store schema again, and renames the binary over the running one.
 
-Then it brings the server of this home to the new build. It acts only on a server that runs the
-replaced file, told by the device and inode of the file the process runs (Linux). When
-`quadratique.service` runs that server, it restarts the service and waits, as `install.sh` does,
-until the new build serves this home. Without the service, it stops that server through a pidfd,
-so that the next command starts the new build. When it cannot tell what the server runs, or
-`systemctl` fails, it stops nothing and says what to run. Its answer says the version it left (`from`), the one it reached (`to`), and in
-`server` what it did. Run again, it answers `"upToDate": true` and changes nothing; when an earlier
-run was stopped after the rename and the server still runs the earlier build, it restarts that
-server. `quadratique upgrade --check` says the installed and the latest version and changes
+Then it stops the server of this home if that server ran the replaced file, so that the next
+command starts the new build. It finds the server on the home's socket, as every command does,
+never over TCP, and it signals no process:
+
+1. Before the rename, it reads the server's identity on the socket (see "The control protocol"):
+   its `generation` and its `executable`, the device, inode and path of the file it was started
+   from.
+2. After the rename, a server whose `executable` is the replaced file is asked to stop that
+   generation (`POST /server/stop`). If the answer is `409`, another generation serves now, and
+   nothing is stopped: the answer says so. A server that runs another file (another install) is
+   left running, and `server` says which file it runs.
+3. A server started with `quadratique serve` is stopped too, and the answer (in `warnings`) says to
+   restart it the way you started it: your supervisor or your terminal.
+4. When `quadratique.service` runs that server (its main process is the generation's process), the
+   upgrade stops the generation the same way, waits until systemd sees the process leave, and
+   starts the unit again: the unit runs `serve --take-over` of the new binary. It then waits until
+   the server on the socket is the unit's main process and says it runs the installed file. If the
+   unit changed on disk since systemd loaded it, or `systemctl` fails, nothing is stopped and the
+   answer says what to run.
+5. A server from before the socket (release 0.1) is never stopped by `upgrade`. The answer says
+   what serves and what stops it: `quadratique server stop` when that command has its proof (see
+   "A server of release 0.1"), otherwise the steps to stop it yourself. A file that `upgrade` replaced never counts as
+   that proof: the upgrade replaces the binary it runs from, and release 0.1 has no `upgrade`, so
+   no server of release 0.1 runs a file that an upgrade replaced.
+
+Its answer says the version it left (`from`), the one it reached (`to`), and in `server` what it
+did, or in `warnings` what you must do. Run again, it answers `"upToDate": true` and changes
+nothing. When an earlier run was stopped between the rename and the stop, the next run finishes
+it: the lock file holds the device and inode of the file that run replaced, and the next run stops
+the server that says, on the socket, that it was started from the binary's path and from that file
+while the path now holds another. It reads that record only when no other account can change the
+install folder. `quadratique upgrade --check` says the installed and the latest version and changes
 nothing.
 
 Any failure before the rename leaves the running binary in place and the error ends with "Nothing
@@ -579,7 +605,8 @@ unless you pass `--allow-downgrade`, and does not run as root.
 Each binary knows the store schema it opens. A newer release opens every schema the running build
 knows. For an older release, the binary keeps a table of the first release of each schema; a
 downgrade is refused when the store has a schema the release does not know: its server could not
-start. The schema comes from the home's server when one runs, else from the store file.
+start. The schema comes from the home's server when one answers on the socket, else from the store
+file.
 
 When mise or cargo installed the binary, `upgrade` replaces nothing. It answers that manager's
 command in `run` (`mise upgrade --bump github:Hebilicious/quadratique`, or
@@ -602,7 +629,8 @@ with the store as it was.
 
 `upgrade` writes into no repository, because a repository may take changes only through a branch
 and a pull request. Its answer has a `skills` report, which the new binary makes. It starts no
-server: when one runs for the home, the server lists the projects; otherwise, when a store
+server: when one answers on the home's socket, the server lists the projects; otherwise (no
+server, or one from before the socket), when a store
 exists, the command reads it once, read-only, and the store engine may leave its lock file
 (`.workspace.db-lock`) beside it, which the engine creates for any reader. Then it reads the main
 checkout of each project's repository, as `quadratique init --dry-run` does. It lists

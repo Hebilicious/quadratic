@@ -2,11 +2,16 @@
 //! is a debug build, the only kind that reads QUADRATIQUE_UPGRADE_SOURCE; nothing here reaches
 //! the network. Every run finds a fake `systemctl` first on its PATH, so no test reads or
 //! changes this machine's user services.
+//!
+//! The upgrade finds the home's server on its socket and stops only the generation it saw before
+//! the rename, and only when that server says it runs the replaced file
+//! (docs/decisions/0004-a-socket-for-commands-and-a-token-for-the-browser.md, §3).
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -15,7 +20,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use crate::support::{BINARY, Home, Quadratique, Repository, Run, await_exit, git_stdout};
+use crate::support::{
+    BINARY, Home, Quadratique, Repository, Run, Step, Watch, await_exit, git_stdout,
+};
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const LATEST: &str = "99.0.0";
@@ -879,23 +886,41 @@ fn a_staging_folder_left_by_a_killed_upgrade_is_removed_by_the_next() {
 }
 
 /// A fake `systemctl` that runs `quadratique.service` as systemd would: its main process is the
-/// pid in `<state>/pid`, and a restart starts the installed binary's server with take-over.
+/// pid in `<state>/pid` while that process lives (a zombie has exited), and a start of an
+/// inactive unit starts the installed binary's server with take-over. It logs every call.
 fn service(state: &Path, binary: &Path, needs_reload: bool) -> String {
     format!(
-        "#!/bin/sh\nstate={state}\necho \"$*\" >> \"$state/calls\"\ncase \"$1 $2\" in\n'--user show') echo LoadState=loaded; echo ActiveState=active; echo \"MainPID=$(cat \"$state/pid\")\"; echo NeedDaemonReload={reload} ;;\n'--user restart') nohup {binary} serve --take-over > \"$state/log\" 2>&1 & echo $! > \"$state/pid\" ;;\nesac\n",
+        "#!/bin/sh\nstate={state}\necho \"$*\" >> \"$state/calls\"\nalive() {{ pid=$(cat \"$state/pid\" 2>/dev/null) && [ -r \"/proc/$pid/stat\" ] && [ \"$(sed 's/^.*) //' \"/proc/$pid/stat\" | cut -c1)\" != Z ]; }}\ncase \"$1 $2\" in\n'--user show') if alive; then echo LoadState=loaded; echo ActiveState=active; echo \"MainPID=$pid\"; else echo LoadState=loaded; echo ActiveState=inactive; echo MainPID=0; fi; echo NeedDaemonReload={reload} ;;\n'--user start') alive || {{ nohup {binary} serve --take-over > \"$state/log\" 2>&1 & echo $! > \"$state/pid\"; }} ;;\nesac\n",
         state = state.display(),
         binary = binary.display(),
         reload = if needs_reload { "yes" } else { "no" },
     )
 }
 
+/// The generation of the home's server, from `server status` over its socket.
+fn generation_of(installed: &Installed, releases: &Releases) -> String {
+    let status = installed
+        .quadratique(releases)
+        .args(["server", "status"])
+        .run()
+        .ok();
+    status["generation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no generation: {status}"))
+        .to_owned()
+}
+
+/// The interrupted upgrade under the service: the generation that runs the replaced file is
+/// asked to stop over the socket, and once systemd has seen its main process leave, the unit is
+/// started again and its `serve --take-over` runs the installed file. Nothing restarts the unit.
 #[test]
-fn a_server_left_on_the_earlier_build_is_restarted_through_the_service_until_the_new_build_serves()
-{
+fn under_the_service_the_generation_on_the_replaced_file_is_stopped_and_the_unit_started_until_the_new_build_serves()
+ {
     let releases = Releases::start();
     let installed = Installed::file();
     releases.publish(CURRENT, assets(CURRENT, b"never installed"));
     let earlier = installed.server_of_an_earlier_build(&releases);
+    let generation = generation_of(&installed, &releases);
     let state = installed.root().join("systemd");
     std::fs::create_dir_all(&state).unwrap();
     std::fs::write(state.join("pid"), earlier.to_string()).unwrap();
@@ -911,7 +936,9 @@ fn a_server_left_on_the_earlier_build_is_restarted_through_the_service_until_the
     assert_ne!(now, earlier);
     assert_eq!(
         answer["server"],
-        format!("restarted quadratique.service; {CURRENT} serves this home (pid {now})"),
+        format!(
+            "stopped the earlier build and started quadratique.service again; {CURRENT} serves this home (pid {now})"
+        ),
         "{answer}"
     );
     let status = installed
@@ -925,11 +952,18 @@ fn a_server_left_on_the_earlier_build_is_restarted_through_the_service_until_the
     );
     assert_eq!(status["sameInterface"], true, "{status}");
     assert_eq!(status["pid"], now, "{status}");
+    assert_ne!(status["generation"], json!(generation), "{status}");
     await_exit(earlier);
     assert_eq!(
         std::fs::canonicalize(format!("/proc/{now}/exe")).unwrap(),
         installed.binary
     );
+    let calls = std::fs::read_to_string(state.join("calls")).unwrap();
+    assert!(
+        calls.contains("--user start quadratique.service"),
+        "{calls}"
+    );
+    assert!(!calls.contains("restart"), "{calls}");
 }
 
 #[test]
@@ -950,31 +984,310 @@ fn a_service_whose_unit_changed_on_disk_is_not_restarted() {
         warning.contains("systemctl --user daemon-reload"),
         "{warning}"
     );
+    assert!(warning.contains("nothing was stopped"), "{warning}");
+    let calls = std::fs::read_to_string(state.join("calls")).unwrap();
     assert!(
-        !std::fs::read_to_string(state.join("calls"))
-            .unwrap()
-            .contains("restart")
+        !calls.contains("restart") && !calls.contains("start"),
+        "{calls}"
     );
     assert_eq!(installed.home.servers(), vec![earlier]);
 }
 
+/// An upgrade killed between its rename and its stop left the server on the replaced file; the
+/// next run, which finds the binary up to date, stops that generation.
 #[test]
-fn without_a_service_a_server_left_on_the_earlier_build_is_stopped() {
+fn an_interrupted_upgrade_is_finished_by_the_next_run_which_stops_the_generation_on_the_replaced_file()
+ {
     let releases = Releases::start();
     let installed = Installed::file();
     releases.publish(CURRENT, assets(CURRENT, b"never installed"));
     let earlier = installed.server_of_an_earlier_build(&releases);
+    let generation = generation_of(&installed, &releases);
 
     let answer = installed.upgrade(&releases, &[]).ok();
 
+    assert_eq!(answer["upToDate"], true, "{answer}");
     assert_eq!(
         answer["server"],
         format!(
-            "stopped the server of the earlier build (pid {earlier}); the next quadratique command starts this build"
+            "stopped the server of the earlier build (pid {earlier}, generation {generation}); the next quadratique command starts this build"
         ),
         "{answer}"
     );
+    await_exit(earlier);
     assert!(installed.home.servers().is_empty());
+
+    let again = installed.upgrade(&releases, &[]).ok();
+    assert!(again.get("server").is_none(), "{again}");
+}
+
+/// The server was started from the installed file, which the upgrade replaces: the generation
+/// read before the rename is stopped after it.
+#[test]
+fn a_server_that_runs_the_replaced_file_is_stopped_by_the_generation_seen_before_the_rename() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    let binary = new_binary(LATEST);
+    releases.publish(LATEST, assets(LATEST, &binary));
+    installed
+        .quadratique(&releases)
+        .args(["project", "list"])
+        .run()
+        .ok();
+    let servers = installed.home.servers();
+    assert_eq!(servers.len(), 1, "{servers:?}");
+    let generation = generation_of(&installed, &releases);
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    assert_eq!(answer["to"], LATEST, "{answer}");
+    assert_eq!(
+        answer["server"],
+        format!(
+            "stopped the server of the earlier build (pid {}, generation {generation}); the next quadratique command starts this build",
+            servers[0]
+        ),
+        "{answer}"
+    );
+    assert!(answer.get("warnings").is_none(), "{answer}");
+    assert_eq!(installed.bytes(), binary);
+    await_exit(servers[0]);
+    assert!(installed.home.servers().is_empty());
+}
+
+/// The home's server runs a copy installed elsewhere: the upgrade replaces its own file and
+/// leaves that server running.
+#[test]
+fn a_server_that_runs_another_file_is_left_running_with_a_message() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
+    let elsewhere = installed.root().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let other = elsewhere.join("quadratique");
+    copy_binary(&other);
+    installed
+        .home
+        .quadratique_at(&other, installed.home.path())
+        .args(["project", "list"])
+        .run()
+        .ok();
+    let servers = installed.home.servers();
+    assert_eq!(servers.len(), 1, "{servers:?}");
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    assert_eq!(answer["to"], LATEST, "{answer}");
+    assert_eq!(
+        answer["server"],
+        format!(
+            "the server of this home (pid {}) runs {}, not the replaced binary: it was left running",
+            servers[0],
+            other.display()
+        ),
+        "{answer}"
+    );
+    assert_eq!(installed.home.servers(), servers);
+}
+
+/// A server started with `quadratique serve` from the replaced file is stopped, and the answer
+/// says to restart it the way it was started.
+#[test]
+fn a_server_started_with_serve_is_stopped_and_the_person_reads_how_to_restart_it() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
+    let mut watch = Watch::of(&installed.home);
+    let serve = installed
+        .home
+        .quadratique_at(&installed.binary, installed.home.path())
+        .args(["serve"])
+        .spawn();
+    watch.await_steps(&[Step::Published("server.json")]);
+    let generation = generation_of(&installed, &releases);
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    let warning = answer["warnings"][0].as_str().unwrap_or_default();
+    assert!(
+        warning.contains("stopped the server of the earlier build")
+            && warning.contains(&generation)
+            && warning
+                .contains("started with `quadratique serve`: restart it the way you started it"),
+        "{answer}"
+    );
+    let served = serve.finish();
+    assert_eq!(served.code, 0, "{served:?}");
+}
+
+const OTHER_GENERATION: &str = "fedcba9876543210fedcba9876543210";
+
+/// A fake server on the home's socket that says it runs the installed file, in generation
+/// `GENERATION`, and answers every stop request with `409` naming another generation: the
+/// generation the upgrade saw is no longer the one that serves. It says how many stop requests
+/// reached it.
+struct Replaced {
+    stops: Arc<Mutex<u32>>,
+}
+
+const GENERATION: &str = "0123456789abcdef0123456789abcdef";
+
+impl Replaced {
+    fn start(installed: &Installed) -> Replaced {
+        use std::os::unix::fs::MetadataExt;
+
+        let path = installed.home.path().join("server.sock");
+        let listener = UnixListener::bind(&path).expect("the fake server's socket");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let meta = std::fs::metadata(&installed.binary).unwrap();
+        let identity = json!({
+            "pid": 4242,
+            "database": installed.home.path().canonicalize().unwrap().join("workspace.db"),
+            "interface": quadratique_server::app::interface(),
+            "schema": 1,
+            "generation": GENERATION,
+            "control": 1,
+            "controls": [1],
+            "executable": { "path": installed.binary, "device": meta.dev(), "inode": meta.ino() },
+            "started": "on-demand",
+            "url": "http://127.0.0.1:9/cli",
+        })
+        .to_string();
+        let stops = Arc::new(Mutex::new(0));
+        let counted = Arc::clone(&stops);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                let mut length = 0;
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0; length];
+                let _ = reader.read_exact(&mut body);
+                let (status, answer) = if first.starts_with("POST /server/stop ") {
+                    *counted.lock().unwrap() += 1;
+                    (
+                        "409 Conflict",
+                        json!({ "generation": OTHER_GENERATION }).to_string(),
+                    )
+                } else {
+                    ("200 OK", identity.clone())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        Replaced { stops }
+    }
+
+    fn stops(&self) -> u32 {
+        *self.stops.lock().unwrap()
+    }
+}
+
+#[test]
+fn a_stop_answered_with_409_stops_nothing_and_says_another_generation_serves() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    let binary = new_binary(LATEST);
+    releases.publish(LATEST, assets(LATEST, &binary));
+    let fake = Replaced::start(&installed);
+
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    assert_eq!(answer["to"], LATEST, "{answer}");
+    assert_eq!(installed.bytes(), binary);
+    assert_eq!(fake.stops(), 1, "{answer}");
+    assert_eq!(
+        answer["warnings"],
+        json!([format!(
+            "the server of this home is no longer generation {GENERATION}, which this command asked to stop: another generation ({OTHER_GENERATION}) serves now. Nothing was stopped."
+        )]),
+        "{answer}"
+    );
+}
+
+/// A server from before the socket (release 0.1): the home's lock held by a process, no socket,
+/// and a runtime file without a control version that names a TCP address. The upgrade, its
+/// report and `init --dry-run` find it through the state table, connect to no TCP address, and
+/// the upgrade stops nothing and says what to stop.
+#[test]
+fn a_server_from_before_the_socket_is_found_without_tcp_and_the_upgrade_says_what_to_stop() {
+    let releases = Releases::start();
+    let installed = Installed::file();
+    let repository = Repository::new();
+    releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
+    let lock = installed.home.path().join("server.lock");
+    let mut old_server = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec 9>>\"$0\"; flock -x 9; echo ready; read -r _")
+        .arg(&lock)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = String::new();
+    BufReader::new(old_server.stdout.take().unwrap())
+        .read_line(&mut said)
+        .unwrap();
+    assert_eq!(said.trim(), "ready");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    std::fs::write(
+        installed.home.runtime_path(),
+        json!({
+            "pid": old_server.id(),
+            "address": address.to_string(),
+            "url": format!("http://{address}/cli"),
+            "database": installed.home.path().canonicalize().unwrap().join("workspace.db"),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let report = installed.upgrade(&releases, &["--skills"]).ok();
+    let dry_run = installed
+        .home
+        .quadratique_at(&installed.binary, &repository.root)
+        .args(["init", "--dry-run"])
+        .run();
+    let answer = installed.upgrade(&releases, &[]).ok();
+
+    assert_eq!(
+        report["skills"],
+        json!({ "current": [], "older": [] }),
+        "{report}"
+    );
+    assert!(dry_run.stdout.contains("before the socket"), "{dry_run:?}");
+    assert_eq!(answer["to"], LATEST, "{answer}");
+    let warning = answer["warnings"][0].as_str().unwrap_or_default();
+    assert!(
+        warning.contains("release 0.1")
+            && warning.contains("The upgrade stopped nothing")
+            && warning.contains("systemctl --user stop quadratique.service"),
+        "{answer}"
+    );
+    assert!(
+        old_server.try_wait().unwrap().is_none(),
+        "the old server was stopped"
+    );
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "a command connected to the old server's TCP address"
+    );
+    let _ = old_server.kill();
+    let _ = old_server.wait();
 }
 
 fn write(root: &Path, path: &str, text: &str) {

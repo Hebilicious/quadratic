@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use acid_cat_core::Outcome;
 use quadratique_server::domain::Binding;
 
-use crate::background::{self, Found, Home};
+use crate::background::{self, Home};
 use crate::init::{setup_of, shell_word};
 use crate::{caller, commands};
 
@@ -54,29 +54,50 @@ async fn projects() -> Result<Vec<PathBuf>, String> {
     }
 }
 
-/// The projects' repositories as the home's server lists them, when one runs. Starts nothing.
+/// The projects' repositories as the home's server lists them, when one answers on the home's socket. Starts nothing.
+/// Where the state table shows no server to ask (a free home, one starting, a server from before the socket, or one
+/// that cannot be used), the store file tells.
+#[cfg(unix)]
 async fn from_the_server(home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
+    use background::Observed;
+
+    let runtime = match background::observe(home).await {
+        Ok(Observed::Serving { runtime, .. }) => runtime,
+        Ok(Observed::Unreachable(reason)) => return Err(reason),
+        Ok(_) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    list_projects(&runtime.url).await.map(Some)
+}
+
+/// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
+#[cfg(not(unix))]
+async fn from_the_server(home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
+    use background::Found;
+
     let runtime = match background::find(home).await {
         Ok(Found::Ours(runtime)) | Ok(Found::OtherInterface { runtime, .. }) => runtime,
         Ok(Found::Nobody) => return Ok(None),
         Ok(Found::Refused { reason }) => return Err(reason),
         Err(error) => return Err(error.to_string()),
     };
+    list_projects(&runtime.url).await.map(Some)
+}
+
+async fn list_projects(url: &str) -> Result<Vec<PathBuf>, String> {
     let caller = caller::detect(Binding::Cli).map_err(|error| error.to_string())?;
-    let client = caller::client(&caller, &runtime.url)?;
+    let client = caller::client(&caller, url)?;
     let projects = match client.invoke("project.list", &json!({})).await {
         Outcome::Value(value) => value,
         Outcome::Failure(failure) => return Err(failure.to_string()),
         Outcome::CallFailure(failure) => return Err(failure.message),
     };
-    Ok(Some(
-        projects["items"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|project| project["repository"].as_str().map(PathBuf::from))
-            .collect(),
-    ))
+    Ok(projects["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project["repository"].as_str().map(PathBuf::from))
+        .collect())
 }
 
 #[derive(Default)]

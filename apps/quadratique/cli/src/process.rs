@@ -170,24 +170,6 @@ impl Pinned {
             Err(error) => Err(format!("pid {} cannot be signalled: {error}", self.pid)),
         }
     }
-
-    /// Whether the process exits within `limit`.
-    pub async fn exits_within(self, limit: std::time::Duration) -> Result<bool, String> {
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
-
-        tokio::task::spawn_blocking(move || {
-            let limit = Timespec {
-                tv_sec: i64::try_from(limit.as_secs()).unwrap_or(i64::MAX),
-                tv_nsec: i64::from(limit.subsec_nanos()),
-            };
-            let mut watched = [PollFd::new(&self.pidfd, PollFlags::IN)];
-            poll(&mut watched, Some(&limit))
-        })
-        .await
-        .map_err(|error| error.to_string())?
-        .map(|ready| ready == 1)
-        .map_err(|error| error.to_string())
-    }
 }
 
 /// A `lock:` line of an fdinfo file, as `/proc/locks` writes it: `lock:\t1: FLOCK  ADVISORY  WRITE <pid>

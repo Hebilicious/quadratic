@@ -1,5 +1,5 @@
-//! `quadratique upgrade`: installs the latest release over the running binary, brings the
-//! server of this home to it, and says which repositories hold an older skill. The command makes
+//! `quadratique upgrade`: installs the latest release over the running binary, stops the
+//! server of this home that ran the replaced file, and says which repositories hold an older skill. The command makes
 //! the network requests itself; the server makes none.
 //!
 //! Installing and restarting are written for Unix. Elsewhere the releases carry no archive yet,
@@ -36,7 +36,7 @@ use crate::commands::{self, print_json, report};
 use release::{Release, Source, Version};
 use route::Route;
 
-pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and restarts the server of this home (through quadratique.service when systemd runs it, waiting until the new build serves; else it stops the server, so that the next command starts the new build). Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server: the home's server lists the projects when it runs; otherwise the command reads the store file once, read-only, and the store engine may leave its lock file (.workspace.db-lock) beside it.";
+pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and stops the server of this home if it ran the replaced file: before the rename it reads, on the home's socket, the server's generation and the file it runs, and after it asks that generation to stop, so that the next command starts the new build. When quadratique.service ran that server, it then starts the unit again and waits until the new build serves; a server started with quadratique serve is stopped, and the person restarts it. A server that runs another file is left running, and a server from before the socket (release 0.1) gets what to stop. Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server: the home's server lists the projects when it runs; otherwise the command reads the store file once, read-only, and the store engine may leave its lock file (.workspace.db-lock) beside it.";
 
 /// A release binary is about 23 MiB.
 const BINARY_LIMIT: u64 = 128 << 20;
@@ -204,7 +204,8 @@ async fn install_release(
     }
     let leftovers = folder::remove_leftovers(folder, &lock);
     let staging = prepare(source, release, target, folder).await?;
-    store_opens(home, latest, running)
+    // The last look before the rename decides which generation, if any, is stopped after it.
+    let before = store_opens(home, latest, running)
         .await
         .map_err(unchanged)?;
     let replaced = (started_as.0, started_as.1);
@@ -223,7 +224,7 @@ async fn install_release(
     if !leftovers.left.is_empty() {
         answer["leftBesideTheBinary"] = json!(leftovers.left);
     }
-    match server::bring_up(home, binary, &latest.to_string(), Some(replaced)).await {
+    match server::bring_up(home, binary, &latest.to_string(), replaced, before).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
@@ -248,8 +249,10 @@ async fn install_release(
     ))
 }
 
-/// After a run that was stopped between the rename and the restart, the binary is current while
-/// the server of this home still runs the earlier build: restart it now.
+/// After a run that was stopped between the rename and the stop, the binary is current while the server of this home
+/// may still run the replaced file: stop it now. The record of the replaced file counts only in an install folder that
+/// no other account can change, and only for a server that says, over the socket, that it was started from this path
+/// and from that file.
 #[cfg(unix)]
 async fn finish_an_earlier_upgrade(
     home: &Home,
@@ -261,23 +264,32 @@ async fn finish_an_earlier_upgrade(
     let Some(folder) = binary.parent() else {
         return;
     };
+    let note = |answer: &mut Value, problem: String| {
+        if check {
+            answer["server"] = json!(problem);
+        } else {
+            answer["warnings"] = json!([problem]);
+        }
+    };
+    if let Err(problem) = folder::check(folder) {
+        note(
+            answer,
+            format!("the record of an earlier upgrade was not read: {problem}"),
+        );
+        return;
+    }
     let mut lock = match folder::Lock::take(folder) {
         Ok(lock) => lock,
-        Err(problem) if check => {
-            answer["server"] = json!(problem);
-            return;
-        }
         Err(problem) => {
-            answer["warnings"] = json!([problem]);
+            note(answer, problem);
             return;
         }
     };
     let Some(replaced) = lock.replaced() else {
         return;
     };
-    let server = match server::home_server(home).await {
-        Ok(Some(server)) => server,
-        Ok(None) => return,
+    let seen = match server::look(home).await {
+        Ok(seen) => seen,
         Err(problem) => {
             answer["warnings"] = json!([format!(
                 "the server of this home cannot be reached: {problem}"
@@ -285,17 +297,20 @@ async fn finish_an_earlier_upgrade(
             return;
         }
     };
-    if server::what_runs(server.pid, binary, Some(replaced)) != server::Runs::Replaced {
+    let server::Before::Socket(identity) = &seen.before else {
+        return;
+    };
+    if !server::left_on_the_replaced_file(identity, binary, replaced) {
         return;
     }
     if check {
         answer["server"] = json!(format!(
-            "the server of this home (pid {}) runs the file that an earlier upgrade replaced; quadratique upgrade restarts it",
-            server.pid
+            "the server of this home (pid {}) runs the file that an earlier upgrade replaced; quadratique upgrade stops it",
+            identity.pid
         ));
         return;
     }
-    match server::bring_up(home, binary, &running.to_string(), Some(replaced)).await {
+    match server::bring_up(home, binary, &running.to_string(), replaced, seen.before).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
@@ -336,28 +351,43 @@ fn known_schema_in(
         .unwrap_or(0)
 }
 
-/// The store's schema: from the home's server when one runs, so that the command opens no store
-/// file; else from the file, read once; `None` when there is no store.
-async fn store_schema(home: &Home) -> Result<Option<i64>, String> {
-    #[cfg(unix)]
-    if let Some(server) = server::home_server(home).await? {
-        return Ok(Some(server.schema));
+/// What served the home, and the store's schema: from the home's server when one answers on the socket, so that the
+/// command opens no store file; else from the file, read once; `None` when there is no store.
+#[cfg(unix)]
+async fn store_schema(home: &Home) -> Result<(server::Before, Option<i64>), String> {
+    let seen = server::look(home).await?;
+    if seen.schema.is_some() {
+        return Ok((seen.before, seen.schema));
     }
+    Ok((seen.before, recorded_schema(home)?))
+}
+
+#[cfg(not(unix))]
+async fn store_schema(home: &Home) -> Result<((), Option<i64>), String> {
+    Ok(((), recorded_schema(home)?))
+}
+
+fn recorded_schema(home: &Home) -> Result<Option<i64>, String> {
     let database = &home.prepared().database();
     read_recorded(database)
         .map(|recorded| recorded.map(|recorded| recorded.schema))
         .map_err(|error| format!("the store {} cannot be read: {error}", database.display()))
 }
 
-/// Refuses a release that could not open the store, before anything changes.
-async fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result<(), String> {
+#[cfg(unix)]
+type Before = server::Before;
+#[cfg(not(unix))]
+type Before = ();
+
+/// Refuses a release that could not open the store, before anything changes. Returns what served the home.
+async fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result<Before, String> {
     let known = known_schema(latest, running);
     match store_schema(home).await? {
-        Some(schema) if schema > known => Err(format!(
+        (_, Some(schema)) if schema > known => Err(format!(
             "the store {} has schema {schema}, and release {latest} is known to open schema {known} at most: its server could not start",
             home.prepared().database().display(),
         )),
-        _ => Ok(()),
+        (before, _) => Ok(before),
     }
 }
 
