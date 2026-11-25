@@ -28,7 +28,8 @@ The runs live in `~/.cache/quadratique-eval/runs/` (or `$QEVAL_RUNS`), outside e
 
 After the setup, the maintainer commits whatever the setup left in the working tree, so that
 agent worktrees see it. Beads commits by itself; for lific this commits `.mcp.json` with the
-plaintext key that `lific connect` wrote.
+plaintext key that `lific connect` wrote. That commit is not a setup step: the "Setup steps" row
+counts only the tracker's own commands.
 
 Then the maintainer creates the eight issues of `seed-tally.sh` with their priorities, the
 human's decision issue, and the four `blocks` links. The human acts through each tracker's own

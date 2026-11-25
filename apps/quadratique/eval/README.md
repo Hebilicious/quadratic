@@ -126,6 +126,9 @@ It was measured under these conditions:
 - Every row comes from one run: three sessions for each tracker, and the scripted measures at
   50 rounds × 3 repeats. `report --run` wrote the table; each cell lists each session's or each
   repeat's value.
+- The "Setup steps" row was counted again after a commit stopped counting as a step, from the
+  saved run's step lists: they ended with the maintainer's commit for Quadratique and lific,
+  which the count now leaves out (`setup_steps` in `harness/qeval/report.py`).
 
 | Row | Quadratique | lific | Beads | Quadratique's result |
 |---|---|---|---|---|
@@ -144,7 +147,7 @@ It was measured under these conditions:
 | Whole MCP tool list (second row) | 6,734 (11 tools) | 5,783 (31 tools) | 13,522 (18 tools) | lost to lific |
 | Tracker tokens per distinct task (one range per run) | 2,371–2,702 | 7,709 | 5,002–7,404 | won |
 | Tracker tokens per session (second row) | 2,350–2,643; 2,296–2,624; 2,466–2,839 | 2,278; 2,720; 2,711 | 3,258–4,681; 3,288–4,970; 3,457–5,158 | tied with lific |
-| Setup steps | 2 | 5 | 1 | lost to Beads |
+| Setup steps | 1 | 4 | 1 | tied with Beads |
 | Files written into the repository | 2 | 2 | 18 | tied with lific |
 | Lines added to `.git/config` | 0 | 0 | 3 | tied with lific |
 | Files written outside the repository (second row) | 6 | 7 | 1 | – |
@@ -159,7 +162,6 @@ It was measured under these conditions:
 
 | Row | Why | What would move it |
 |---|---|---|
-| Setup steps (2 against Beads' 1) | `quadratique init` makes no commit by design: it prints the `git commit` for the person to run, and the harness counts that commit. `bd init` commits by itself | Let `init` commit its files |
 | Whole MCP tool list (6,734 against 5,783) | Each tool bundles the types it uses, so the types of an issue repeat in `issue.list`, `issue.create` and `issue.update`, which are the largest tools. The `Date` and `Time` types, whose patterns check real dates, repeat in four tools | A shorter `Date` or `Time` pattern changes what the server accepts. A session fetches only the definitions of the tools it uses: the row of the tracker instructions that reached each session is won |
 | Tracker tokens per session (tied with lific) | The skill is the largest piece, then `claim` and `close`, which answered the whole issue in this run. A refused claim answers the holder's claim with its worktree path; sessions that tried a held issue first paid that once or twice | A shorter skill; or answers that leave out empty arrays and the claim's worktree for the agent's route, which changes catalog types that the web app reads. More sessions per tracker would show whether the overlap is real |
 
@@ -196,9 +198,12 @@ It was measured under these conditions:
   output, each counted once, when it entered the context. Every token row of the agent runs is a
   lower and an upper bound: the upper bound counts every call that touches the tracker whole, the
   lower bound only what is certainly the tracker's. No number is exact.
-- **Setup steps and files.** The quickstart's commands, plus the maintainer's commit when the
-  setup does not commit by itself. The files of one skill folder count as one file when its
-  `SKILL.md` is among them. Beads' one step writes 19 files, three lines of `.git/config`
+- **Setup steps and files.** The commands of the quickstart until an agent can create an issue:
+  `quadratique init`; lific's `init`, `bind`, `connect` and `agents-md`; `bd init`. A commit is
+  not a step. Who commits is still a difference: `bd init` commits what it wrote, while
+  `quadratique init` and lific leave the commit to the person, and the maintainer of the run made
+  it. The files of one skill folder count as one file when its `SKILL.md` is among them. Beads'
+  one step writes 19 files, three lines of `.git/config`
   (`core.hooksPath` and a `[beads]` section) and `~/.dolt/config_global.json` in the throwaway
   home. lific's setup commit puts the plaintext key of `.mcp.json` into git.
 - **The human's question.** "What is every agent doing, and what waits on me?" Four facts must
