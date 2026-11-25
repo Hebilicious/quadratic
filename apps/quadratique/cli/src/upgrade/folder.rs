@@ -284,7 +284,7 @@ impl Drop for Staging {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
-    use super::{Lock, Staging, check, remove_leftovers};
+    use super::{Lock, Staging, check, recorded_replaced, remove_leftovers};
 
     fn folder() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -376,10 +376,8 @@ mod tests {
         );
         assert_eq!(held.replaced(), None);
         held.record_replaced((7, 42)).unwrap();
+        assert_eq!(held.replaced(), Some((7, 42)));
         drop(held);
-        assert_eq!(
-            Lock::take(install.path()).unwrap().replaced(),
-            Some((7, 42))
-        );
+        assert_eq!(recorded_replaced(install.path()), Some((7, 42)));
     }
 }
