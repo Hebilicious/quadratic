@@ -1086,7 +1086,7 @@ mod tests {
 
     use quadratique_server::server::Paths;
 
-    use super::{Home, LifeError, ensure_within, stop_within};
+    use super::{Home, LifeError, ensure_within};
 
     const HANG_GUARD: Duration = Duration::from_secs(20);
 
@@ -1201,6 +1201,8 @@ mod tests {
     #[tokio::test]
     async fn a_stop_of_a_home_that_stays_held_without_an_answer_ends_at_its_deadline_and_says_how_to_recover()
      {
+        use super::stop_within;
+
         let directory = private_home();
         let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
         let closing_server = home
