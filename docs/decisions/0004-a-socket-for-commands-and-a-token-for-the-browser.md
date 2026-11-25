@@ -1,6 +1,7 @@
 # 0004. A socket for commands, a token for the browser, and no service
 
-Date: 2026-11-25 (revised after the design review of the same day)
+Date: 2026-11-25 (revised after the design review of the same day, and on 2026-11-26 with the owner's answers to
+its open questions and three corrections)
 
 Status: proposed. Supersedes [0003](0003-the-caller-check-on-macos-and-windows.md), and replaces
 the Linux kernel check that 0003 kept.
@@ -31,6 +32,22 @@ The owner's decisions (2026-11-25, QUA-48) are fixed:
    explains how to keep the server running after a reboot.
 5. Stop and take-over are requests on the socket.
 6. Windows waits for QUA-47. This record names the Windows equivalent and builds nothing for it.
+
+The owner's answers to the open questions (2026-11-26) are fixed too. They go against this record's
+first recommendation, which was a bearer per server start and a kept port as an opt-in:
+
+7. "we want convenience and good enough security by default. the ux has to be really
+   straightforward for humans and not cumbersome". So, by default, the server keeps its port across
+   restarts, and the bearer is one per data folder: made once, kept in the private data folder, and
+   valid across restarts and upgrades until a command rotates it. A person runs `quadratique ui`
+   once per browser, with nothing to type or copy; after that, bookmarks and open tabs just work. A
+   browser that is not paired sees one plain sentence with the one command to run. Nothing about
+   tokens, codes or ports is asked of the person.
+8. The stricter behaviour, a fresh address and a new bearer at each server start, is one opt-in
+   setting, for a machine whose other accounts are not trusted (§4, "Port policy").
+9. AcidCat gets the native Unix-socket mode: the owner opened
+   [acidcat#235](https://github.com/Hebilicious/acidcat/pull/235), which adds
+   `HttpClient::unix_socket(path)` to its Rust client.
 
 **Measured facts.** These come from a throwaway probe of the first round (Linux 7.2, not committed),
 earlier measurements, and the reviewer.
@@ -163,7 +180,7 @@ nothing in the table except the legacy row.
 | Question | Decision |
 | --- | --- |
 | Start | On demand, by any command, as today. `quadratique serve` stays as the way to run the server in the foreground (a terminal, or a supervisor the person sets up). |
-| Stop when idle | No. An idle stop would cost the web app its live updates and its bearer, and the git watcher its looks. One idle process costs little. |
+| Stop when idle | No. An idle stop would cost the web app its live updates (and, in strict mode, its bearer), and the git watcher its looks. One idle process costs little. |
 | Git watcher | No change: it looks every 2 s, and a read asks for a look. After a reboot, the next command's server catches up. |
 | Signals | The server still stops on SIGTERM and SIGINT. The command line sends none, except the proven legacy stop below. |
 
@@ -182,15 +199,20 @@ What changes is how it identifies the server:
 
 **Legacy TCP server (0.1, 0.2).** Its `GET /server` answer (pid, database) is untrusted: any account
 could answer on that port. A pidfd pins a process only after it was selected. So an automatic stop
-needs **independent evidence**, on Linux only (the only system those releases served on):
+needs **independent evidence**, on Linux only. (Correction of 2026-11-26: release 0.1 built from
+source also ran on macOS, where it admitted every caller, because only Linux had the kernel check.
+No release archive or installer served there; a 0.1 server on macOS gets the manual instructions.)
 
 1. `pidfd_open(pid)`;
-2. through `/proc/<pid>`, read while the pidfd pins the process: `exe` has the device and inode of
-   the replaced file recorded by the install lock, or of the old installed binary;
+2. through `/proc/<pid>`, read while the pidfd pins the process: `exe` is the old installed binary
+   (`${XDG_BIN_HOME:-$HOME/.local/bin}/quadratique`, where release 0.1's `install.sh` put it).
+   (Correction of 2026-11-26: an earlier revision also counted the replaced file recorded by the
+   install lock. That can never match a 0.1 server, because release 0.1 has no `upgrade`, and pull
+   request 38 does not use it.)
 3. `fd/` holds a descriptor to this home's `server.lock` (same device and inode);
 4. `pidfd_send_signal(SIGTERM)`, then wait for `server.lock` to be freed.
 
-Without all of it (another system, no pidfds, a skipped release whose file was never recorded), the
+Without all of it (another system, no pidfds, a binary other than the installed one), the
 command line stops nothing and tells the person what to stop: `systemctl --user stop
 quadratique.service` if the unit runs it, otherwise the process (pid given as unverified, with
 `ps -p <pid> -o args`). Detection (lock held, no socket, `server.json` present) stays permanently
@@ -219,40 +241,47 @@ gets `403`, which closes the `localhost` → `[::1]` squat (`web.rs` `Origin::ho
 | Order | On `ui`'s request (over the socket), the server first binds the TCP listener and installs the guarded routes, then makes the code. It returns the real address and the code together, so `ui` never hands a code to a listener that is not its own server. |
 | Code | 32 random bytes, single use, valid 60 s (an injected clock in tests). At most 16 codes are pending; beyond that, the request is refused and `ui` says so. |
 | `POST /session` | Requires `Origin` exactly equal to `http://127.0.0.1:<port>`. Sends no CORS headers at all. The body is at most 1 KiB of JSON. Redemption is atomic: the code is checked and deleted in one step under one lock. The answer carries `Cache-Control: no-store`. |
-| Bearer | 32 random bytes, made per server start, kept in memory only, compared in constant time. `web` and `webmcp` keep their audiences (the human, and the agent `browser`) but share it. |
+| Bearer | 32 random bytes, compared in constant time. By default, one per data folder (owner, 2026-11-26): made the first time it is needed, kept in a file of the private data folder created exclusively with mode `0600` under the home that `home::prepare` verified, so it survives restarts and upgrades. A command rotates it, which signs every browser out. In strict mode it is made per server start and kept in memory only. It never appears in an answer, a log, an error, a process list or a URL, except in the answer of `POST /session` to the page. `web` and `webmcp` keep their audiences (the human, and the agent `browser`) but share it. |
 | Bootstrap file | The server creates `<home>/open-<random>.html` with `create_new` and mode `0600`. It holds a meta refresh to `http://127.0.0.1:<port>/#pair=<code>` and never lies in the static tree: the server refuses to start if `QUADRATIQUE_WEB` or the built tree is inside the data folder, or the reverse. `ui --open` opens the file **in the caller's desktop session** (the server, which an agent or a supervisor may have started, opens nothing). The server deletes the file when the code is used, when it expires, and at its next start (files left after a crash). Process arguments show only the path. |
 | Without `--open` | `ui` prints the link with the code, for confined browsers and remote terminals. The 60 s expiry bounds a code left in a terminal log, in history or in a restored tab. A used code is dead. |
 | Page start | Before the app mounts, the first module (`web/src/main.ts`) reads `#pair`, clears it with `history.replaceState`, and redeems it. Subscriptions and the WebMCP registration start only after pairing has succeeded. |
-| Storage | The bearer goes in `localStorage` at the origin, for the life of that server start (the owner's "save the token"). |
+| Storage | The bearer goes in `localStorage` at the origin (the owner's "save the token"). By default it keeps working across restarts; in strict mode, for that server start. |
 | `401` and stale credentials | On a `401` from any target, the page drops the stored bearer, empties its per-target client cache (`web/src/core/server.ts:12`), ends its subscriptions, unregisters its WebMCP tools, and shows "Run `quadratique ui --open`". Another tab that pairs fires a `storage` event, and open tabs rebuild their clients with the new bearer. |
 
-**Port policy.** The default is a **freshly bound origin**: the server binds a port its home has
-never served. It records the ports it served in the data folder, and binds again (a bounded number
-of times) if the system gives one from the list. The kept port (pull request 30's idea) is an
-explicit opt-in, as is `serve --port <port>`.
+**Port policy.** By default the server **keeps its port** (owner, 2026-11-26). It asks for the
+port it had last, which it keeps in `server.port` in the data folder, and takes one the system
+chooses, which it then keeps, when another program holds it. `serve --port <port>` (0 included)
+reads and keeps nothing. The **strict setting** (`quadratique server strict on`) gives a **freshly
+bound origin** instead: the server binds a port its home has never served. It lists the ports it
+served in the data folder (the last 4096), and binds again, up to 8 times, if the system gives one
+from the list. Turning strict on adds the kept port to that list. The same setting makes the bearer
+per server start: one setting, for a machine whose other accounts are not trusted.
 
 **Threat analysis.** B is another account on the same machine. A machine with a single account has
 no B.
 
-| What B can do | Default (per-start bearer, fresh origin) | With the kept port |
+| What B can do | Default (kept port, lasting bearer) | Strict (fresh origin, per-start bearer) |
 | --- | --- | --- |
-| Bind the port while the server is down, and serve a page to a bookmark | possible only on an old port that no future server will use | possible on **the** port that every bookmark and every future pairing uses |
-| Read the stored bearer | a bearer that no longer works | the same |
-| Read or change data kept in that origin's browser storage (saved views today) | yes, for the old origin | yes, for the origin in use. Saved views therefore move to the server (QUA-67). |
-| Leave a **service worker** that controls later navigations to that origin, even after the real server holds the port again, and intercept the next pairing and the live bearer | no future pairing uses that origin | **yes**. Neither a health check nor a `Host` guard can tell what code the browser runs. |
+| Bind the port while the server is down, and serve a page to a bookmark | possible on **the** port that every bookmark and every future pairing uses | possible only on an old port that no future server will use |
+| Read the stored bearer | **a bearer that still works** once the server runs again, until it is rotated | a bearer that no longer works |
+| Read or change other data kept in that origin's browser storage | none: saved views live in the server (QUA-67), and the bearer is the only thing the page stores | the same |
+| Leave a **service worker** that controls later navigations to that origin, even after the real server holds the port again, and intercept the next pairing and the live bearer | **yes**. Neither a health check nor a `Host` guard can tell what code the browser runs. | no future pairing uses that origin |
 | Run a script in a paired origin | (any such script can read the live bearer, as any same-origin script can) | the same |
 
 A non-extractable WebCrypto key does **not** make a pairing that survives restarts safe on its own:
 code in the same origin, such as B's service worker, can ask the browser to use the key. The record
 no longer offers it as a fix.
 
-In plain words, the residual risk of the kept port is this: if another account ever served a page
-on that port while your server was down and you opened it, that account may keep control of the
-Quadratique tab in that browser from then on, and read your issues through your next pairing. The
-fix is to clear the site data for that origin in the browser, or to turn the kept port off.
+In plain words, the residual risk of the default is this: on a machine with other accounts, one of
+them can take the port while your server is down and serve a page at that address. If you open a
+tab or a bookmark of Quadratique then, that page can read what the browser saved for the address,
+the token included. With the token, that account can read and change your issues whenever your
+server runs, until you rotate the token. Its page can also leave a service worker that keeps control
+of the Quadratique tab in that browser. The fix is to rotate the token, clear the site data for
+that address in the browser, and turn strict on. The strict mode exists for that machine. No other
+machinery is added against this risk.
 
-Recommendation: the default everywhere. On a machine with a single account, the kept port is
-acceptable to whoever turns it on.
+Decision (owner, 2026-11-26): the kept port and the lasting bearer by default; strict as the opt-in.
 
 ## 5. Remote access (PRD §6, M7)
 
@@ -275,8 +304,9 @@ Kept: `rustix`'s `net` feature. `serve.rs:75` shuts down the listener for every 
 it is extended, not dropped. Windows stays **explicitly refused** at start (QUA-61) when the
 `callers` guard goes.
 
-**What the new binary must answer for a 0.1 or 0.2 upgrader.** That upgrader keeps running after it
-replaced the file. If the unit is active and its `MainPID` runs the replaced file, it runs
+**What the new binary must answer for a 0.2 upgrader.** (Correction of 2026-11-26: an earlier
+revision spoke of a 0.1 upgrader, but release 0.1.0 has no `upgrade` command; it first ships in
+0.2.) That upgrader keeps running after it replaced the file. If the unit is active and its `MainPID` runs the replaced file, it runs
 `systemctl --user restart quadratique.service`. The unit starts `"<bin>" serve --take-over`, now
 the new binary. The upgrader then runs the **new** `server status` until it reports
 `running: true`, `sameInterface: true` and `pid` equal to the unit's `MainPID`, within 60 s
@@ -288,8 +318,9 @@ the new binary. The upgrader then runs the **new** `server status` until it repo
 | the server runs as the unit's main process (no fork into the background) | `pid` must equal `MainPID` |
 | `server status` keeps `running`, `sameInterface` and `pid` (the server's own pid), permanently | the old upgrader and the old `install.sh` (`install/install.sh:84-92`) check them |
 
-That evidence is from v0.1.0's code on `main`. Only v0.1.0 is published. The 0.2 path needs
-evidence from the real 0.2 artifact once it exists (QUA-55).
+That evidence is from the upgrade code on `main`, which first ships in 0.2. Only v0.1.0 is
+published, and it has no `upgrade`. The 0.2 path needs evidence from the real 0.2 artifact once it
+exists (QUA-55).
 
 | Leftover on an existing machine | What the person reads (README, upgrade notes) |
 | --- | --- |
@@ -336,7 +367,7 @@ No `unsafe` on Linux or macOS: std, tokio and rustix give every call.
 | What users lose | |
 | --- | --- |
 | A tool that called `/cli` on TCP | It uses `curl --unix-socket <home>/server.sock http://quadratique.invalid/cli/...`. |
-| Bookmarks | They need `ui` after each server start. With the default fresh origin, an old bookmark's port is dead. The deep link still works after `ui`, on the new origin. |
+| Bookmarks | None by default: they keep working across restarts and upgrades. In strict mode they need `ui` after each server start: an old bookmark's port is dead, and the deep link works after `ui`, on the new origin. |
 | `ui` over SSH | It prints the remote loopback address. Make a same-port forward before you redeem the code: run `ui` (no `--open`) remotely, then `ssh -L <port>:127.0.0.1:<port> <host>`, then open the link locally within 60 s. A forward of the socket (`ssh -L ./q.sock:<home>/server.sock`) acts as you: README "Who can talk to the server" (`README.md:235-249`) says so. |
 | Codex with `network_access = true` | Not measured for a socket (QUA-53). |
 | The installed service | It becomes documentation. A 0.1 unit keeps working. |
@@ -352,7 +383,8 @@ Breaking changes, released together as one minor release: QUA-58 (`feat!`) and Q
 | --- | --- | --- | --- |
 | QUA-50 | The home policy. The socket beside TCP, with the generation and the control version. `server status` over the socket | — | the `chmod` through a path |
 | QUA-54 | Stop and take-over over the socket, with the generation and the `start.lock` handoff. The old SIGTERM path stays for servers without a socket | QUA-50 | nothing |
-| QUA-57 | Pairing and the bearer, additive (the kernel check still guards TCP) | QUA-50 | nothing |
+| QUA-76 | The kept port by default, and the strict setting's fresh origin (carried over from pull request 30) | — | nothing |
+| QUA-57 | Pairing and the bearer: one per data folder, its rotation, and strict's bearer per start. Additive (the kernel check still guards TCP) | QUA-50, QUA-76 | nothing |
 | QUA-55 | Legacy detection, and the proven legacy stop | QUA-54 | nothing |
 | QUA-56 | `upgrade` identifies the server by generation and executable identity. `systemctl` stays until the cutover | QUA-54, QUA-55 | `/proc` matching for new servers |
 | QUA-67 | Saved views live in the server | — | the `localStorage` views |
@@ -370,7 +402,7 @@ pull request is merged only after all three have landed.
 
 | Issue | Outcome | Blocked by | Deletes |
 | --- | --- | --- | --- |
-| QUA-58 | TCP serves only the web app, with the bearer (`feat!`). No `server.json`. Fresh origins, and the kept port as an opt-in (carried over from pull request 30) | QUA-53, QUA-54, QUA-55, QUA-56, QUA-57, QUA-67 | the `cli` target and `/server` on TCP, `localhost`, `server.json` |
+| QUA-58 | TCP serves only the web app, with the bearer required (`feat!`). No `server.json` | QUA-53, QUA-54, QUA-55, QUA-56, QUA-57, QUA-67 | the `cli` target and `/server` on TCP, `localhost`, `server.json` |
 | QUA-59 | The kernel check is deleted. macOS serves. Windows is refused explicitly | stacked on QUA-58 | `peer.rs`, the admission, the pid paths outside the legacy module, a CI exception |
 | QUA-60 | The installer is the binary only. `upgrade` loses `systemctl`. The README covers the unit and the reboot recipe (`feat!`) | stacked on QUA-59 | the unit, `uninstall.sh`, the fake `systemctl`, `systemctl` in `upgrade` |
 
@@ -379,23 +411,26 @@ blocked by QUA-47.
 
 **Pull request 30.** It makes the port of today's listener persistent, and that listener still
 carries the `cli` routes. GitHub reported it `MERGEABLE` at head `3a4634d` when this revision was
-written; the review's statement that it conflicts with `main` no longer holds. Decision: carry the
-kept port into QUA-58 as an opt-in on the web-only listener, and close pull request 30 unmerged.
-Its `bind → publish → accept` ordering fix exists for `server.json`, which the cutover removes.
+written; the review's statement that it conflicts with `main` no longer holds. Pull request 30 was
+closed unmerged. After the owner's answers, QUA-76 carries its kept port onto `main` as the default
+(2026-11-26). Its `bind → publish → accept` ordering fix exists for `server.json`, which the cutover
+removes, and was not carried over.
 
 | Existing issue | Becomes (state left to the lead) |
 | --- | --- |
 | QUA-33, QUA-34 | replaced by QUA-50 … QUA-59, and by QUA-61 |
 | QUA-46 | ended by QUA-59 |
 | QUA-63 (W2: the command line trusts the port and its pid) | ended by QUA-53 (commands over the verified socket), QUA-54 and QUA-55 (no unproven signal), and the cutover |
-| QUA-43 | carried by QUA-58. Pull request 30 is closed |
+| QUA-43 | cancelled, and replaced by QUA-76. Pull request 30 is closed |
 | QUA-6, QUA-36, QUA-37, QUA-38, QUA-39 | stay, simpler (binary only). Windows waits for QUA-47 |
 
 ## Open questions for the owner
 
-1. **Bearer lifetime.** One bearer per server start, saved in the browser for that run; after a
-   restart the page pairs again with `quadratique ui`. Yes or no?
-2. **Kept port.** Opt-in and off by default; the default binds a fresh origin at each start. Yes
-   or no?
-3. **AcidCat.** A native Unix-socket mode in AcidCat's Rust `HttpClient`, released from the 0.6
-   line if feasible (otherwise Quadratique moves to 0.8). Yes or no?
+All three are answered (2026-11-26); decisions 7 to 9 above record the answers.
+
+1. **Bearer lifetime.** Asked: one bearer per server start? Answer: no. One bearer per data folder,
+   valid across restarts until rotated; per server start only in strict mode.
+2. **Kept port.** Asked: opt-in, with a fresh origin by default? Answer: no. The port is kept by
+   default; the fresh origin is strict mode's.
+3. **AcidCat.** Asked: a native Unix-socket mode in AcidCat's Rust `HttpClient`? Answer: yes,
+   acidcat#235.

@@ -22,17 +22,17 @@ pub fn all() -> Vec<CliCommand<Context>> {
     vec![
         command(
             "serve",
-            "Run the server in the foreground, until SIGINT or SIGTERM, on a port the system chooses, or on the loopback port that --port <port> names. Other commands start it in the background when it is not running. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
+            "Run the server in the foreground, until SIGINT or SIGTERM. Without --port, on the port this home kept from its last start when that port is free, otherwise on one the system chooses, which it keeps (server strict on: a port this home never served, kept nowhere). --port <port>: on that loopback port, 0 letting the system choose; it reads and keeps no port. Other commands start it in the background when it is not running. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
             |args, io| serve(args, io).boxed(),
         ),
         command(
             "server",
-            "server status: whether the server of this home runs, and where. server stop: stop it.",
+            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; each start of the server takes an address it never served, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui gives the new address. server strict off: the server keeps its address across restarts (the default).",
             |args, io| server_command(args, io).boxed(),
         ),
         command(
             "ui",
-            "Make sure the server runs, and print the address of the web app. ui --open: also open it in the browser.",
+            "Make sure the server runs, and print the address of the web app, and addressKept: whether the server keeps that address across restarts (false under server strict on). ui --open: also open it in the browser.",
             |args, io| ui(args, io).boxed(),
         ),
         command("init", crate::init::USAGE, |args, io| {
@@ -108,10 +108,13 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
         .into_iter()
         .filter(|word| *word != TAKE_OVER_FLAG)
         .collect();
-    let port = match words[..] {
-        [] => 0,
+    let listen = match words[..] {
+        [] => server::Listen::Home,
         ["--port", port] => match port.parse::<u16>() {
-            Ok(port) => port,
+            Ok(port) => server::Listen::On(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+            ))),
             Err(_) => {
                 return report(
                     io,
@@ -137,7 +140,6 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
         std::process::id(),
         home.prepared().database().display()
     ));
-    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let started = match std::env::var(background::STARTED_VARIABLE) {
         Ok(value) if value == background::ON_DEMAND => server::Started::OnDemand,
         _ => server::Started::Serve,
@@ -157,7 +159,7 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
     let left = taken
         .as_ref()
         .map_or(server::START_LIMIT, background::StartLockHeld::left);
-    match server::start_by_within(home.prepared(), address, started, left).await {
+    match server::start_by_within(home.prepared(), listen, started, left).await {
         Ok(server) => {
             drop(taken);
             server::until_stopped(server).await;
@@ -176,11 +178,13 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     let answer = match words(&args)[..] {
         ["status"] => status(&home).await,
         ["stop"] => stop(&home).await,
+        ["strict", "on"] => set_strict(&home, true).await,
+        ["strict", "off"] => set_strict(&home, false).await,
         _ => {
             return report(
                 io,
                 Kind::InvalidInput,
-                "Give one of: quadratique server status, quadratique server stop.",
+                "Give one of: quadratique server status, quadratique server stop, quadratique server strict on, quadratique server strict off.",
             );
         }
     };
@@ -194,6 +198,7 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
 }
 
 fn located(home: &Home, mut value: Value) -> Value {
+    value["addressKept"] = json!(!server::strict(home.prepared()));
     value["runtime"] = json!(home.prepared().runtime());
     value["log"] = json!(home.log());
     value
@@ -301,6 +306,13 @@ fn answered_over_socket(identity: &server::Identity) -> Value {
     if !same {
         value["interface"] = json!(identity.interface);
     }
+    if let Some(origin) = identity
+        .url
+        .as_deref()
+        .and_then(|url| url.strip_suffix(server::BASE))
+    {
+        value["web"] = json!(format!("{origin}/"));
+    }
     value
 }
 
@@ -310,6 +322,19 @@ fn unreachable(home: &Home, reason: String) -> Value {
         "reason": reason,
         "database": home.prepared().database(),
     })
+}
+
+/// Turning strict off keeps the port of the server that runs now, so that the address already open in the browser is
+/// the one kept; turning it on forgets the kept port, and the next start takes a fresh one.
+async fn set_strict(home: &Home, on: bool) -> Result<Value, background::LifeError> {
+    let port = if on {
+        None
+    } else {
+        Some(background::ensure(home).await?.address.port())
+    };
+    server::set_strict(home.prepared(), on, port)
+        .map_err(|error| home.unusable(error, background::Attempt::Start))?;
+    Ok(located(home, json!({ "strict": on })))
 }
 
 async fn stop(home: &Home) -> Result<Value, background::LifeError> {
@@ -346,12 +371,15 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
         Err(error) => return report(io, Kind::Unavailable, error.to_string()),
     };
     let url = format!("http://{}/", runtime.address);
+    let kept = !server::strict(home.prepared());
     let answer = if !open {
-        json!({ "url": url, "opened": false })
+        json!({ "url": url, "opened": false, "addressKept": kept })
     } else {
         match open_in_browser(&url).await {
-            Ok(Launch::Opened) => json!({ "url": url, "opened": true }),
-            Ok(Launch::Requested) => json!({ "url": url, "opened": false, "launch": "requested" }),
+            Ok(Launch::Opened) => json!({ "url": url, "opened": true, "addressKept": kept }),
+            Ok(Launch::Requested) => {
+                json!({ "url": url, "opened": false, "launch": "requested", "addressKept": kept })
+            }
             Ok(Launch::Failed(status)) => {
                 let ended = match status.code() {
                     Some(code) => format!("exited with code {code}"),

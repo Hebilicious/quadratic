@@ -24,13 +24,19 @@ fn origin(url: &str) -> &str {
 }
 
 fn status_of(url: &str) -> u16 {
+    status_at(url, "/")
+}
+
+fn status_at(url: &str, path: &str) -> u16 {
+    let path = path.to_owned();
     let address = origin(url)
         .strip_prefix("http://")
         .expect("an http URL")
         .to_owned();
     let head = within("a request for the page", async move {
         let mut stream = TcpStream::connect(&address).await.expect("a connection");
-        let request = format!("GET / HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
         stream
             .write_all(request.as_bytes())
             .await
@@ -112,7 +118,10 @@ fn ui_starts_the_server_prints_the_address_of_the_web_app_and_opens_it_when_aske
         .run()
         .ok();
     let url = printed["url"].as_str().expect("a URL").to_owned();
-    assert_eq!(printed, json!({ "url": url, "opened": false }));
+    assert_eq!(
+        printed,
+        json!({ "url": url, "opened": false, "addressKept": true })
+    );
     assert_eq!(status_of(&url), 200, "the page at {url}");
 
     let reopened = home
@@ -121,7 +130,10 @@ fn ui_starts_the_server_prints_the_address_of_the_web_app_and_opens_it_when_aske
         .args(["ui", "--open"])
         .run()
         .ok();
-    assert_eq!(reopened, json!({ "url": url, "opened": true }));
+    assert_eq!(
+        reopened,
+        json!({ "url": url, "opened": true, "addressKept": true })
+    );
     assert_eq!(await_file(&opened), url);
 }
 
@@ -197,4 +209,164 @@ fn ui_open_reports_an_opener_that_fails_with_its_exit_code() {
 
     assert_ne!(refused.code, 0, "{refused:?}");
     assert!(refused.stderr.contains("exited with code 3"), "{refused:?}");
+}
+
+fn built_app(elsewhere: &Path) -> String {
+    let app = elsewhere.join("dist");
+    std::fs::create_dir(&app).expect("a folder for the built app");
+    std::fs::write(app.join("index.html"), "<title>Quadratique</title>").expect("an index page");
+    app.display().to_string()
+}
+
+fn ui_url(home: &Home, elsewhere: &Path, app: &str) -> Value {
+    home.quadratique(elsewhere)
+        .env("QUADRATIQUE_WEB", app)
+        .args(["ui"])
+        .run()
+        .ok()
+}
+
+fn url_of(printed: &Value) -> String {
+    printed["url"].as_str().expect("a URL").to_owned()
+}
+
+fn stop(home: &Home, elsewhere: &Path) {
+    home.quadratique(elsewhere)
+        .args(["server", "stop"])
+        .run()
+        .ok();
+}
+
+fn strict(home: &Home, elsewhere: &Path, on: &str) -> Value {
+    home.quadratique(elsewhere)
+        .args(["server", "strict", on])
+        .run()
+        .ok()
+}
+
+#[test]
+fn by_default_after_a_restart_the_web_app_has_the_same_address_and_an_issue_page_opened_before_still_loads()
+ {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let before = ui_url(&home, elsewhere.path(), &app);
+    let url = url_of(&before);
+    assert_eq!(
+        status_at(&url, "/issues/ABC-1"),
+        200,
+        "the issue page at {url}"
+    );
+    let kept = std::fs::read_to_string(home.path().join("server.port")).expect("a kept port");
+
+    stop(&home, elsewhere.path());
+    let after = ui_url(&home, elsewhere.path(), &app);
+
+    assert_eq!(
+        after,
+        json!({ "url": url, "opened": false, "addressKept": true })
+    );
+    assert_eq!(format!("http://127.0.0.1:{}/", kept.trim()), url);
+    assert_eq!(
+        status_at(&url, "/issues/ABC-1"),
+        200,
+        "the issue page at {url}"
+    );
+}
+
+#[test]
+fn when_the_kept_port_is_taken_ui_opens_the_new_address_which_is_kept() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let bin = elsewhere.path().join("bin");
+    std::fs::create_dir(&bin).expect("a folder for the fake opener");
+    let opened = elsewhere.path().join("opened");
+    fake_opener(&bin, &opened);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let before = url_of(&ui_url(&home, elsewhere.path(), &app));
+    stop(&home, elsewhere.path());
+    let previous = origin(&before)
+        .strip_prefix("http://")
+        .expect("an http URL");
+    let squatter = std::net::TcpListener::bind(previous).expect("the kept port, now free");
+
+    let reopened = home
+        .quadratique(elsewhere.path())
+        .env("QUADRATIQUE_WEB", &app)
+        .env("PATH", &path)
+        .args(["ui", "--open"])
+        .run()
+        .ok();
+
+    let after = url_of(&reopened);
+    assert_ne!(after, before);
+    assert_eq!(
+        reopened,
+        json!({ "url": after, "opened": true, "addressKept": true })
+    );
+    assert_eq!(await_file(&opened), after);
+    assert_eq!(
+        status_at(&after, "/issues/ABC-1"),
+        200,
+        "the issue page at {after}"
+    );
+    stop(&home, elsewhere.path());
+    drop(squatter);
+    assert_eq!(url_of(&ui_url(&home, elsewhere.path(), &app)), after);
+}
+
+#[test]
+fn strict_on_takes_a_fresh_address_at_each_start_and_strict_off_keeps_the_current_one() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let first = url_of(&ui_url(&home, elsewhere.path(), &app));
+
+    let on = strict(&home, elsewhere.path(), "on");
+    assert_eq!(on["strict"], true, "{on}");
+    assert_eq!(on["addressKept"], false, "{on}");
+    assert!(
+        !home.path().join("server.port").exists(),
+        "strict on kept the port"
+    );
+    stop(&home, elsewhere.path());
+    let second = ui_url(&home, elsewhere.path(), &app);
+    stop(&home, elsewhere.path());
+    let third = url_of(&ui_url(&home, elsewhere.path(), &app));
+
+    assert_eq!(second["addressKept"], false, "{second}");
+    let second = url_of(&second);
+    assert_ne!(second, first);
+    assert_ne!(third, first);
+    assert_ne!(third, second);
+    assert!(
+        !home.path().join("server.port").exists(),
+        "a strict start kept its port"
+    );
+
+    let off = strict(&home, elsewhere.path(), "off");
+    assert_eq!(off["addressKept"], true, "{off}");
+    stop(&home, elsewhere.path());
+    let status = home
+        .quadratique(elsewhere.path())
+        .args(["server", "status"])
+        .run()
+        .ok();
+    assert_eq!(status["running"], false, "{status}");
+    assert_eq!(url_of(&ui_url(&home, elsewhere.path(), &app)), third);
+    let status = home
+        .quadratique(elsewhere.path())
+        .args(["server", "status"])
+        .run()
+        .ok();
+    assert_eq!(
+        (&status["web"], &status["addressKept"]),
+        (&json!(third), &json!(true)),
+        "{status}"
+    );
 }

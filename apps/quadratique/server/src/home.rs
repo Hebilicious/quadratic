@@ -15,6 +15,9 @@ use crate::store::{StoreError, refuse_git_work_tree};
 pub const SOCKET_FILE: &str = "server.sock";
 const START_LOCK_FILE: &str = "start.lock";
 const LOG_FILE: &str = "server.log";
+const KEPT_PORT_FILE: &str = "server.port";
+const STRICT_FILE: &str = "strict";
+const SERVED_PORTS_FILE: &str = "served-ports";
 
 /// The longest socket path, in bytes, that `bind` and `connect` accept: the size of `sun_path` less its final NUL.
 pub const SOCKET_PATH_LIMIT: usize = if cfg!(target_os = "macos") { 103 } else { 107 };
@@ -57,6 +60,21 @@ impl Prepared {
 
     pub fn credentials(&self) -> PathBuf {
         self.folder.join(CREDENTIALS_FILE)
+    }
+
+    /// The port the web app keeps across restarts. Unlike the runtime file, it stays after the server stops.
+    pub fn kept_port(&self) -> PathBuf {
+        self.folder.join(KEPT_PORT_FILE)
+    }
+
+    /// Present while the owner asked for the strict setting (`quadratique server strict on`).
+    pub fn strict(&self) -> PathBuf {
+        self.folder.join(STRICT_FILE)
+    }
+
+    /// The ports a strict home served, which a strict start does not take again.
+    pub fn served_ports(&self) -> PathBuf {
+        self.folder.join(SERVED_PORTS_FILE)
     }
 }
 

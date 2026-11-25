@@ -24,7 +24,10 @@ use crate::serve::{self, Admit, Connection, OWNER_ONLY};
 use crate::store::{Store, StoreError, canonical_folder};
 use crate::web::{self, WebApp};
 
+mod address;
 mod closing;
+
+pub use address::{Listen, kept_port, set_strict, strict};
 
 pub const TARGET: &str = "cli";
 pub const BASE: &str = "/cli";
@@ -51,6 +54,8 @@ pub const DRAIN: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const STOP_REQUEST_LIMIT: usize = 1024;
 const POLL: Duration = Duration::from_millis(20);
+/// The backlog `TcpListener::bind` gives a listener.
+const LISTEN_BACKLOG: u32 = 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Waits {
@@ -435,15 +440,29 @@ pub async fn start(paths: &Paths, address: SocketAddr) -> Result<Server, ServerE
     .await
 }
 
+/// As `start`, where the home's setting says: on the kept port by default (when it is free), on a fresh one in strict
+/// mode.
+pub async fn start_in_home(paths: &Paths) -> Result<Server, ServerError> {
+    start_listening(
+        paths,
+        Listen::Home,
+        WebApp::from_env(),
+        watcher::EVERY,
+        Waits::default(),
+        Started::Serve,
+    )
+    .await
+}
+
 /// As `start`, in a home that the caller prepared, saying who started the server.
 pub async fn start_by(
     home: &Prepared,
-    address: SocketAddr,
+    listen: Listen,
     started: Started,
 ) -> Result<Server, ServerError> {
     start_prepared(
         home,
-        address,
+        listen,
         WebApp::from_env(),
         watcher::EVERY,
         Waits::default(),
@@ -456,7 +475,7 @@ pub async fn start_by(
 /// whole command keeps one deadline.
 pub async fn start_by_within(
     home: &Prepared,
-    address: SocketAddr,
+    listen: Listen,
     started: Started,
     left: Duration,
 ) -> Result<Server, ServerError> {
@@ -466,7 +485,7 @@ pub async fn start_by_within(
     };
     start_prepared(
         home,
-        address,
+        listen,
         WebApp::from_env(),
         watcher::EVERY,
         waits,
@@ -493,16 +512,9 @@ pub async fn start_as(
     waits: Waits,
     started: Started,
 ) -> Result<Server, ServerError> {
-    if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
-        return Err(ServerError::NotLoopback(address));
-    }
-    let own_account = callers::own_account()?;
-    callers::check_own_connection(&own_account)?;
-    let home = home::prepare(paths)?;
-    start_checked(
-        &home,
-        own_account,
-        address,
+    start_listening(
+        paths,
+        Listen::On(address),
         web_app,
         look_every,
         waits,
@@ -511,23 +523,54 @@ pub async fn start_as(
     .await
 }
 
-async fn start_prepared(
-    home: &Prepared,
-    address: SocketAddr,
+async fn start_listening(
+    paths: &Paths,
+    listen: Listen,
     web_app: WebApp,
     look_every: Duration,
     waits: Waits,
     started: Started,
 ) -> Result<Server, ServerError> {
-    if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
-        return Err(ServerError::NotLoopback(address));
+    refuse_other_than_loopback(listen)?;
+    let own_account = callers::own_account()?;
+    callers::check_own_connection(&own_account)?;
+    let home = home::prepare(paths)?;
+    start_checked(
+        &home,
+        own_account,
+        listen,
+        web_app,
+        look_every,
+        waits,
+        started,
+    )
+    .await
+}
+
+fn refuse_other_than_loopback(listen: Listen) -> Result<(), ServerError> {
+    match listen {
+        Listen::On(address) if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) => {
+            Err(ServerError::NotLoopback(address))
+        }
+        _ => Ok(()),
     }
+}
+
+async fn start_prepared(
+    home: &Prepared,
+    listen: Listen,
+    web_app: WebApp,
+    look_every: Duration,
+    waits: Waits,
+    started: Started,
+) -> Result<Server, ServerError> {
+    refuse_other_than_loopback(listen)?;
     let own_account = callers::own_account()?;
     callers::check_own_connection(&own_account)?;
     start_checked(
         home,
         own_account,
-        address,
+        listen,
         web_app,
         look_every,
         waits,
@@ -541,7 +584,7 @@ async fn start_prepared(
 async fn start_checked(
     home: &Prepared,
     own_account: callers::Account,
-    address: SocketAddr,
+    listen: Listen,
     web_app: WebApp,
     look_every: Duration,
     waits: Waits,
@@ -602,13 +645,19 @@ async fn start_checked(
         web::OriginHeader::OwnOnly,
     ));
     let admit = callers::owner_only(own_account);
-    let served = match serve::serve(address, routes, Arc::clone(&admit)).await {
-        Ok(served) => served,
+    let listening = address::bind(home, listen).and_then(|bound| {
+        let listener = bound.socket.listen(LISTEN_BACKLOG)?;
+        let served = serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS)?;
+        Ok((served, bound.record))
+    });
+    let (served, record) = match listening {
+        Ok(listening) => listening,
         Err(error) => {
             watcher.stop().await;
             return Err(error.into());
         }
     };
+    address::record(home, &record, served.address.port());
     origin.set(served.address);
     let gate = serve::Gate::default();
     served.close_with(&gate);
