@@ -41,7 +41,7 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-rustix = { workspace = true, features = ["event", "fs"] }
+rustix = { workspace = true, features = ["event", "fs", "process"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-util.workspace = true
