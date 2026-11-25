@@ -36,8 +36,6 @@ mod instructions;
 mod links;
 #[path = "server/notes.rs"]
 mod notes;
-#[path = "server/parity.rs"]
-mod parity;
 #[path = "server/process.rs"]
 mod process;
 #[path = "server/projects.rs"]
