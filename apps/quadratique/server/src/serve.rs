@@ -66,18 +66,26 @@ impl Served {
 impl Drop for Served {
     fn drop(&mut self) {
         self.stop.cancel();
-        stop_listening(&self.listener);
+        if let Err(error) = stop_listening(&self.listener) {
+            eprintln!(
+                "quadratique server: could not stop listening on {}: {error}; a child process may keep the port until it starts its program",
+                self.address
+            );
+        }
     }
 }
 
-/// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it.
+/// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it. A sandbox or a
+/// policy may refuse the call: the error then goes to the server's log.
 #[cfg(target_os = "linux")]
-fn stop_listening(listener: &TcpListener) {
-    let _ = rustix::net::shutdown(listener, rustix::net::Shutdown::Both);
+fn stop_listening(listener: &TcpListener) -> std::io::Result<()> {
+    rustix::net::shutdown(listener, rustix::net::Shutdown::Both).map_err(std::io::Error::from)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn stop_listening(_listener: &TcpListener) {}
+fn stop_listening(_listener: &TcpListener) -> std::io::Result<()> {
+    Ok(())
+}
 
 pub async fn serve(address: SocketAddr, routes: Routes, admit: Admit) -> std::io::Result<Served> {
     serve_with(address, routes, admit, REFUSALS).await
