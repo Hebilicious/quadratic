@@ -18,9 +18,9 @@ mod server;
 mod skills;
 mod target;
 
-/// The legacy stop (`background::legacy`) takes the file that the last upgrade replaced as a binary this install ran.
+/// The legacy stop (`background::legacy`) counts the installed binary only in a folder that this rule accepts.
 #[cfg(target_os = "linux")]
-pub use folder::recorded_replaced;
+pub use folder::check as check_install_folder;
 
 use std::path::Path;
 use std::process::Stdio;

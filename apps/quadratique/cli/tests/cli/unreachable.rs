@@ -321,8 +321,9 @@ fn entries(home: &Path) -> Vec<String> {
     names
 }
 
-/// A read-only home held by a server from before the socket: status says what holds it, a command refuses as for that
-/// server, and a stop, which must take `start.lock`, cannot reach it. Nothing in the home changes.
+/// A read-only home held by a server from before the socket that this command line cannot prove: status says what
+/// holds it, and a command and a stop refuse as for that server before they reserve anything. Nothing in the home
+/// changes.
 #[test]
 fn a_caller_that_cannot_write_a_home_held_by_a_server_from_before_the_socket_changes_nothing() {
     let home = Home::new();
@@ -350,7 +351,7 @@ fn a_caller_that_cannot_write_a_home_held_by_a_server_from_before_the_socket_cha
     assert!(
         stopped
             .stderr
-            .contains("Cannot reach the Quadratique server from here")
+            .contains("from before the socket (release 0.1)")
             && stopped.stderr.contains("Nothing was stopped"),
         "{stopped:?}"
     );

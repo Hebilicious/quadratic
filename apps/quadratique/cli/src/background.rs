@@ -89,9 +89,10 @@ pub enum LifeError {
         asked: String,
         serving: Option<String>,
     },
-    /// The server does not serve the stop request: a build between the socket and the stop request answers `405`.
+    /// The server answered the stop request with another status than `202` or `409`. A build between the socket and
+    /// the stop request answers `405`.
     CannotStop {
-        reason: String,
+        status: String,
         pid: u32,
     },
     /// A server from before the socket (release 0.1) holds the home. `unproven` says why this command line will not
@@ -259,10 +260,19 @@ impl std::fmt::Display for LifeError {
                 formatter,
                 "the stop of generation {generation} is not confirmed: {reason}. The home's lock is {lock}. Run `quadratique server status` to see what serves now."
             ),
-            LifeError::CannotStop { reason, pid } => {
+            LifeError::CannotStop { status, pid } => {
                 write!(
                     formatter,
-                    "the server of this home cannot be stopped from here: {reason}. Nothing was stopped. A server built between the socket and the stop request does not serve it: end it yourself, then run the command again. {}",
+                    "the server of this home cannot be stopped from here: the stop request got status {status}. Nothing was stopped."
+                )?;
+                if status == "405" {
+                    formatter.write_str(
+                        " It may be a build between the socket and the stop request, which does not serve that request.",
+                    )?;
+                }
+                write!(
+                    formatter,
+                    " End it yourself, then run the command again. {}",
                     recovery(Some(*pid))
                 )
             }
@@ -302,7 +312,7 @@ const PROBE: Duration = quadratique_server::server::PROBE_LIMIT;
 /// What a person does about a server that this command line will not signal: the process number comes from the
 /// server's last answer or its runtime file, and nothing has verified it.
 fn recovery(pid: Option<u32>) -> String {
-    let check = match pid {
+    let check = match usable_pid(pid) {
         Some(pid) => format!(
             "its process number was last given as {pid}, unverified: check it with `ps -p {pid} -o args` before you end it"
         ),
@@ -313,13 +323,19 @@ fn recovery(pid: Option<u32>) -> String {
     )
 }
 
+/// A process number worth printing in a command: positive, a valid pid, and not this process. `kill 0` would signal the
+/// caller's own process group, and a negative number a whole group.
+fn usable_pid(pid: Option<u32>) -> Option<u32> {
+    pid.filter(|pid| *pid > 0 && i32::try_from(*pid).is_ok() && *pid != std::process::id())
+}
+
 /// What a person runs to stop a server from before the socket that this command line will not signal.
 fn legacy_instructions(pid: Option<u32>) -> String {
-    let process = match pid {
+    let process = match usable_pid(pid) {
         Some(pid) => format!(
-            "otherwise check pid {pid}, which nothing has verified, with `ps -p {pid} -o args`, and end it with `kill {pid}`"
+            "otherwise check pid {pid}, which nothing has verified, with `ps -p {pid} -o args`, and only if it shows this data folder's Quadratique server, end it with `kill {pid}`"
         ),
-        None => "otherwise find its process and end it".to_owned(),
+        None => "otherwise find the process that serves this data folder and end it".to_owned(),
     };
     format!(
         "Stop it yourself, then run the command again: if `quadratique.service` runs it (`systemctl --user status quadratique.service` names its main PID), run `systemctl --user stop quadratique.service`; if it runs in a terminal, press Ctrl-C there; {process}."
@@ -970,8 +986,13 @@ pub async fn reserve_start(home: &Home) -> Result<StartLockHeld, LifeError> {
 #[cfg(unix)]
 pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
     let deadline = Deadline::after(START_LIMIT);
+    let proof = match observe_by(home, deadline).await? {
+        Some(Observed::Legacy) => Some(legacy::proof_or_refusal(home, Attempt::Start)?),
+        _ => None,
+    };
     let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
-    if let Stopped::Closing { pid, .. } = stop_holding(home, deadline, Attempt::Start, None).await?
+    if let Stopped::Closing { pid, .. } =
+        stop_holding(home, deadline, Attempt::Start, None, proof).await?
     {
         return Err(LifeError::Hung {
             hang: Hang::NotStopped,
@@ -1044,25 +1065,30 @@ pub async fn stop(home: &Home) -> Result<Stopped, LifeError> {
     stop_within(home, STOP_LIMIT).await
 }
 
-/// A home that is free, or a server that may not be stopped, is answered without `start.lock`. Otherwise the stop
-/// takes it, then observes again, and keeps it until the server has let go of the home: a server of a build before
-/// the socket too. The generation it first saw is the one it stops; one that becomes ready while it waits for the lock
-/// is stopped only if the first observation saw none.
+/// A home that is free, or a server that may not be stopped, is answered without `start.lock`: a server from before
+/// the socket without its proof too. Otherwise the stop takes it, then observes again, and keeps it until the server
+/// has let go of the home. The generation it first saw is the one it stops; one that becomes ready while it waits for
+/// the lock is stopped only if the first observation saw none.
 #[cfg(unix)]
 async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
     let deadline = Deadline::after(limit);
     let Some(first) = observe_by(home, deadline).await? else {
         return Err(not_stopped_by_the_deadline(home, Attempt::Stop));
     };
+    let mut proof = None;
     let meant = match first {
         Observed::Free => return Ok(Stopped::NotRunning),
-        Observed::Legacy | Observed::Starting { .. } => None,
+        Observed::Legacy => {
+            proof = Some(legacy::proof_or_refusal(home, Attempt::Stop)?);
+            None
+        }
+        Observed::Starting { .. } => None,
         Observed::Serving { identity, .. } => identity.generation,
         Observed::Newer(identity) if lists_this_control(&identity) => identity.generation,
         refused => return Err(refusal(home, refused, Attempt::Stop)),
     };
     let _start_lock = await_start_lock(home, deadline, Attempt::Stop).await?;
-    stop_holding(home, deadline, Attempt::Stop, meant).await
+    stop_holding(home, deadline, Attempt::Stop, meant, proof).await
 }
 
 #[cfg(not(unix))]
@@ -1092,14 +1118,16 @@ fn not_stopped_by_the_deadline(home: &Home, attempt: Attempt) -> LifeError {
 ///   refused, and nothing is stopped.
 /// - A take-over (`Start`) refuses a newer server even when it lists this control version, because it would replace
 ///   it with an older one.
-/// - A server from before the socket is stopped by the legacy path only with its proof, and only while the home still
-///   shows that row; otherwise it hands back, and from then on the socket alone decides.
+/// - A server from before the socket is stopped by the legacy path only with its proof (`proof`, when the caller found
+///   it before the reservation), and only while the home still shows that row; otherwise it hands back, and from then
+///   on the socket alone decides. A stop that meant a generation stops no such server.
 #[cfg(unix)]
 async fn stop_holding(
     home: &Home,
     deadline: Deadline,
     attempt: Attempt,
     meant: Option<String>,
+    mut proof: Option<legacy::Proof>,
 ) -> Result<Stopped, LifeError> {
     let mut asked: Option<Identity> = None;
     let mut legacy_possible = true;
@@ -1118,7 +1146,13 @@ async fn stop_holding(
                 });
             }
             Observed::Legacy if legacy_possible && asked.is_none() => {
-                match legacy::stop(home, deadline, attempt).await? {
+                if let Some(meant) = meant {
+                    return Err(LifeError::OtherGeneration {
+                        asked: meant,
+                        serving: Some("a server from before the socket".to_owned()),
+                    });
+                }
+                match legacy::stop(home, deadline, attempt, proof.take()).await? {
                     legacy::Stop::Done(stopped) => return Ok(stopped),
                     legacy::Stop::NotLegacy => {
                         legacy_possible = false;
@@ -1162,9 +1196,9 @@ async fn stop_holding(
                             serving,
                         });
                     }
-                    Ok(StopAnswer::Refused(reason)) => {
+                    Ok(StopAnswer::Refused { status }) => {
                         return Err(LifeError::CannotStop {
-                            reason,
+                            status,
                             pid: identity.pid,
                         });
                     }

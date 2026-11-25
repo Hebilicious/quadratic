@@ -273,31 +273,58 @@ the socket to stop, and never signal it. The other commands still use the TCP li
 ### A server of release 0.1
 
 A server of release 0.1, or of any build before the socket, holds the data folder's lock, has no
-socket, and leaves a `server.json` without a `control` field. No command uses it: each one fails
-with "Nothing was started." and says what to run. `server status` answers `legacy: true`, the pid
-that `server.json` names, `provenStop`, the `reason`, and in `stop` what to run.
+socket, and leaves a `server.json` without a `control` field. No command that needs the server uses
+it: each one fails with "Nothing was started." and says what to run. (`upgrade`, `upgrade --skills`
+and `init --dry-run` still look for a server over TCP, and `upgrade` still restarts or stops one that
+runs the file it replaced; QUA-56 changes that.) `server status` answers `legacy: true`, the pid that
+`server.json` names, `provenStop`, the `reason`, and in `stop` what to run. `provenStop` is the
+evidence about the process; a stop still has to reserve `start.lock`, and checks the evidence again
+under it.
 
-Anything can answer on a TCP port, and a pid alone proves nothing, so `server stop` and
-`serve --take-over` signal that server only with proof, on Linux: they open a pidfd on the pid that
-`server.json` names, and read in `/proc`, while the pidfd holds the process, that it runs the
-installed binary (`${XDG_BIN_HOME:-$HOME/.local/bin}/quadratique`, where `install.sh` of release 0.1
-put it) or the file that the last `quadratique upgrade` beside this binary replaced, and that it
-holds an open descriptor of this folder's `server.lock`. Then they send SIGTERM through the pidfd and
-wait up to 30 seconds for the folder to be free. Without that proof (another binary, a binary that
-was replaced since it started, no descriptor of the lock, another system) they signal nothing, and
-the message says what to run:
+The proof exists so that no process that is not this data folder's old server is ever signalled by
+mistake: a stale `server.json`, a reused process number, a wrong path, another program. A process of
+your own account that deliberately imitates the old server is out of scope: it already has your
+files. Anything can answer on a TCP port, and a pid alone proves nothing, so `server stop` and
+`serve --take-over` signal that server only with this proof, on Linux:
+
+1. They open a pidfd on the pid that `server.json` names.
+2. `/proc` numbers processes as the command's own PID namespace does: `/proc/self` is the command's
+   own pid, and the pidfd's `Pid:` in `/proc/self/fdinfo` is the pid it was opened by.
+3. The process runs the installed binary, `${XDG_BIN_HOME:-$HOME/.local/bin}/quadratique`, where
+   `install.sh` of release 0.1 put it. It counts only as a regular file of your account, reached
+   without a link, in a folder that `upgrade`'s folder rule accepts, and never as the command line's
+   own file (`/proc/self/exe`).
+4. One of its descriptors of the folder's `server.lock` holds the exclusive `flock`, as
+   `/proc/<pid>/fdinfo/<fd>` lists it (Linux 4.13 and later; where the kernel lists no locks, there
+   is no proof). A descriptor of the same file that holds no lock does not count.
+5. The process is still alive after these reads, so no other process can have had its number.
+
+They look at this before they reserve `start.lock`, so a refusal leaves nothing behind. Under
+`start.lock`, right before the signal, the folder must still show this row, `server.json` must still
+name that process, and the process must still run that file and hold that lock. A stop that first
+found a server on the socket stops only that generation. Then they send SIGTERM through the pidfd and
+wait up to 30 seconds for the folder to be free. A verified server could still `exec` another program
+between the last check and the signal: release 0.1's server never does, and only your own account
+could make it.
+
+Without the proof (another binary, a binary that was replaced since it started, a link, no lock, a
+`/proc` of another namespace, another system) they signal nothing, and the message says what to run:
 
 ```text
-Stop it yourself, then run the command again: if `quadratique.service` runs it (`systemctl --user status quadratique.service` names its main PID), run `systemctl --user stop quadratique.service`; if it runs in a terminal, press Ctrl-C there; otherwise check pid <pid>, which nothing has verified, with `ps -p <pid> -o args`, and end it with `kill <pid>`.
+Stop it yourself, then run the command again: if `quadratique.service` runs it (`systemctl --user status quadratique.service` names its main PID), run `systemctl --user stop quadratique.service`; if it runs in a terminal, press Ctrl-C there; otherwise check pid <pid>, which nothing has verified, with `ps -p <pid> -o args`, and only if it shows this data folder's Quadratique server, end it with `kill <pid>`.
 ```
 
-Release 0.1 was published for Linux only. On macOS the command line reads no `/proc`, so it always
-gives these instructions.
+The process commands appear only for a valid pid other than the command's own; `kill 0` would
+signal your own process group. After `quadratique upgrade` replaced the binary, an old server still
+runs the replaced file, so it gets these instructions: nothing durable records which file that was.
 
-A build of `main` between the socket and the stop request (never released) answers on the socket
-but not to `POST /server/stop`. `server stop` then says that the stop request got status 405,
-stops nothing, and says how to end that server yourself: Ctrl-C in its terminal, its supervisor,
-or `kill <pid>` after `ps -p <pid> -o args`.
+Release 0.1 was published for Linux only, but its code refuses no system. On macOS the command line
+reads no `/proc`, so it always gives these instructions.
+
+A server that answers `POST /server/stop` with a status other than `202` or `409` is not stopped:
+`server stop` names the status and says how to end that server yourself (Ctrl-C in its terminal,
+its supervisor, or `ps -p <pid> -o args` first). For `405`, it adds that the server may be a build of
+`main` between the socket and the stop request (never released).
 
 ### The control protocol
 

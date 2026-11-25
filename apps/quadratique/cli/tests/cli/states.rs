@@ -114,8 +114,8 @@ enum OnStop {
     LoseAnswer,
     /// Answers `202` and stops listening, then keeps the lock until the test sends on the channel.
     HoldUntil(mpsc::Receiver<()>),
-    /// Answers `405`, as a build between the socket and the stop request does, and keeps serving.
-    NotServed,
+    /// Answers with this status, as a build between the socket and the stop request does with `405`, and keeps serving.
+    Answer(&'static str),
 }
 
 /// A fake server on the socket: it answers `GET /server` with `answer`, a stop of the generation in `answer` as
@@ -165,8 +165,8 @@ impl Fake {
                     let _ = stream.write_all(http("409 Conflict", &named).as_bytes());
                     continue;
                 }
-                if matches!(on_stop, OnStop::NotServed) {
-                    let _ = stream.write_all(http("405 Method Not Allowed", "").as_bytes());
+                if let OnStop::Answer(status) = on_stop {
+                    let _ = stream.write_all(http(status, "").as_bytes());
                     continue;
                 }
                 if matches!(on_stop, OnStop::LoseAnswer) {
@@ -848,37 +848,48 @@ fn a_stop_whose_answer_is_lost_says_it_is_not_confirmed_and_what_the_lock_shows(
     );
 }
 
-/// A build between the socket and the stop request (pull requests 34 and 36 of main, never released) answers the
-/// identity but `405` to the stop: the message says how to end that server by hand, with the pid it gave, and nothing is
-/// stopped.
+/// A server that answers the stop request with another status than `202` or `409` is named with how to end it by hand,
+/// with the pid it gave, and nothing is stopped. Only a `405` gets the note about a build between the socket and the
+/// stop request (pull requests 34 and 36 of main, never released).
 #[test]
 fn a_server_that_does_not_serve_the_stop_request_is_named_with_how_to_end_it() {
-    let home = Home::new();
-    let held = hold_the_home(&home);
-    let serving = Fake::start_with(
-        fake_socket(&home),
-        http("200 OK", &this_build(&home).to_string()),
-        Some(held),
-        OnStop::NotServed,
-    );
-
-    let stopped = run(&home, &["server", "stop"]);
-
-    assert_eq!(stopped.code, UNAVAILABLE, "{stopped:?}");
-    let message = message(&stopped);
-    for expected in [
-        "the stop request got status 405",
-        "Nothing was stopped.",
-        "end it yourself, then run the command again",
-        "Ctrl-C",
-        &format!("ps -p {FAKE_PID} -o args"),
+    for (status, historical) in [
+        ("405 Method Not Allowed", true),
+        ("503 Service Unavailable", false),
     ] {
-        assert!(message.contains(expected), "{expected}: {message}");
+        let home = Home::new();
+        let held = hold_the_home(&home);
+        let serving = Fake::start_with(
+            fake_socket(&home),
+            http("200 OK", &this_build(&home).to_string()),
+            Some(held),
+            OnStop::Answer(status),
+        );
+
+        let stopped = run(&home, &["server", "stop"]);
+
+        assert_eq!(stopped.code, UNAVAILABLE, "{status}: {stopped:?}");
+        let message = message(&stopped);
+        let code = &status[..3];
+        for expected in [
+            &format!("the stop request got status {code}"),
+            "Nothing was stopped.",
+            "End it yourself, then run the command again",
+            "Ctrl-C",
+            &format!("ps -p {FAKE_PID} -o args"),
+        ] {
+            assert!(message.contains(expected), "{expected}: {message}");
+        }
+        assert_eq!(
+            message.contains("between the socket and the stop request"),
+            historical,
+            "{message}"
+        );
+        assert_eq!(
+            serving.requests().last().map(String::as_str),
+            Some("POST /server/stop HTTP/1.1")
+        );
     }
-    assert_eq!(
-        serving.requests().last().map(String::as_str),
-        Some("POST /server/stop HTTP/1.1")
-    );
 }
 
 /// A lock that cannot be looked at is the row "reachable: false" with a reason that names it: status answers, and no
