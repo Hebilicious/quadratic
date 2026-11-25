@@ -187,6 +187,71 @@ fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_
     assert_eq!(ended.code, 0, "{ended:?}");
 }
 
+#[test]
+fn rule_4_an_agent_over_mcp_gives_the_humans_words_on_every_move_that_human_only_guards() {
+    let home = Home::new();
+    let repository = Repository::new();
+    home.quadratique(&repository.root)
+        .args(["project", "create", "--key", "DEM", "--name", "Demo"])
+        .run()
+        .ok();
+    let issue = home
+        .quadratique(&repository.root)
+        .args([
+            "create",
+            "--title",
+            "Choose the license",
+            "--acceptance",
+            "The human chose a license.",
+            "--assignee",
+            r#"{"kind":"human"}"#,
+        ])
+        .run()
+        .ok()["issue"]["id"]
+        .as_str()
+        .expect("an issue id")
+        .to_owned();
+    let mut agent = Client::start(
+        home.quadratique(&repository.root)
+            .args(["mcp"])
+            .spawn_interactive(),
+    );
+
+    let listed = agent.request("tools/list", json!({}));
+    let tools = listed["result"]["tools"].as_array().expect("the tools");
+    for name in ["issue.update", "issue.release", "issue.close"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("no tool {name}: {listed}"));
+        let properties = &tool["inputSchema"]["properties"];
+        assert_eq!(properties["humanWords"]["maxLength"], 400, "{tool}");
+        assert_eq!(
+            properties["confidence"]["enum"],
+            json!(["high", "medium", "low"]),
+            "{tool}"
+        );
+    }
+
+    let shown = agent.tool("issue.get", json!({ "issue": issue }));
+    let left = agent.tool(
+        "issue.update",
+        json!({
+            "issue": issue,
+            "revision": shown["issue"]["revision"],
+            "status": "done",
+            "humanWords": "Maybe MIT, I will think about it.",
+            "confidence": "low",
+        }),
+    );
+    assert_eq!(left["leftForHuman"], true, "{left}");
+    assert_eq!(left["issue"]["status"], "todo", "{left}");
+
+    agent.process.close_stdin();
+    let ended = agent.process.finish();
+    assert_eq!(ended.code, 0, "{ended:?}");
+}
+
 fn text(path: &std::path::Path) -> String {
     path.display().to_string()
 }

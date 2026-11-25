@@ -5,11 +5,13 @@ use serde_json::{Value, json};
 use super::ancestry::{Scope, verified};
 use super::board::{self, Board};
 use super::catalog::capability;
+use super::human_word::HumanWord;
 use super::issues::whole_issue;
 use super::model::{self, Issue, IssueAnswer, IssueSummary};
 use super::{Context, IssueReader, Refused, finish};
 use crate::domain::{
-    Actor, Caller, Change, Claim, ClaimAfter, Event, Failure, Landing, Outcome, WorkingCopy, decide,
+    Actor, Caller, Change, Claim, ClaimAfter, Confidence, Event, Failure, Landing, Outcome,
+    WorkingCopy, decide, decide_on_word,
 };
 use crate::git::repository::{GIT_LIMIT, Repository};
 use crate::store::{AsOf, ClaimStart, IssueFields, Tx};
@@ -84,7 +86,7 @@ pub(super) fn release_held(tx: &mut Tx<'_>, issues: Vec<String>) -> Result<(), R
                 tx.end_held_merge(&id)?;
                 apply(tx, &id, &change, None)?;
             }
-            Ok(Outcome::Unchanged) => {
+            Ok(Outcome::Unchanged | Outcome::LeftForHuman) => {
                 tx.end_held_merge(&id)?;
             }
             Err(Failure::BaseNotMerged { .. }) => {}
@@ -96,9 +98,17 @@ pub(super) fn release_held(tx: &mut Tx<'_>, issues: Vec<String>) -> Result<(), R
 
 #[derive(Clone)]
 enum Request {
-    Claim { worktree: Option<String> },
-    Release { reason: Option<String> },
-    Close { evidence: String },
+    Claim {
+        worktree: Option<String>,
+    },
+    Release {
+        reason: Option<String>,
+        word: Option<HumanWord>,
+    },
+    Close {
+        evidence: String,
+        word: Option<HumanWord>,
+    },
 }
 
 impl Request {
@@ -124,8 +134,30 @@ impl Request {
 
     fn evidence(&self) -> Option<&str> {
         match self {
-            Request::Close { evidence } => Some(evidence),
+            Request::Close { evidence, .. } => Some(evidence),
             Request::Claim { .. } | Request::Release { .. } => None,
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Request::Release { reason, .. } => reason.as_deref(),
+            Request::Claim { .. } | Request::Close { .. } => None,
+        }
+    }
+
+    fn word(&self) -> Option<&HumanWord> {
+        match self {
+            Request::Release { word, .. } | Request::Close { word, .. } => word.as_ref(),
+            Request::Claim { .. } => None,
+        }
+    }
+
+    /// The reason of the history's change: the human's words when the call gives them.
+    fn history_reason(&self) -> Option<String> {
+        match self.word() {
+            Some(word) => Some(word.history_reason()),
+            None => self.reason().map(str::to_owned),
         }
     }
 }
@@ -137,39 +169,50 @@ async fn move_issue<R: Send + 'static>(
     request: Request,
     answer: IssueReader<R>,
 ) -> Result<IssueAnswer<R>, Refused> {
-    let reason = match &request {
-        Request::Release { reason } => reason.clone(),
-        Request::Claim { .. } | Request::Close { .. } => None,
-    };
-    let (started, answered) = context
+    let ((started, left_for_human), answered) = context
         .write_then_read(
             request.operation(),
-            reason.clone(),
+            request.history_reason(),
             move |tx| {
                 let record = board::issue(tx, &id)?;
                 let project = model::domain_project(&board::project(tx, &record.project)?)?;
                 let board = Board::load(tx)?;
                 let issue = board.issue(&record)?;
                 let event = request.event(tx, &board, &id);
+                let word = request.word();
+                let reason = request.reason();
+                let confidence = HumanWord::confidence(word);
                 let mut started = None;
-                if let Outcome::Changed(change) = decide(&event, &issue, &caller, &project)? {
-                    apply(tx, &id, &change, request.evidence())?;
-                    if let ClaimAfter::Freed(former) = &change.claim {
-                        note_freed(tx, &id, &caller, former, &change.status, reason.as_deref())?;
+                match decide_on_word(&event, &issue, &caller, &project, confidence)? {
+                    Outcome::Unchanged => {}
+                    Outcome::LeftForHuman => {
+                        if let Some(word) = word {
+                            word.note_left(tx, &id, &caller, reason)?;
+                        }
+                        return Ok(((None, true), id));
                     }
-                    let in_bound_repository = project.repository.is_some()
-                        && project.repository == caller.working_copy.repository;
-                    if let ClaimAfter::Started(claim) = &change.claim
-                        && in_bound_repository
-                    {
-                        started = Some(Started {
-                            issue: id.clone(),
-                            claim_key: claim.holder_key().as_str().to_owned(),
-                            since: tx.now().to_owned(),
-                        });
+                    Outcome::Changed(change) => {
+                        apply(tx, &id, &change, request.evidence())?;
+                        if let ClaimAfter::Freed(former) = &change.claim {
+                            note_freed(tx, &id, &caller, former, &change.status, reason)?;
+                        }
+                        if let Some(word) = word {
+                            word.note_moved(tx, &id, &caller, &change.status, reason)?;
+                        }
+                        let in_bound_repository = project.repository.is_some()
+                            && project.repository == caller.working_copy.repository;
+                        if let ClaimAfter::Started(claim) = &change.claim
+                            && in_bound_repository
+                        {
+                            started = Some(Started {
+                                issue: id.clone(),
+                                claim_key: claim.holder_key().as_str().to_owned(),
+                                since: tx.now().to_owned(),
+                            });
+                        }
                     }
                 }
-                Ok((started, id))
+                Ok(((started, false), id))
             },
             answer,
         )
@@ -177,7 +220,10 @@ async fn move_issue<R: Send + 'static>(
     if let Some(started) = started {
         record_start(context, started).await;
     }
-    Ok(IssueAnswer { issue: answered })
+    Ok(IssueAnswer {
+        issue: answered,
+        left_for_human,
+    })
 }
 
 /// The note an issue keeps when an agent that did not hold its claim released it.
@@ -277,17 +323,22 @@ fn refused_for_stacked(failure: &Value) -> bool {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ReleaseInput {
     issue: String,
     reason: Option<String>,
+    human_words: Option<String>,
+    confidence: Option<Confidence>,
 }
 
 pub(super) fn release()
 -> CapabilityDefinition<Context, ReleaseInput, IssueAnswer<IssueSummary>, Value> {
     capability::<ReleaseInput, IssueAnswer<IssueSummary>>("issue.release").run(
         |input, call| async move {
+            let caller = &call.context().caller;
             let request = Request::Release {
                 reason: input.reason,
+                word: HumanWord::given(caller, input.human_words, input.confidence),
             };
             finish(
                 move_issue(
@@ -304,15 +355,20 @@ pub(super) fn release()
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct CloseInput {
     issue: String,
     evidence: String,
+    human_words: Option<String>,
+    confidence: Option<Confidence>,
 }
 
 pub(super) fn close() -> CapabilityDefinition<Context, CloseInput, IssueAnswer<Issue>, Value> {
     capability::<CloseInput, IssueAnswer<Issue>>("issue.close").run(|input, call| async move {
+        let caller = &call.context().caller;
         let request = Request::Close {
             evidence: input.evidence,
+            word: HumanWord::given(caller, input.human_words, input.confidence),
         };
         finish(
             move_issue(
@@ -328,20 +384,28 @@ pub(super) fn close() -> CapabilityDefinition<Context, CloseInput, IssueAnswer<I
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct CloseSeveralInput {
     issue: Vec<String>,
     evidence: String,
+    human_words: Option<String>,
+    confidence: Option<Confidence>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ClosedSeveral {
     items: Vec<IssueSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    left_for_human: Vec<String>,
 }
 
 pub(super) fn close_several()
 -> CapabilityDefinition<Context, CloseSeveralInput, ClosedSeveral, Value> {
     capability::<CloseSeveralInput, ClosedSeveral>("issues.close").run(|input, call| async move {
-        finish(close_issues(call.context(), input.issue, input.evidence).await)
+        let context = call.context();
+        let word = HumanWord::given(&context.caller, input.human_words, input.confidence);
+        finish(close_issues(context, input.issue, input.evidence, word).await)
     })
 }
 
@@ -351,25 +415,35 @@ async fn close_issues(
     context: &Context,
     ids: Vec<String>,
     evidence: String,
+    word: Option<HumanWord>,
 ) -> Result<ClosedSeveral, Refused> {
     let caller = context.caller.clone();
+    let reason = word.as_ref().map(HumanWord::history_reason);
     let written = context
-        .write("issue.close", None, {
+        .write("issue.close", reason, {
             let ids = ids.clone();
             move |tx| {
+                let mut left_for_human = Vec::new();
                 for id in &ids {
-                    close_in(tx, id, &caller, &evidence)
+                    let left = close_in(tx, id, &caller, &evidence, word.as_ref())
                         .map_err(|refused| not_closed(id, refused))?;
+                    if left {
+                        left_for_human.push(id.clone());
+                    }
                 }
-                ids.iter()
+                let items = ids
+                    .iter()
                     .map(|id| board::summary(tx, id, &caller))
-                    .collect::<Result<Vec<_>, _>>()
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((items, left_for_human))
             }
         })
         .await?;
+    let (items, left_for_human) = written.value;
     let Some(commit) = written.commit else {
         return Ok(ClosedSeveral {
-            items: written.value,
+            items,
+            left_for_human,
         });
     };
     let caller = context.caller.clone();
@@ -380,17 +454,40 @@ async fn close_issues(
                 .collect::<Result<Vec<_>, _>>()
         })
         .await?;
-    Ok(ClosedSeveral { items })
+    Ok(ClosedSeveral {
+        items,
+        left_for_human,
+    })
 }
 
-fn close_in(tx: &mut Tx<'_>, id: &str, caller: &Caller, evidence: &str) -> Result<(), Refused> {
+/// Closes one issue; true when it was left for the human.
+fn close_in(
+    tx: &mut Tx<'_>,
+    id: &str,
+    caller: &Caller,
+    evidence: &str,
+    word: Option<&HumanWord>,
+) -> Result<bool, Refused> {
     let record = board::issue(tx, id)?;
     let project = model::domain_project(&board::project(tx, &record.project)?)?;
     let issue = Board::load(tx)?.issue(&record)?;
-    if let Outcome::Changed(change) = decide(&Event::Close, &issue, caller, &project)? {
-        apply(tx, id, &change, Some(evidence))?;
+    let confidence = HumanWord::confidence(word);
+    match decide_on_word(&Event::Close, &issue, caller, &project, confidence)? {
+        Outcome::Unchanged => Ok(false),
+        Outcome::LeftForHuman => {
+            if let Some(word) = word {
+                word.note_left(tx, id, caller, None)?;
+            }
+            Ok(true)
+        }
+        Outcome::Changed(change) => {
+            apply(tx, id, &change, Some(evidence))?;
+            if let Some(word) = word {
+                word.note_moved(tx, id, caller, &change.status, None)?;
+            }
+            Ok(false)
+        }
     }
-    Ok(())
 }
 
 fn not_closed(id: &str, refused: Refused) -> Refused {

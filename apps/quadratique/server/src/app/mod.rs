@@ -7,6 +7,7 @@ mod changed;
 mod cursor;
 mod findings;
 mod history;
+mod human_word;
 mod instructions;
 mod issues;
 pub(crate) mod landings;

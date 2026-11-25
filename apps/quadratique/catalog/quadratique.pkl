@@ -110,6 +110,17 @@ local function committedThen(check: String): String = " One database commit per 
 
 local committed = committedThen("read the issue")
 
+local humanWordsSchema = string(400, "The human's own words that decide this call, quoted. Needs `confidence`.")
+
+local confidenceSchema = new Dynamic {
+  type = "string"
+  enum { "high"; "medium"; "low" }
+}
+
+local onHumanWords = " With `humanWords` and `confidence` (how sure the agent is that the words decide it), an agent passes `HumanOnly` at `high`, and a note quotes the words; at `medium` or `low` nothing changes but that note, and the answer has `leftForHuman`: a success, not to retry at `high`."
+
+local asOnUpdate = " `humanWords` and `confidence` work as in `issue.update`."
+
 local projectCommitted = committedThen("read the project with `project.list`")
 
 local projectInput = new Dynamic {
@@ -176,6 +187,12 @@ local summaryRequired = new Listing<String> {
 }
 
 local function bodyField(text: String?): Dynamic = string(20000, text)
+
+local leftForHumanSchema = new Dynamic {
+  type = "boolean"
+  ["const"] = true
+  description = "The human's words came with `confidence` below `high`: nothing moved."
+}
 
 local function criteria(text: String): Dynamic = (bodyField(text)) {
   pattern = #"\S"#
@@ -495,7 +512,7 @@ types {
         maxLength = 128
         description = "Why the change was made: the capability, such as `issue.claim`, or the server's own work: `git.merged` when the ref watcher sees a merge."
       }
-      reason = string(500, "The free text of the input's `reason`.")
+      reason = string(500, "The free text of the input's `reason`, or the human's words that an agent gave (`humanWords`).")
       branch = text("The git branch of the author's working directory.")
       worktree = string(4096, "The author's worktree.")
       project = module.ref("ProjectKey")
@@ -581,13 +598,19 @@ types {
   ["IssueAnswer"] {
     type = "object"
     description = "The answer about one issue: the issue, with its body, relations and children, under `issue`."
-    properties { issue = module.ref("Issue") }
+    properties {
+      issue = module.ref("Issue")
+      leftForHuman = leftForHumanSchema
+    }
     required { "issue" }
   }
   ["IssueSummaryAnswer"] {
     type = "object"
     description = "The answer about one issue: its summary, under `issue`."
-    properties { issue = module.ref("IssueSummary") }
+    properties {
+      issue = module.ref("IssueSummary")
+      leftForHuman = leftForHumanSchema
+    }
     required { "issue" }
   }
   ["ChangedIssue"] {
@@ -875,7 +898,7 @@ capabilities {
   }
 
   ["issue.update"] {
-    description = "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A move into the `merge` status, or a later status that is not canceled, fails with `BaseNotMerged` while an issue it is stacked on is not merged. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence." + committed
+    description = "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`).\(onHumanWords) Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A move into the `merge` status, or a later status that is not canceled, fails with `BaseNotMerged` while an issue it is stacked on is not merged. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence." + committed
     audience = interactiveClients
     input {
       type = "object"
@@ -905,6 +928,8 @@ capabilities {
         }, 8, "Fields to empty. A field that the call also gives keeps the given value. Notes cannot be emptied.")
         order { type = "number" }
         reason = reasonSchema
+        humanWords = humanWordsSchema
+        confidence = confidenceSchema
       }
       required { "issue"; "revision" }
     }
@@ -947,7 +972,7 @@ capabilities {
   }
 
   ["issue.release"] {
-    description = "End a claim. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`). The holder or the human gives the claim back: the issue moves to the workflow's `release` status with no claim, keeps its assignee, and loses a landing that its bases held back. Another agent frees the claim only in review (the workflow's `review` status or a later one before `merge`), and gets `Held` before review: the issue keeps its status, evidence, assignee and held landing, has no claim, and gains a note by that agent naming it, the former holder, the claim's branch and worktree, and the reason. Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged." + committed
+    description = "End a claim. Releasing an unclaimed issue changes nothing. An agent cannot release an issue assigned to the human (`HumanOnly`).\(asOnUpdate) The holder or the human gives the claim back: the issue moves to the workflow's `release` status with no claim, keeps its assignee, and loses a landing that its bases held back. Another agent frees the claim only in review (the workflow's `review` status or a later one before `merge`), and gets `Held` before review: the issue keeps its status, evidence, assignee and held landing, has no claim, and gains a note by that agent naming it, the former holder, the claim's branch and worktree, and the reason. Like every move, it fails with `BaseNotMerged` when it would put the issue at the `merge` status or later while an issue it is stacked on is not merged." + committed
     audience { "cli"; "mcp"; "web" }
     input {
       type = "object"
@@ -956,6 +981,8 @@ capabilities {
       properties {
         issue = module.ref("IssueId")
         reason = reasonSchema
+        humanWords = humanWordsSchema
+        confidence = confidenceSchema
       }
       required { "issue" }
     }
@@ -964,7 +991,7 @@ capabilities {
   }
 
   ["issue.close"] {
-    description = "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (as for `issue.claim`, from any worktree of its session), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence. In either case, when the status the move ends in is the workflow's `merge` status or a later status that is not canceled, it fails with `BaseNotMerged` while an issue it is stacked on is not merged." + committed
+    description = "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`.\(asOnUpdate) An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (as for `issue.claim`, from any worktree of its session), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence. In either case, when the status the move ends in is the workflow's `merge` status or a later status that is not canceled, it fails with `BaseNotMerged` while an issue it is stacked on is not merged." + committed
     audience { "cli"; "mcp"; "web" }
     input {
       type = "object"
@@ -973,6 +1000,8 @@ capabilities {
       properties {
         issue = module.ref("IssueId")
         evidence = bodyField("What was checked, and how: commands, results, links.")
+        humanWords = humanWordsSchema
+        confidence = confidenceSchema
       }
       required { "issue"; "evidence" }
     }
@@ -1008,6 +1037,8 @@ capabilities {
           description = "The issues to close: give the flag once per issue."
         }
         evidence = bodyField("What was checked, and how: commands, results, links.")
+        humanWords = humanWordsSchema
+        confidence = confidenceSchema
       }
       required { "issue"; "evidence" }
     }
@@ -1016,6 +1047,7 @@ capabilities {
       title = "IssuesCloseAnswer"
       properties {
         items = array(module.ref("IssueSummary"), 50, "The issues as the call left them, in the order given.")
+        leftForHuman = array(module.ref("IssueId"), 50, "The issues that `confidence` below `high` left for the human.")
       }
       required { "items" }
     }

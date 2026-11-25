@@ -31,12 +31,13 @@ still alive: a claim records no liveness.
    `issue.update` with `notes` and the issue's current `revision`. A review note reaches an
    issue in review this way, from a human or from any agent. Fields without a status
    (`description`, `acceptance`, `priority`, `notes`) are open to every actor; an agent
-   cannot change the assignee of an issue assigned to the human (`HumanOnly`).
+   cannot change the assignee of an issue assigned to the human (`HumanOnly`, except as
+   rule 4 says).
 2. **Manual moves by agents.** This rule is about the moves an actor asks for: a change of
    status (`issue.update` with `status`), `issue.release` and `issue.close`. Of the actors
    that do not hold a claim, only the human may make these moves on the claimed issue, except
    the release of rule 3. The rules refuse in this order, and the first refusal that applies
-   is the answer:
+   is the answer. Rule 4 says what the human's words change at the place of `HumanOnly`:
    - `issue.update` with `status`: `Stale` for an old `revision`; `UnknownStatus`; then
      `HumanOnly` for an agent on an issue assigned to the human, whether or not it holds the
      claim; then `Held`, which names the holder, for an agent that does not hold it.
@@ -105,11 +106,49 @@ still alive: a claim records no liveness.
    released keeps its branch and its pull request; it reads the note, moves the issue back to
    an unstarted status and claims it again. The skill says what an agent may do in one line.
 
+4. **The human's words.** Added on 2026-11-26 (QUA-65). An issue assigned to the human is a
+   decision. When the human decides it in a session, the agent may move it, on the human's
+   words. The owner's words: "why do i have to do it myself?", and the condition: "it needs to
+   evaluate a degree of confidence first". The calls that `HumanOnly` guards (`issue.update`
+   with `status` or a new assignee, `issue.release`, `issue.close`, `issues.close`) take
+   `humanWords`, the human's own words quoted as given (1 to 400 characters), and
+   `confidence`, how sure the agent is that those words decide the issue: `high`, `medium` or
+   `low`. At the place of `HumanOnly` in the order of rule 2, for an agent that gives both:
+   - `high`: `HumanOnly` does not apply to this call; the rules after it still do (`Held`,
+     `NotClaimed`, `BaseNotMerged`). The issue gains a note by the agent that names it, quotes
+     the words and states the confidence, with the call's `reason` when it has one.
+   - `medium` or `low`: the call changes nothing but a note, by the agent, that quotes the
+     words and states the confidence. The answer has `leftForHuman` (`issues.close`: the
+     issues under `leftForHuman`). It is a success, not a refusal: the agent does not repeat
+     it with `high`; the issue waits for the human.
+
+   The history's reason of the change is `The human's words, <confidence> confidence:
+   "<words>"`, in place of the call's `reason`; 400 characters of words keep it within the
+   500 of a reason. Without `humanWords` or without `confidence`, an agent gets `HumanOnly`
+   on an issue assigned to the human, as before. The rule takes the place of `HumanOnly` for
+   every agent call that gives both, on any issue: on an issue not assigned to the human,
+   `high` adds the note and `medium` or `low` leaves the issue as rule 4 says. The rules
+   before `HumanOnly` keep their place (`Stale`, `UnknownStatus`, `Resolved`, the success
+   with no change of a completed or unclaimed issue). The human's own calls ignore both
+   fields.
+
+   An agent's `issue.close` on an unclaimed issue still answers `NotClaimed`: an agent records
+   the human's decision on a decision issue with `issue.update` and `status`. The skill says
+   when, in one line: only when the human's words settle the issue's acceptance without
+   interpretation; otherwise the agent asks the human.
+
+   The server cannot know that the human said the words: like every actor field, they are
+   declared by the agent. The rule does not pretend otherwise. It makes the agent state what
+   it relies on, and how sure it is, in the record: the note and the history show the human
+   the words, the agent and the confidence, and the human can move the issue back.
+
 Rule 1 and the order of refusals in rule 2 were the existing behaviour, stated here and
 tested. The holder's session in another worktree (rule 2) and rule 3 are new: rule 3 is the
 owner's choice among the alternatives below, rule 2 the lead's proposal.
 
-The tests take their names from these rules: `server/tests/server/ended_holder.rs`.
+The tests take their names from these rules: `server/tests/server/ended_holder.rs`, and for
+rule 4 `server/tests/domain/human_word.rs`, `server/tests/server/human_word.rs`,
+`cli/tests/cli/human_word.rs` and `cli/tests/cli/mcp.rs`.
 
 ## Alternatives considered
 

@@ -1,3 +1,5 @@
+use serde::Deserialize;
+
 use super::failure::Failure;
 use super::issue::{Caller, Claim, Issue, Project};
 use super::readiness::{Readiness, Wait, readiness};
@@ -41,6 +43,28 @@ pub enum Landing {
 pub enum Outcome {
     Unchanged,
     Changed(Change),
+    /// An agent gave the human's words with less than high confidence: nothing moves, and the
+    /// issue waits for the human.
+    LeftForHuman,
+}
+
+/// How sure an agent is that the human's words it gives decide the issue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl Confidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidence::High => "high",
+            Confidence::Medium => "medium",
+            Confidence::Low => "low",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,10 +90,23 @@ pub fn decide(
     caller: &Caller,
     project: &Project,
 ) -> Result<Outcome, Failure> {
+    decide_on_word(event, issue, caller, project, None)
+}
+
+/// `decide` for a call that may carry the human's words, with the caller's confidence that
+/// they decide the issue: decision record 0002, rule 4.
+pub fn decide_on_word(
+    event: &Event,
+    issue: &Issue,
+    caller: &Caller,
+    project: &Project,
+    word: Option<Confidence>,
+) -> Result<Outcome, Failure> {
     let rules = Rules {
         issue,
         caller,
         project,
+        word,
     };
     let outcome = match event {
         Event::Claim {
@@ -115,6 +152,7 @@ struct Rules<'a> {
     issue: &'a Issue,
     caller: &'a Caller,
     project: &'a Project,
+    word: Option<Confidence>,
 }
 
 impl Rules<'_> {
@@ -135,8 +173,18 @@ impl Rules<'_> {
         Stage::of(workflow, &self.issue.status, Some(self.issue.category)) == Stage::InReview
     }
 
-    fn agent_on_human_issue(&self) -> bool {
-        !self.caller.is_human() && self.issue.assigned_to_human()
+    /// The place of `HumanOnly` in the order of refusals. An agent that gives the human's words
+    /// with high confidence goes on to the next rule; with less, nothing moves.
+    fn human_decides(&self) -> Option<Result<Outcome, Failure>> {
+        if self.caller.is_human() {
+            return None;
+        }
+        match self.word {
+            Some(Confidence::High) => None,
+            Some(Confidence::Medium | Confidence::Low) => Some(Ok(Outcome::LeftForHuman)),
+            None if self.issue.assigned_to_human() => Some(Err(Failure::HumanOnly)),
+            None => None,
+        }
     }
 
     fn caller_holds(&self) -> bool {
@@ -209,18 +257,17 @@ impl Rules<'_> {
             });
         }
         let Some(status) = status else {
-            return if changes_assignee && self.agent_on_human_issue() {
-                Err(Failure::HumanOnly)
-            } else {
-                Ok(Outcome::Unchanged)
+            return match self.human_decides() {
+                Some(answer) if changes_assignee => answer,
+                _ => Ok(Outcome::Unchanged),
             };
         };
         let workflow = &self.project.workflow;
         let Some(category) = workflow.category_of(status) else {
             return Err(unknown_status(workflow, status));
         };
-        if self.agent_on_human_issue() {
-            return Err(Failure::HumanOnly);
+        if let Some(answer) = self.human_decides() {
+            return answer;
         }
         if let Some(claim) = &self.issue.claim
             && !self.caller.holds(claim)
@@ -257,8 +304,8 @@ impl Rules<'_> {
         let Some(claim) = &self.issue.claim else {
             return Ok(Outcome::Unchanged);
         };
-        if self.agent_on_human_issue() {
-            return Err(Failure::HumanOnly);
+        if let Some(answer) = self.human_decides() {
+            return answer;
         }
         if self.caller.holds(claim) || self.caller.is_human() {
             return Ok(self.moves_to(
@@ -288,8 +335,8 @@ impl Rules<'_> {
         if self.issue.category == Category::Completed || self.in_merge_status() {
             return Ok(Outcome::Unchanged);
         }
-        if self.agent_on_human_issue() {
-            return Err(Failure::HumanOnly);
+        if let Some(answer) = self.human_decides() {
+            return answer;
         }
         if !self.caller.is_human() && !self.caller_holds() {
             return Err(match &self.issue.claim {

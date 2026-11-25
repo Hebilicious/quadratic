@@ -226,7 +226,7 @@ async fn settle_issue(
                         apply(tx, &issue, &change, None)?;
                         break;
                     }
-                    Ok(Outcome::Unchanged) => {}
+                    Ok(Outcome::Unchanged | Outcome::LeftForHuman) => {}
                     Err(Failure::BaseNotMerged { .. }) => {
                         tx.hold_merge(&issue)?;
                         break;
