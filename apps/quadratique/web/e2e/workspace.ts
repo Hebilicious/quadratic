@@ -157,6 +157,23 @@ export class Workspace {
     });
   }
 
+  async gitOutput(directory: string, ...args: string[]): Promise<string> {
+    return await new Promise<string>((resolve, reject) => {
+      execFile(
+        "git",
+        args,
+        { cwd: directory, env: gitEnvironment(this.root), timeout: HANG_GUARD_MS },
+        (error, stdout) => {
+          if (error === null) {
+            resolve(stdout.trim());
+          } else {
+            reject(error);
+          }
+        },
+      );
+    });
+  }
+
   private environment(who: Who): NodeJS.ProcessEnv {
     return {
       ...gitEnvironment(this.root),

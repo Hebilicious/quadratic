@@ -479,9 +479,14 @@ async fn close_answers_the_whole_issue_with_the_evidence_it_saved() {
         closed["issue"]["evidence"], "cargo test: 12 passed at 1a2b3c4",
         "{closed}"
     );
-    let shown = board
+    let mut shown = board
         .ok(&worker, "issue.get", json!({ "issue": issue }))
         .await;
+    let work = shown["issue"]
+        .as_object_mut()
+        .expect("an issue")
+        .remove("work");
+    assert_eq!(work, Some(json!({ "branch": "parser", "commits": [] })));
     assert_eq!(closed["issue"], shown["issue"]);
 }
 

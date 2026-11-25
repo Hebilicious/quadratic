@@ -2,6 +2,7 @@
 import { computed, nextTick, ref } from "vue";
 
 import type { Note } from "../board/model.ts";
+import LinkedText from "../views/linked-text.vue";
 import { ago, failureText, when } from "../views/present.ts";
 import { useWorkspace } from "../workspace.ts";
 import type { IssueEditor } from "./issue-editor.ts";
@@ -90,7 +91,7 @@ function onKey(event: KeyboardEvent): void {
           <span class="note-author">{{ note.author }}</span>
           <span class="muted" :title="when(note.at)">{{ ago(note.at) }}</span>
         </p>
-        <p class="field-value" data-multiline="true">{{ note.text }}</p>
+        <p class="field-value" data-multiline="true"><LinkedText :text="note.text" /></p>
       </li>
     </ol>
     <p v-else class="field-value field-empty">No notes.</p>
