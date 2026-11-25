@@ -377,8 +377,8 @@ jobs:
   # Publishes the crates that crates.io lacks, from the tag's commit, once the release is public with its files (or
   # at once, for a release that was already complete). Runs project code, so it holds no App token and cannot write
   # to the repository: its only credential is a crates.io token from Trusted Publishing, which lasts 30 minutes, is
-  # minted after the build, and is revoked when the job ends. crates.io accepts that token for this workflow file,
-  # with no environment.
+  # minted after the build, and is revoked when the job ends. crates.io accepts that token for this workflow file in
+  # the environment `crates-io`, which only `main` may deploy to, so a pull request that edits this file gets none.
   crates:
     name: publish the crates to crates.io
     needs: [pending, publish]
@@ -388,6 +388,7 @@ jobs:
         needs.publish.result == 'success'
       )
     runs-on: ubuntu-latest
+    environment: crates-io
     permissions:
       contents: read
       id-token: write

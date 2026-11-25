@@ -783,7 +783,11 @@ draft release). The workflow reads the App's client ID from the repository varia
 
 crates.io accepts the crates job's token because each crate has a Trusted Publishing
 configuration on crates.io: repository owner `Hebilicious`, repository name `quadratique`,
-workflow file `release.yml`, no environment. The job runs in no GitHub environment.
+workflow file `release.yml`, environment `crates-io`. The job runs in the repository's
+environment `crates-io`, which accepts only runs on `main` and asks nobody for anything: no
+reviewer, no wait. It exists because crates.io does not check the branch and this workflow also
+runs on pull requests; GitHub refuses the environment to a pull request, so a pull request that
+edits the workflow gets no crates.io token.
 
 A pull request that changes the release workflow, its configuration, `.github/release-tests/` or
 `install/` builds the archives too, as workflow artifacts, and releases nothing. It also runs
@@ -809,8 +813,9 @@ release, so a crates.io failure never holds back the release's files.
   `https://crates.io/crates/quadratique/<version>`: a version that crates.io shows but the job's
   log says is missing from the index is still on its way to the index; wait a minute. If the job
   fails at the token step, check the crate's Trusted Publishing configuration on crates.io
-  (Settings, Trusted Publishing): it must name `Hebilicious`, `quadratique`, `release.yml` and no
-  environment. The GitHub release
+  (Settings, Trusted Publishing): it must name `Hebilicious`, `quadratique`, `release.yml` and
+  `crates-io`. Also check that the repository's environment `crates-io` still allows `main`. The
+  GitHub release
   is already public with its files at this point; the crates job never changes it.
 - **The run is too old to re-run:** push any commit to `main` (a `docs:` or `chore:` one releases
   nothing). The workflow finds the draft of the manifest's version and finishes it, and publishes
