@@ -652,24 +652,17 @@ What a maintainer does for a release, and what happens on its own:
 2. Review and merge the release pull request. The tag, the draft release, the archives and the
    publication of the release follow on their own; check that the run of the workflow
    `Release` is green and that the release lists four files.
-3. After the first release (0.1.0) only: delete the line `"release-as": "0.1.0",` from
-   `release-please-config.json`, in a `chore:` pull request. While it is there, every later
-   release pull request proposes 0.1.0 again.
 
 To publish a release to crates.io (by hand: no workflow does it yet):
 
-1. Once, before the first publication: set `publish = true` in `[workspace.package]` of
-   `apps/quadratique/Cargo.toml`, in a `build:` pull request, merged before the release pull
-   request so that the tagged commit can be published. Do not delete the key: both crates
-   inherit it (`publish.workspace = true`).
-2. Check out the tag: `git checkout refs/tags/v<version>`, then `pnpm install --frozen-lockfile`.
-3. Stage the web app and check both crates: `moon run quadratique-server:preflight` (it stages
+1. Check out the tag: `git checkout refs/tags/v<version>`, then `pnpm install --frozen-lockfile`.
+2. Stage the web app and check both crates: `moon run quadratique-server:preflight` (it stages
    the web app first, then checks).
-4. From `apps/quadratique`, with a crates.io API token in `CARGO_REGISTRY_TOKEN`:
+3. From `apps/quadratique`, with a crates.io API token in `CARGO_REGISTRY_TOKEN`:
    `cargo publish --workspace --allow-dirty`. Cargo publishes `quadratique-server` first, then
    `quadratique`, which depends on it. (`--allow-dirty`: the staged `web-dist` is not in git.)
-5. After the first publication, trusted publishing on crates.io (with
-   `rust-lang/crates-io-auth-action` in a workflow) can replace the token.
+4. Trusted publishing on crates.io (with `rust-lang/crates-io-auth-action` in a workflow) can
+   replace the token.
 
 ## License
 
