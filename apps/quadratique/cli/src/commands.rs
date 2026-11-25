@@ -27,7 +27,7 @@ pub fn all() -> Vec<CliCommand<Context>> {
         ),
         command(
             "server",
-            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; from the next start, each start of the server takes an address it never served and a new token, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui opens it again. server strict off: from the next start, the server keeps its address and the web app's token across restarts (the default). server sign-out: a new token for the web app, which signs every browser out; quadratique ui opens it again.",
+            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; from the next start of the server, each start takes an address it never served and a new token, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui --open lets the browser in again. server strict off: back to the default from the next start, which takes a new address and a new token, so each browser is let in once more with quadratique ui --open; after that the server keeps both across restarts. Neither starts a server. server sign-out: a new token for the web app, which signs every browser out; quadratique ui --open lets it in again.",
             |args, io| server_command(args, io).boxed(),
         ),
         command(
@@ -212,8 +212,11 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     }
 }
 
+/// `addressKept` comes from the running server when one answered; with none, it says what the next start does.
 fn located(home: &Home, mut value: Value) -> Value {
-    value["addressKept"] = json!(!server::strict(home.prepared()));
+    if value.get("addressKept").is_none() {
+        value["addressKept"] = json!(!server::strict(home.prepared()));
+    }
     value["runtime"] = json!(home.prepared().runtime());
     value["log"] = json!(home.log());
     value
@@ -321,6 +324,9 @@ fn answered_over_socket(identity: &server::Identity) -> Value {
     if !same {
         value["interface"] = json!(identity.interface);
     }
+    if let Some(kept) = identity.address_kept {
+        value["addressKept"] = json!(kept);
+    }
     if let Some(origin) = identity
         .url
         .as_deref()
@@ -339,15 +345,9 @@ fn unreachable(home: &Home, reason: String) -> Value {
     })
 }
 
-/// Turning strict off keeps the port of the server that runs now, so that the address already open in the browser is
-/// the one kept; turning it on forgets the kept port, and the next start takes a fresh one.
+/// The setting applies from the next start of the server: neither turning it on nor off starts or changes one.
 async fn set_strict(home: &Home, on: bool) -> Result<Value, background::LifeError> {
-    let port = if on {
-        None
-    } else {
-        Some(background::ensure(home).await?.address.port())
-    };
-    server::set_strict(home.prepared(), on, port)
+    server::set_strict(home.prepared(), on)
         .map_err(|error| home.unusable(error, background::Attempt::Start))?;
     Ok(located(
         home,
@@ -384,11 +384,11 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
         Ok(home) => home,
         Err(message) => return report(io, Kind::Internal, message),
     };
-    let kept = !server::strict(home.prepared());
     let paired = match pair(&home, open).await {
         Ok(paired) => paired,
         Err(message) => return report(io, Kind::Unavailable, message),
     };
+    let kept = address_kept(&home).await;
     let url = paired.url.clone();
     let answer = match (open, paired.file) {
         (false, _) | (true, None) => {
@@ -482,6 +482,18 @@ async fn sign_out(home: &Home) -> Result<Value, String> {
         "signing out needs the server's socket, which Windows does not have yet (QUA-61)"
             .to_owned(),
     )
+}
+
+/// Whether the running server listens on the port its home keeps, as it says itself; a server that does not say gets the
+/// home's setting.
+async fn address_kept(home: &Home) -> bool {
+    #[cfg(unix)]
+    if let Ok(identity) = server::identity_over_socket(home.prepared()).await
+        && let Some(kept) = identity.address_kept
+    {
+        return kept;
+    }
+    !server::strict(home.prepared())
 }
 
 const OPENER: &str = if cfg!(target_os = "macos") {

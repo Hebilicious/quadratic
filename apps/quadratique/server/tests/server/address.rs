@@ -33,7 +33,7 @@ impl Home {
 
     fn strict() -> Home {
         let home = Home::new();
-        server::set_strict(&home.prepared, true, None).expect("the setting is written");
+        server::set_strict(&home.prepared, true).expect("the setting is written");
         home
     }
 
@@ -201,14 +201,14 @@ async fn turning_strict_on_forgets_the_kept_port_and_lists_it_as_served() {
     let home = Home::new();
     home.write_kept("4100\n");
 
-    server::set_strict(&home.prepared, true, None).expect("strict on");
+    server::set_strict(&home.prepared, true).expect("strict on");
 
     assert!(server::strict(&home.prepared));
     assert_eq!(home.kept(), None);
     assert_eq!(home.served(), vec![4100]);
-    server::set_strict(&home.prepared, false, Some(4200)).expect("strict off");
+    server::set_strict(&home.prepared, false).expect("strict off");
     assert!(!server::strict(&home.prepared));
-    assert_eq!(home.kept(), Some("4200\n".to_owned()));
+    assert_eq!(home.kept(), None);
 }
 
 #[tokio::test(flavor = "multi_thread")]

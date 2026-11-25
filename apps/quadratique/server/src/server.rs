@@ -200,6 +200,13 @@ pub struct Identity {
     /// The address of the command line's routes on TCP, as the runtime file names it.
     #[serde(default)]
     pub url: Option<String>,
+    /// Whether the server listens on the port its home keeps, so that the next start asks for the same address.
+    #[serde(
+        default,
+        rename = "addressKept",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub address_kept: Option<bool>,
 }
 
 /// The file the server runs, as it found it at its start.
@@ -697,6 +704,7 @@ async fn start_checked(
         executable: Executable::of_this_process(),
         started: Some(started),
         url: None,
+        address_kept: None,
     };
     let answer = Arc::new(OnceLock::new());
     let identify: Arc<dyn Handler> = Arc::new(Identify {
@@ -743,9 +751,9 @@ async fn start_checked(
     ));
     let admit = callers::owner_only(own_account);
     let listening = address::bind(home, listen).and_then(|bound| {
-        let listener = bound.socket.listen(LISTEN_BACKLOG)?;
+        let (listener, record) = address::listen(bound, LISTEN_BACKLOG)?;
         let served = serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS)?;
-        Ok((served, bound.record))
+        Ok((served, record))
     });
     let (served, record) = match listening {
         Ok(listening) => listening,
@@ -754,7 +762,7 @@ async fn start_checked(
             return Err(error.into());
         }
     };
-    address::record(home, &record, served.address.port());
+    identity.address_kept = Some(address::record(home, &record, served.address.port()));
     origin.set(served.address);
     let gate = serve::Gate::default();
     served.close_with(&gate);

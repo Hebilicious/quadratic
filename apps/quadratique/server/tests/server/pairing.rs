@@ -353,7 +353,7 @@ async fn the_bearer_survives_a_restart_and_a_sign_out_replaces_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn in_strict_mode_the_bearer_changes_at_each_start_and_no_token_file_is_kept() {
     let site = Restartable::new();
-    server::set_strict(&prepared(site.home.path()), true, None).expect("strict on");
+    server::set_strict(&prepared(site.home.path()), true).expect("strict on");
     let first = site.start().await;
     let bearer = site.bearer(&first).await;
     first.shutdown().await;

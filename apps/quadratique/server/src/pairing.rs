@@ -8,7 +8,7 @@
 //!
 //! No secret is ever written to a log, an error or a `Debug` output: [`Secret`] prints as `Secret(…)`.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use http::{HeaderValue, Method, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use serde::{Deserialize, Serialize};
 
-use crate::home::Prepared;
+use crate::home::{self, Prepared};
 
 /// The page redeems its one-time code here, on TCP.
 pub const SESSION: &str = "/session";
@@ -342,32 +342,9 @@ fn read_token(file: &Path) -> Option<Secret> {
     Secret::decode(&text)
 }
 
-/// Writes the bearer to a sibling made exclusively with mode 0600, then renames it over `file`.
+/// Writes the bearer as every file of the home is written: a private partial file, renamed over `file`.
 fn write_token(file: &Path, bearer: &Secret) -> std::io::Result<()> {
-    let partial = file.with_file_name(format!("{TOKEN_FILE}.{}", std::process::id()));
-    let _ = std::fs::remove_file(&partial);
-    let written = create_private(&partial)
-        .and_then(|mut opened| {
-            opened.write_all(format!("{}\n", bearer.encoded()).as_bytes())?;
-            opened.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&partial, file));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written
-}
-
-/// A new file that only this account can read: `create_new`, so that nothing already at the path is used.
-pub fn create_private(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
+    home::write_atomically(file, format!("{}\n", bearer.encoded()).as_bytes())
 }
 
 /// `<folder>/open-<random>.html`, which sends the browser to `link` without the code ever being in a process's
@@ -382,7 +359,8 @@ fn write_bootstrap(folder: &Path, link: &str) -> std::io::Result<PathBuf> {
     let page = format!(
         "<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<meta http-equiv=\"refresh\" content=\"0; url={link}\">\n<title>Quadratique</title>\n"
     );
-    let written = create_private(&file).and_then(|mut opened| opened.write_all(page.as_bytes()));
+    let written =
+        home::create_private(&file).and_then(|mut opened| opened.write_all(page.as_bytes()));
     if let Err(error) = written {
         let _ = std::fs::remove_file(&file);
         return Err(error);
@@ -681,7 +659,7 @@ mod tests {
         let path = folder.path().join("taken");
         std::fs::write(&path, "already here").expect("a file");
 
-        let made = super::create_private(&path);
+        let made = crate::home::create_private(&path);
 
         assert_eq!(
             made.map(|_| ()).map_err(|error| error.kind()),

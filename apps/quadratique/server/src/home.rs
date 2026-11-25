@@ -148,6 +148,52 @@ pub fn shell_word(path: &str) -> String {
     }
 }
 
+/// A new file that only this account can read, made with `create_new`, so that nothing already at the path (a link
+/// included) is ever written through.
+pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// The one way a file of the home is replaced: `contents` go to `<name>.<pid>`, made by [`create_private`] after
+/// whatever was at that name is removed (a link is removed, never followed), synced, then renamed over `path`. The
+/// partial file is removed when a step fails.
+pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let partial = path.with_file_name(format!("{name}.{}", std::process::id()));
+    let named = |what: &str, error: std::io::Error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("{what} {}: {error}", partial.display()),
+        )
+    };
+    match std::fs::remove_file(&partial) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(named("removing", error));
+        }
+        _ => {}
+    }
+    let written = create_private(&partial)
+        .and_then(|mut file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        })
+        .map_err(|error| named("writing", error))
+        .and_then(|()| std::fs::rename(&partial, path).map_err(|error| named("renaming", error)));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
+}
+
 /// Applies the policy to the home that `paths` names, makes it when it is missing, and returns the only handle on its
 /// files.
 pub fn prepare(paths: &Paths) -> Result<Prepared, HomeError> {

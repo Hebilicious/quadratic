@@ -11,9 +11,9 @@ use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
-use tokio::net::TcpSocket;
+use tokio::net::{TcpListener, TcpSocket};
 
-use crate::home::Prepared;
+use crate::home::{self, Prepared};
 
 /// `server.port` holds one port number: anything longer is not one.
 const PORT_FILE_LIMIT: u64 = 16;
@@ -38,6 +38,8 @@ pub enum Listen {
 pub(super) struct Bound {
     pub socket: TcpSocket,
     pub record: Record,
+    /// The kept port was bound: another start may bind it too and listen first, and the server then takes another.
+    pub kept: bool,
 }
 
 pub(super) enum Record {
@@ -51,6 +53,7 @@ pub(super) fn bind(home: &Prepared, listen: Listen) -> std::io::Result<Bound> {
         Listen::On(address) => Ok(Bound {
             socket: bound(address)?,
             record: Record::Nothing,
+            kept: false,
         }),
         Listen::Home if strict(home) => {
             let served = served_ports(home);
@@ -62,6 +65,7 @@ pub(super) fn bind(home: &Prepared, listen: Listen) -> std::io::Result<Bound> {
             Ok(Bound {
                 socket,
                 record: Record::Served,
+                kept: false,
             })
         }
         Listen::Home => {
@@ -71,31 +75,51 @@ pub(super) fn bind(home: &Prepared, listen: Listen) -> std::io::Result<Bound> {
                 return Ok(Bound {
                     socket,
                     record: Record::Kept,
+                    kept: true,
                 });
             }
             Ok(Bound {
                 socket: bound(loopback())?,
                 record: Record::Kept,
+                kept: false,
             })
         }
     }
 }
 
-/// Records the port the server now listens on. A failure is only logged: the address is a convenience, and the server
-/// serves anyway.
-pub(super) fn record(home: &Prepared, record: &Record, port: u16) {
+/// Listens on the bound socket. Linux lets two sockets with `SO_REUSEADDR` bind one port while neither listens, so two
+/// starts may both bind the kept port; the one that listens second gets `EADDRINUSE` and takes a port the system
+/// chooses, which it keeps.
+pub(super) fn listen(bound: Bound, backlog: u32) -> std::io::Result<(TcpListener, Record)> {
+    match bound.socket.listen(backlog) {
+        Ok(listener) => Ok((listener, bound.record)),
+        Err(error) if bound.kept && error.kind() == std::io::ErrorKind::AddrInUse => {
+            Ok((bound_any()?.listen(backlog)?, bound.record))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn bound_any() -> std::io::Result<TcpSocket> {
+    bound(loopback())
+}
+
+/// Records the port the server now listens on, and says whether it is the kept one: the home keeps its address and
+/// `server.port` names this port. A failure is only logged: the address is a convenience, and the server serves anyway.
+pub(super) fn record(home: &Prepared, record: &Record, port: u16) -> bool {
     let written = match record {
-        Record::Nothing => return,
-        Record::Kept if kept_port(home) == Some(port) => return,
-        Record::Kept => keep_port(home, port),
-        Record::Served => add_served(home, &[port]),
+        Record::Nothing => return false,
+        Record::Kept if kept_port(home) == Some(port) => return true,
+        Record::Kept => keep_port(home, port).map(|()| true),
+        Record::Served => add_served(home, &[port]).map(|()| false),
     };
-    if let Err(error) = written {
+    written.unwrap_or_else(|error| {
         eprintln!(
             "quadratique server: could not record port {port} in {}: {error}; the next start may take another port",
             home.folder().display()
         );
-    }
+        false
+    })
 }
 
 fn loopback() -> SocketAddr {
@@ -134,21 +158,16 @@ pub fn strict(home: &Prepared) -> bool {
     std::fs::symlink_metadata(home.strict()).is_ok_and(|metadata| metadata.is_file())
 }
 
-/// Turns the strict setting on or off. On, the kept port joins the served ports and is forgotten, so that no later
-/// start asks for it. Off, `port`, when given, is kept at once: the port of the server that runs now.
-pub fn set_strict(home: &Prepared, on: bool, port: Option<u16>) -> std::io::Result<()> {
+/// Turns the strict setting on or off, for the next start of the server. On, the kept port joins the served ports and
+/// is forgotten, so that no later start asks for it. Off, the next start takes a port the system chooses and keeps it.
+pub fn set_strict(home: &Prepared, on: bool) -> std::io::Result<()> {
     if on {
-        let mut ports: Vec<u16> = kept_port(home).into_iter().collect();
-        ports.extend(port);
+        let ports: Vec<u16> = kept_port(home).into_iter().collect();
         add_served(home, &ports)?;
-        write_atomically(&home.strict(), b"on\n")?;
+        home::write_atomically(&home.strict(), b"on\n")?;
         return remove(&home.kept_port());
     }
-    remove(&home.strict())?;
-    match port {
-        Some(port) => keep_port(home, port),
-        None => Ok(()),
-    }
+    remove(&home.strict())
 }
 
 fn remove(path: &Path) -> std::io::Result<()> {
@@ -168,21 +187,47 @@ pub fn kept_port(home: &Prepared) -> Option<u16> {
 }
 
 fn keep_port(home: &Prepared, port: u16) -> std::io::Result<()> {
-    write_atomically(&home.kept_port(), format!("{port}\n").as_bytes())
+    home::write_atomically(&home.kept_port(), format!("{port}\n").as_bytes())
 }
 
 fn served_ports(home: &Prepared) -> HashSet<u16> {
     served_list(home).into_iter().collect()
 }
 
+/// The ports in the last [`SERVED_PORTS_LIMIT`] bytes of `served-ports`: a longer file, or a line that is not a port,
+/// costs only what cannot be read, never the rest of the list.
 fn served_list(home: &Prepared) -> Vec<u16> {
-    read_small(&home.served_ports(), SERVED_PORTS_LIMIT)
-        .map(|text| {
-            text.lines()
-                .filter_map(|line| line.trim().parse::<u16>().ok())
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(bytes) = read_tail(&home.served_ports(), SERVED_PORTS_LIMIT) else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u16>().ok())
+        .collect()
+}
+
+/// At most the last `limit` bytes of a regular file, starting at a line, or nothing when it is not a regular file.
+fn read_tail(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+
+    let looked = std::fs::symlink_metadata(path).ok()?;
+    if !looked.is_file() {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let start = length.saturating_sub(limit);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        let line = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |end| end + 1);
+        bytes.drain(..line);
+    }
+    Some(bytes)
 }
 
 fn add_served(home: &Prepared, ports: &[u16]) -> std::io::Result<()> {
@@ -194,7 +239,7 @@ fn add_served(home: &Prepared, ports: &[u16]) -> std::io::Result<()> {
         .iter()
         .map(|port| format!("{port}\n"))
         .collect();
-    write_atomically(&home.served_ports(), text.as_bytes())
+    home::write_atomically(&home.served_ports(), text.as_bytes())
 }
 
 /// The text of a regular file of at most `limit` bytes: a link, a FIFO, a folder or a longer file gives nothing. The
@@ -213,23 +258,103 @@ fn read_small(path: &Path, limit: u64) -> Option<String> {
     Some(text)
 }
 
-/// Writes a sibling file, then renames it over `path`. The sibling is removed when either step fails.
-fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let partial = path.with_file_name(format!("{name}.{}", std::process::id()));
-    let named = |what: &str, error: std::io::Error| {
-        std::io::Error::new(
-            error.kind(),
-            format!("{what} {}: {error}", partial.display()),
-        )
-    };
-    let written = std::fs::write(&partial, contents)
-        .map_err(|error| named("writing", error))
-        .and_then(|()| std::fs::rename(&partial, path).map_err(|error| named("renaming", error)));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
+#[cfg(all(test, unix))]
+mod home_tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::os::unix::fs::PermissionsExt;
+
+    use tokio::net::TcpSocket;
+
+    use super::{Listen, Record, add_served, bind, listen, record, served_list};
+    use crate::home::{self, Prepared};
+    use crate::server::Paths;
+
+    fn home() -> (tempfile::TempDir, Prepared) {
+        let folder = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .expect("a private folder");
+        let prepared =
+            home::prepare(&Paths::in_home(folder.path()).expect("a path")).expect("a home");
+        (folder, prepared)
     }
-    written
+
+    fn held_port() -> (TcpSocket, u16) {
+        let socket = TcpSocket::new_v4().expect("a socket");
+        socket.set_reuseaddr(true).expect("SO_REUSEADDR");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("a loopback port");
+        let port = socket.local_addr().expect("its address").port();
+        (socket, port)
+    }
+
+    /// Two starts may race for the kept port: both bind it, as `SO_REUSEADDR` allows while neither listens, and the
+    /// one that listens second must not fail.
+    #[tokio::test]
+    async fn when_another_socket_listens_on_the_kept_port_between_the_bind_and_the_listen_the_server_takes_another()
+     {
+        let (_folder, home) = home();
+        let (other, port) = held_port();
+        std::fs::write(home.kept_port(), format!("{port}\n")).expect("a kept port");
+        let bound = bind(&home, Listen::Home).expect("the kept port is bound");
+        assert_eq!(bound.socket.local_addr().expect("its address").port(), port);
+        let _other = other.listen(16).expect("the other socket listens first");
+
+        let listened = listen(bound, 16);
+
+        let (listener, _) = listened.expect("the server listens on another port");
+        assert_ne!(listener.local_addr().expect("its address").port(), port);
+    }
+
+    #[test]
+    fn a_long_or_partly_unreadable_served_ports_file_keeps_its_last_ports() {
+        let (_folder, home) = home();
+        let mut text: Vec<u8> = (1000..6000u16)
+            .flat_map(|port| format!("{port}\n").into_bytes())
+            .collect();
+        text.extend_from_slice(b"\xff\xfe not a port\n6001\n");
+        std::fs::write(home.served_ports(), &text).expect("a long file");
+
+        add_served(&home, &[7000]).expect("a port is added");
+
+        let kept = served_list(&home);
+        assert!(
+            kept.contains(&5999) && kept.contains(&6001),
+            "{} ports",
+            kept.len()
+        );
+        assert_eq!(kept.last(), Some(&7000));
+        assert!(kept.len() > 3000, "only {} ports kept", kept.len());
+    }
+
+    #[test]
+    fn a_file_of_the_home_is_never_written_through_a_link_at_its_partial_name() {
+        let (_folder, home) = home();
+        let elsewhere = tempfile::tempdir().expect("a folder outside the home");
+        let target = elsewhere.path().join("target");
+        std::fs::write(&target, "untouched").expect("a file outside the home");
+        let partial = home
+            .kept_port()
+            .with_file_name(format!("server.port.{}", std::process::id()));
+        std::os::unix::fs::symlink(&target, &partial).expect("a link at the partial name");
+
+        assert!(record(&home, &Record::Kept, 4100), "the port is kept");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("the target"),
+            "untouched"
+        );
+        let mode = std::fs::metadata(home.kept_port())
+            .expect("server.port")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read_to_string(home.kept_port()).expect("server.port"),
+            "4100\n"
+        );
+    }
 }
 
 #[cfg(test)]

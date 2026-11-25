@@ -85,9 +85,14 @@ starts the server on the port you give (`0`: one the system chooses) and keeps n
 While the server is down, another account of this machine can listen on the kept port. A tab or a
 bookmark then reaches that account's program, which can read what the browser saved for that
 address. On a machine whose other accounts you do not trust, run `quadratique server strict on`:
-each start of the server then takes an address it never served and a new token, and you run
-`quadratique ui --open` after each restart. `quadratique server strict off` keeps the current address again. `ui` and
-`server status` say `"addressKept": false` while strict is on.
+from the next start of the server, each start takes an address it never served and a new token,
+and you run `quadratique ui --open` after each restart. `quadratique server strict off` goes back
+to the default from the next start, which takes a new address and a new token, so each browser is
+let in once more with `quadratique ui --open`; after that both are kept. Neither command starts a
+server. `server status` and `ui` say `"addressKept": true` only when the running server listens on
+the port its home keeps: not under strict, not with `serve --port`, and not when `server.port`
+could not be written (the log says why). With no server running, `addressKept` says what the next
+start does.
 
 ### Let a browser in
 

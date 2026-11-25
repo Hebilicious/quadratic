@@ -1564,6 +1564,7 @@ mod tests {
             executable: None,
             started: None,
             url: Some(url.to_owned()),
+            address_kept: None,
         };
 
         let runtime =
