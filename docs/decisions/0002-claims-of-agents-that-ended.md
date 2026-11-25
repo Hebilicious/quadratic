@@ -94,7 +94,12 @@ still alive: a claim records no liveness.
    may change its status (`HumanOnly` still applies). `issue.claim` answers `NotReady` for
    its category until someone moves it to an unstarted status, such as `todo`; then any agent
    may claim it. An agent's `issue.close` answers `NotClaimed`. The merge of its branch still
-   moves it to `merge`: the `Refs:` trailer lands an unclaimed issue.
+   moves it to `merge`: the `Refs:` trailer lands an unclaimed issue, and a landing that its
+   bases held back stays held (decision 0001, rule 20). For the branch rule of decision 0001,
+   a freed issue in review keeps the branch of its last claim: work stacked on it is still
+   offered from that branch or a branch on top of it. This costs one history read per such
+   issue at either end of a `stacked-on` link, each time the board loads; a base in review
+   that holds its claim costs none.
 
    The server cannot tell an ended holder from a live one. A live holder whose claim was
    released keeps its branch and its pull request; it reads the note, moves the issue back to

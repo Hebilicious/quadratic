@@ -253,6 +253,33 @@ async fn ready_offers_b_only_from_a_branch_or_a_branch_on_top_of_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn once_another_agent_frees_a_claim_in_review_b_is_still_offered_only_from_a_branch() {
+    let stack = Stack::new().await;
+    stack.close_a().await;
+    let (lead, _) = stack.agent_from("lead", "main").await;
+    stack
+        .board
+        .ok(&lead, "issue.release", json!({ "issue": stack.a }))
+        .await;
+    let (on_top, _) = stack.agent_from("cache", "parse").await;
+    let (unrelated, _) = stack.agent_from("docs", "main").await;
+
+    assert!(stack.board.ready_ids(&on_top, 10).await.contains(&stack.b));
+    assert!(
+        !stack
+            .board
+            .ready_ids(&unrelated, 10)
+            .await
+            .contains(&stack.b)
+    );
+    let claimed = stack
+        .board
+        .ok(&on_top, "issue.claim", json!({ "issue": stack.b }))
+        .await;
+    assert_eq!(claimed["issue"]["status"], "in-progress", "{claimed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn b_can_be_claimed_only_from_a_branch_that_contains_a_branch() {
     let stack = Stack::new().await;
     stack.close_a().await;
