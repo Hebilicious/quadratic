@@ -1,0 +1,11 @@
+# The store engine (doltlite, which carries SQLite) is compiled from C here. By default SQLite
+# counts every allocation under one mutex for the whole process (SQLITE_DEFAULT_MEMSTATUS=1), and
+# Quadratique reads none of those counts. With the counts on, the threads of every store open in
+# a process wait on that mutex at each allocation: the server's test binary, which has about
+# twenty stores open at once, spent twice its user time in the kernel, and its tests that
+# allocate most ran thirty times slower than alone.
+#
+# Cargo reads this file for every build started inside this repository, moon's tasks and the
+# release build included. A crate installed from crates.io is built without it.
+[env]
+CFLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"
