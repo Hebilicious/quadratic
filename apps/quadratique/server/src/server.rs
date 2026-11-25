@@ -859,8 +859,8 @@ pub enum StopAnswer {
     Accepted,
     /// `409`: another generation serves, and nothing was stopped. Its generation, when the answer names one.
     OtherGeneration(Option<String>),
-    /// Any other status: a server that does not serve the stop request.
-    Refused(String),
+    /// Any other status, which it names: a server that does not serve the stop request.
+    Refused { status: String },
     /// The whole request was sent and no answer came back: the server may have accepted the stop and failed to write
     /// its answer, or never read the request. Why.
     Unconfirmed(String),
@@ -911,7 +911,9 @@ pub async fn stop_over_socket(
                 ));
             }
             "409" => StopAnswer::OtherGeneration(named()),
-            other => StopAnswer::Refused(format!("the stop request got status {other}")),
+            other => StopAnswer::Refused {
+                status: other.to_owned(),
+            },
         })
     };
     match tokio::time::timeout(limit, asking).await {

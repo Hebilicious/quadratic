@@ -18,6 +18,10 @@ mod server;
 mod skills;
 mod target;
 
+/// The legacy stop (`background::legacy`) counts the installed binary only in a folder that this rule accepts.
+#[cfg(target_os = "linux")]
+pub use folder::check as check_install_folder;
+
 use std::path::Path;
 use std::process::Stdio;
 
