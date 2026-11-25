@@ -33,6 +33,14 @@ def _number(value) -> str:
     return f"{lo:,.0f}" if lo == hi else f"{lo:,.0f}–{hi:,.0f}"
 
 
+MAINTAINER_COMMIT = "git add -A && git commit (the maintainer commits what the setup wrote)"
+
+
+def setup_steps(run: dict) -> int:
+    """Runs saved before the commit stopped counting list it as their last step."""
+    return sum(step != MAINTAINER_COMMIT for step in run["steps"])
+
+
 class Unmeasured:
     def __repr__(self) -> str:
         return "UNMEASURED"
@@ -195,8 +203,8 @@ def rows(sources: Sources) -> list[Row]:
             "The same pieces, one range per session, without dividing by tasks.",
             lambda run, t: each([spent_by(x) for x in tracker(run)]), second=True, group="agents")
 
-    add("Setup steps", "lower", "Scripted. Commands of the quickstart, plus the maintainer's commit when the setup does not commit.",
-        lambda run, t: [(run["step_count"], str(run["step_count"]))], key="setup")
+    add("Setup steps", "lower", "Scripted. Commands of the quickstart until an agent can create an issue. A commit is not a step: Beads' setup commits by itself, the other two leave it to the person.",
+        lambda run, t: [(n := setup_steps(run), str(n))], key="setup")
     add("Files written into the repository", "lower", "Scripted. git diff --name-status --no-renames from the start commit to the end of setup; the files of one skill folder (.agents/, .claude/ or .codex/skills/<name>/) that include its SKILL.md count as one.",
         lambda run, t: [(n := counted_files(run["files"]), str(n))], key="setup")
     add("Lines added to .git/config", "lower", "Scripted. The repository's .git/config before and after setup.",
