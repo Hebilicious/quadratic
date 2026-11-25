@@ -17,9 +17,11 @@ write_out = args[args.index("--write-out") + 1] if "--write-out" in args else ""
 
 if "index_status" in state:
     status, body = state["index_status"], "Internal Server Error"
+elif "index_body" in state:
+    status, body = 200, state["index_body"]
 elif crate in state["crates"]:
     status = 200
-    body = "\n".join(json.dumps({"name": crate, "vers": version, "deps": [], "cksum": "0" * 64, "features": {},
+    body = "\n".join(json.dumps({"name": crate, "vers": version, "deps": [], "cksum": state.get("cksums", {}).get(f"{crate}@{version}", "0" * 64), "features": {},
                                  "yanked": False}) for version in state["crates"][crate])
 else:
     status, body = 404, "Not Found"
