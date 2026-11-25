@@ -1,5 +1,6 @@
 
 import os
+import shutil
 import signal
 import tempfile
 import threading
@@ -65,6 +66,7 @@ class OwnedProcesses(unittest.TestCase):
                                             timeout=0.05))
         self.assertEqual(processes.group_members(started[0].group), [])
 
+    @unittest.skipUnless(shutil.which("setsid"), "needs the setsid command of util-linux, which macOS lacks")
     def test_a_child_that_left_the_group_and_holds_the_pipe_fails_the_cleanup_at_its_deadline(self):
         with tempfile.TemporaryDirectory() as folder:
             left, pid_file = Path(folder) / "left", Path(folder) / "escaped.pid"
