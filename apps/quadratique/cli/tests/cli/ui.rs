@@ -24,13 +24,19 @@ fn origin(url: &str) -> &str {
 }
 
 fn status_of(url: &str) -> u16 {
+    status_at(url, "/")
+}
+
+fn status_at(url: &str, path: &str) -> u16 {
     let address = origin(url)
         .strip_prefix("http://")
         .expect("an http URL")
         .to_owned();
+    let path = path.to_owned();
     let head = within("a request for the page", async move {
         let mut stream = TcpStream::connect(&address).await.expect("a connection");
-        let request = format!("GET / HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
         stream
             .write_all(request.as_bytes())
             .await
@@ -197,4 +203,98 @@ fn ui_open_reports_an_opener_that_fails_with_its_exit_code() {
 
     assert_ne!(refused.code, 0, "{refused:?}");
     assert!(refused.stderr.contains("exited with code 3"), "{refused:?}");
+}
+
+fn built_app(elsewhere: &Path) -> String {
+    let app = elsewhere.join("dist");
+    std::fs::create_dir(&app).expect("a folder for the built app");
+    std::fs::write(app.join("index.html"), "<title>Quadratique</title>").expect("an index page");
+    app.display().to_string()
+}
+
+#[test]
+fn after_a_restart_ui_gives_the_same_address_and_an_issue_page_opened_before_still_loads() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let ui = || {
+        home.quadratique(elsewhere.path())
+            .env("QUADRATIQUE_WEB", &app)
+            .args(["ui"])
+            .run()
+            .ok()["url"]
+            .as_str()
+            .expect("a URL")
+            .to_owned()
+    };
+    let before = ui();
+    assert_eq!(
+        status_at(&before, "/issues/ABC-1"),
+        200,
+        "the issue page at {before}"
+    );
+
+    home.quadratique(elsewhere.path())
+        .args(["server", "stop"])
+        .run()
+        .ok();
+    let after = ui();
+
+    assert_eq!(after, before);
+    assert_eq!(
+        status_at(&before, "/issues/ABC-1"),
+        200,
+        "the issue page at {before}"
+    );
+}
+
+#[test]
+fn when_the_previous_port_is_taken_ui_opens_the_new_address() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let bin = elsewhere.path().join("bin");
+    std::fs::create_dir(&bin).expect("a folder for the fake opener");
+    let opened = elsewhere.path().join("opened");
+    fake_opener(&bin, &opened);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let before = home
+        .quadratique(elsewhere.path())
+        .env("QUADRATIQUE_WEB", &app)
+        .args(["ui"])
+        .run()
+        .ok()["url"]
+        .as_str()
+        .expect("a URL")
+        .to_owned();
+    home.quadratique(elsewhere.path())
+        .args(["server", "stop"])
+        .run()
+        .ok();
+    let previous = origin(&before)
+        .strip_prefix("http://")
+        .expect("an http URL");
+    let _squatter = std::net::TcpListener::bind(previous).expect("the previous port, now free");
+
+    let reopened = home
+        .quadratique(elsewhere.path())
+        .env("QUADRATIQUE_WEB", &app)
+        .env("PATH", &path)
+        .args(["ui", "--open"])
+        .run()
+        .ok();
+
+    let after = reopened["url"].as_str().expect("a URL").to_owned();
+    assert_ne!(after, before);
+    assert_eq!(reopened, json!({ "url": after, "opened": true }));
+    assert_eq!(await_file(&opened), after);
+    assert_eq!(
+        status_at(&after, "/issues/ABC-1"),
+        200,
+        "the issue page at {after}"
+    );
 }

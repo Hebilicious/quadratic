@@ -489,6 +489,66 @@ async fn a_started_server_admits_its_own_account_and_refuses_a_peer_with_no_conn
     assert_eq!(admitted, (true, false));
 }
 
+fn admits_only_its_owner(running: &server::Server) -> bool {
+    use quadratique_server::serve::Connection;
+
+    let client = std::net::TcpStream::connect(running.address()).expect("a connection");
+    let own = Connection {
+        local: running.address(),
+        peer: client.local_addr().expect("the client's address"),
+    };
+    let unconnected = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let nobody_connected = Connection {
+        local: running.address(),
+        peer: unconnected.local_addr().expect("its address"),
+    };
+    running.admits(own) && !running.admits(nobody_connected)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_server_listens_on_its_previous_address_and_admits_only_its_owner() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let first = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts");
+    let address = first.address();
+    first.shutdown().await;
+
+    let restarted = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts again");
+
+    let again = (restarted.address(), admits_only_its_owner(&restarted));
+    restarted.shutdown().await;
+    assert_eq!(again, (address, true));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_server_whose_previous_port_is_taken_listens_on_another_and_publishes_it() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let first = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts");
+    let address = first.address();
+    first.shutdown().await;
+    let squatter = std::net::TcpListener::bind(address).expect("the previous port, now free");
+
+    let restarted = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts on another port");
+
+    let moved = restarted.address();
+    let published = written_runtime(&paths).await.map(|runtime| runtime.address);
+    let admits = admits_only_its_owner(&restarted);
+    restarted.shutdown().await;
+    drop(squatter);
+    assert_ne!(moved, address);
+    assert_eq!(published, Some(moved));
+    assert!(admits, "the server on the new port admits only its owner");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refusal_beyond_the_draining_bound_closes_the_connection_at_once() {
     use std::io::{Read, Write};

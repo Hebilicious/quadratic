@@ -20,7 +20,7 @@ pub fn all() -> Vec<CliCommand<Context>> {
     vec![
         command(
             "serve",
-            "Run the server in the foreground, until SIGINT or SIGTERM, on a port the system chooses, or on the loopback port that --port <port> names. Other commands start it in the background when it is not running. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
+            "Run the server in the foreground, until SIGINT or SIGTERM, on the loopback port that --port <port> names, or else on the port this home's server had last when it is free, or else on a port the system chooses. Other commands start it in the background when it is not running. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
             |args, io| serve(args, io).boxed(),
         ),
         command(

@@ -30,6 +30,7 @@ pub const IDENTITY: &str = "/server";
 const DATABASE_FILE: &str = "workspace.db";
 const RUNTIME_FILE: &str = "server.json";
 const LOCK_FILE: &str = "server.lock";
+const PORT_FILE: &str = "server.port";
 const DIRECTORY: &str = "quadratique";
 /// How long a server may take to start: a command waits this long for the server it started, and a server waits
 /// this long for a holder of the lock that is not a server to let go.
@@ -88,6 +89,11 @@ impl Paths {
 
     pub fn credentials(&self) -> PathBuf {
         self.database.with_file_name(CREDENTIALS_FILE)
+    }
+
+    /// The port the server of this home listened on last, kept after it stops, unlike the runtime file.
+    pub fn port(&self) -> PathBuf {
+        self.database.with_file_name(PORT_FILE)
     }
 
     pub fn in_home(home: &Path) -> Result<Paths, ServerError> {
@@ -276,7 +282,7 @@ pub async fn start_with(
         web::OriginHeader::OwnOnly,
     ));
     let admit = callers::owner_only(own_account);
-    let served = match serve::serve(address, routes, Arc::clone(&admit)).await {
+    let served = match serve_on_previous_port(paths, address, routes, Arc::clone(&admit)).await {
         Ok(served) => served,
         Err(error) => {
             watcher.stop().await;
@@ -290,7 +296,9 @@ pub async fn start_with(
         url: format!("{}{BASE}", served.url()),
         database,
     };
-    if let Err(error) = write_runtime(&paths.runtime, &runtime) {
+    let written = write_port(&paths.port(), served.address.port())
+        .and_then(|()| write_runtime(&paths.runtime, &runtime));
+    if let Err(error) = written {
         watcher.stop().await;
         served.close().await;
         return Err(error.into());
@@ -459,6 +467,33 @@ async fn ask_identity(address: SocketAddr) -> Result<Identity, Unanswered> {
         Some("403") if body == OWNER_ONLY => Err(Unanswered::OwnerOnly),
         _ => Err(Unanswered::NoIdentity),
     }
+}
+
+/// A server asked for any port listens on the port this home's server had last, when it is free, so that the web app
+/// keeps its address across restarts; otherwise on the port the system chooses.
+async fn serve_on_previous_port(
+    paths: &Paths,
+    address: SocketAddr,
+    routes: remote::Routes,
+    admit: Admit,
+) -> std::io::Result<serve::Served> {
+    let previous = std::fs::read_to_string(paths.port())
+        .ok()
+        .and_then(|text| text.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0);
+    if let (0, Some(port)) = (address.port(), previous) {
+        let again = SocketAddr::new(address.ip(), port);
+        if let Ok(served) = serve::serve(again, routes.clone(), Arc::clone(&admit)).await {
+            return Ok(served);
+        }
+    }
+    serve::serve(address, routes, admit).await
+}
+
+fn write_port(path: &Path, port: u16) -> std::io::Result<()> {
+    let partial = path.with_extension(format!("port.{}", std::process::id()));
+    std::fs::write(&partial, format!("{port}\n"))?;
+    std::fs::rename(&partial, path)
 }
 
 fn write_runtime(path: &Path, runtime: &RuntimeFile) -> std::io::Result<()> {

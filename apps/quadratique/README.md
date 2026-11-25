@@ -75,7 +75,12 @@ quadratique server status
 quadratique ui --open
 ```
 
-The port changes each time the server starts. `quadratique ui` prints the current address.
+The web app is at `http://127.0.0.1:<port>/`. The system chooses the port the first time the
+server starts, and the server keeps it in `server.port` in its data folder. Each later start
+asks for the same port again, so open tabs and bookmarks keep working after a restart or an
+upgrade. When another program holds that port, the server starts on a new port and keeps that
+one instead. `quadratique ui` prints the current address. `quadratique serve --port <port>`
+starts the server on the port you give.
 
 ## Install from a release
 
