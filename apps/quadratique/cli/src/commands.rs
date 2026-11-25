@@ -11,7 +11,7 @@ use quadratique_server::domain::Binding;
 use quadratique_server::server::{self, Paths, ServerError};
 use serde_json::{Value, json};
 
-use crate::background::{self, Attempt, Found, Home, Stopped};
+use crate::background::{self, Found, Home, Stopped};
 use crate::{caller, mcp};
 
 const OUTPUT_FLAG: &str = "--json";
@@ -136,17 +136,20 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
         home.prepared().database().display()
     ));
     let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-    let taken = if take_over {
-        match background::take_over(&home).await {
-            Ok(taken) => Some(taken),
-            Err(error) => return report(io, Kind::Unavailable, error.to_string()),
-        }
-    } else {
-        None
-    };
     let started = match std::env::var(background::STARTED_VARIABLE) {
         Ok(value) if value == background::ON_DEMAND => server::Started::OnDemand,
         _ => server::Started::Serve,
+    };
+    // Every start holds `start.lock` until its server is ready. A server started on demand runs while the command
+    // that spawned it holds the lock for it.
+    let reserved = match (take_over, started) {
+        (true, _) => background::take_over(&home).await.map(Some),
+        (false, server::Started::Serve) => background::reserve_start(&home).await.map(Some),
+        (false, server::Started::OnDemand) => Ok(None),
+    };
+    let taken = match reserved {
+        Ok(taken) => taken,
+        Err(error) => return report(io, Kind::Unavailable, error.to_string()),
     };
     match server::start_by(home.prepared(), address, started).await {
         Ok(server) => {
@@ -190,22 +193,21 @@ fn located(home: &Home, mut value: Value) -> Value {
     value
 }
 
-/// One answer for each state of the record's table (§2). The socket decides, except when it is confirmed absent or
-/// refusing: then the home's lock tells a stopped home from one whose server is starting or stopping, or is of a build
-/// before the socket, which the runtime file and TCP still find.
+/// One answer for each state of the record's table (§2), from the same observation that `ensure`, `stop` and
+/// `serve --take-over` act on. Only a server of a build before the socket is asked over TCP.
 #[cfg(unix)]
 async fn status(home: &Home) -> Result<Value, background::LifeError> {
-    use background::OnSocket;
+    use background::Observed;
 
     let database = home.prepared().database();
-    let value = match background::on_socket(home).await {
-        OnSocket::Serving(identity) => answered_over_socket(&identity),
-        OnSocket::OtherDatabase(identity) => json!({
+    let value = match background::observe(home).await? {
+        Observed::Serving { identity, .. } => answered_over_socket(&identity),
+        Observed::OtherDatabase(identity) => json!({
             "otherDatabase": identity.database,
             "pid": identity.pid,
             "database": database,
         }),
-        OnSocket::Newer(identity) => json!({
+        Observed::Newer(identity) => json!({
             "newer": true,
             "control": identity.control,
             "pid": identity.pid,
@@ -216,12 +218,12 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
             ),
             "database": database,
         }),
-        OnSocket::Malformed(why) => json!({
+        Observed::Malformed(why) => json!({
             "malformed": true,
             "reason": format!("the server's identity on {} is not valid: {why}", home.prepared().socket().display()),
             "database": database,
         }),
-        OnSocket::Stalled => json!({
+        Observed::Stalled => json!({
             "stalled": true,
             "reason": format!(
                 "the server on {} accepted a connection and gave no full answer within {:?}",
@@ -230,62 +232,45 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
             ),
             "database": database,
         }),
-        OnSocket::Denied(reason) | OnSocket::PathError(reason) => unreachable(home, reason),
-        OnSocket::NotReady(why) => match held(home)? {
-            Held::Yes => {
-                json!({ "running": false, "starting": true, "reason": why, "database": database })
+        Observed::Unreachable(reason) => unreachable(home, reason),
+        Observed::Starting { reason } => {
+            let mut value = json!({ "running": false, "starting": true, "database": database });
+            if let Some(reason) = reason {
+                value["reason"] = json!(reason);
             }
-            Held::No => json!({ "running": false, "database": database }),
-            Held::Unreachable(reason) => unreachable(home, reason),
-        },
-        OnSocket::Absent => match held(home)? {
-            Held::No => json!({ "running": false, "database": database }),
-            Held::Unreachable(reason) => unreachable(home, reason),
-            Held::Yes => match background::find(home).await? {
-                Found::Ours(runtime) => json!({
-                    "running": true,
-                    "legacy": true,
-                    "sameInterface": true,
-                    "pid": runtime.pid,
-                    "url": runtime.url,
-                    "database": runtime.database,
-                }),
-                Found::OtherInterface { runtime, theirs } => json!({
-                    "running": true,
-                    "legacy": true,
-                    "sameInterface": false,
-                    "interface": theirs.named(),
-                    "pid": runtime.pid,
-                    "url": runtime.url,
-                    "database": runtime.database,
-                }),
-                Found::Refused { reason } => unreachable(home, reason),
-                Found::Nobody => {
-                    json!({ "running": false, "starting": true, "database": database })
-                }
-            },
-        },
+            value
+        }
+        Observed::Free => json!({ "running": false, "database": database }),
+        Observed::Legacy => legacy_status(home).await?,
     };
     Ok(located(home, value))
 }
 
+/// A server of a build before the socket, which its runtime file and TCP still find (QUA-55 replaces this).
 #[cfg(unix)]
-enum Held {
-    Yes,
-    No,
-    Unreachable(String),
-}
-
-#[cfg(unix)]
-fn held(home: &Home) -> Result<Held, background::LifeError> {
-    match home.held() {
-        Ok(true) => Ok(Held::Yes),
-        Ok(false) => Ok(Held::No),
-        Err(error) => match home.unusable(error, Attempt::Start) {
-            background::LifeError::Unreachable { reason } => Ok(Held::Unreachable(reason)),
-            other => Err(other),
-        },
-    }
+async fn legacy_status(home: &Home) -> Result<Value, background::LifeError> {
+    let database = home.prepared().database();
+    Ok(match background::find(home).await? {
+        Found::Ours(runtime) => json!({
+            "running": true,
+            "legacy": true,
+            "sameInterface": true,
+            "pid": runtime.pid,
+            "url": runtime.url,
+            "database": runtime.database,
+        }),
+        Found::OtherInterface { runtime, theirs } => json!({
+            "running": true,
+            "legacy": true,
+            "sameInterface": false,
+            "interface": theirs.named(),
+            "pid": runtime.pid,
+            "url": runtime.url,
+            "database": runtime.database,
+        }),
+        Found::Refused { reason } => unreachable(home, reason),
+        Found::Nobody => json!({ "running": false, "starting": true, "database": database }),
+    })
 }
 
 /// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
@@ -311,7 +296,7 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
         Found::Refused { reason } => match home.held() {
             Ok(true) => unreachable(home, reason),
             Ok(false) => json!({ "running": false, "database": database }),
-            Err(error) => match home.unusable(error, Attempt::Start) {
+            Err(error) => match home.unusable(error, background::Attempt::Start) {
                 background::LifeError::Unreachable { reason } => unreachable(home, reason),
                 other => return Err(other),
             },
@@ -350,9 +335,13 @@ fn unreachable(home: &Home, reason: String) -> Value {
 
 async fn stop(home: &Home) -> Result<Value, background::LifeError> {
     let value = match background::stop(home).await? {
-        Stopped::Ended { pid } => json!({ "stopped": true, "pid": pid }),
+        Stopped::Ended { pid, generation } => {
+            json!({ "stopped": true, "pid": pid, "generation": generation })
+        }
         Stopped::NotRunning => json!({ "stopped": false }),
-        Stopped::Closing { pid } => json!({ "stopped": false, "stopping": true, "pid": pid }),
+        Stopped::Closing { pid, generation } => {
+            json!({ "stopped": false, "stopping": true, "pid": pid, "generation": generation })
+        }
     };
     Ok(located(home, value))
 }

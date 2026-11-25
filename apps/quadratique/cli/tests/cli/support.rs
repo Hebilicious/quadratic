@@ -422,3 +422,114 @@ pub fn await_until(what: &str, mut condition: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// What processes do in a home, as inotify reports it: a file opened, or renamed into place. A test waits on it for
+/// the step it needs, such as a command that has looked at the home's lock, or a server that has published its
+/// runtime file, instead of sleeping.
+pub struct Watch {
+    inotify: rustix::fd::OwnedFd,
+    buffer: Vec<std::mem::MaybeUninit<u8>>,
+    seen: std::collections::VecDeque<(Step<'static>, Vec<u8>)>,
+}
+
+/// A step that a [`Watch`] waits for. The name in `seen` is kept apart; here it is only the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step<'a> {
+    /// A process opened the file.
+    Opened(&'a str),
+    /// A process renamed a file into place under this name, as a server publishes its runtime file.
+    Published(&'a str),
+}
+
+impl<'a> Step<'a> {
+    fn parts(self) -> (Step<'static>, &'a str) {
+        match self {
+            Step::Opened(name) => (Step::Opened(""), name),
+            Step::Published(name) => (Step::Published(""), name),
+        }
+    }
+}
+
+impl Watch {
+    pub fn of(home: &Home) -> Watch {
+        use rustix::fs::inotify;
+
+        let inotify = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
+            .expect("an inotify instance");
+        inotify::add_watch(
+            &inotify,
+            home.path(),
+            inotify::WatchFlags::OPEN | inotify::WatchFlags::MOVED_TO,
+        )
+        .expect("a watch on the home");
+        Watch {
+            inotify,
+            buffer: vec![std::mem::MaybeUninit::uninit(); 64 * 1024],
+            seen: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Forgets every step seen so far, so that the next wait counts only what happens from now on.
+    pub fn clear(&mut self) {
+        use rustix::fs::inotify::Reader;
+
+        let mut reader = Reader::new(&self.inotify, &mut self.buffer);
+        loop {
+            match reader.next() {
+                Ok(_) => {}
+                Err(Errno::AGAIN) => break,
+                Err(error) => panic!("reading the watch fails: {error}"),
+            }
+        }
+        self.seen.clear();
+    }
+
+    /// Returns once each of `steps` has happened, in that order, after this watch was made or after the last step an
+    /// earlier call waited for.
+    pub fn await_steps(&mut self, steps: &[Step]) {
+        let deadline = Instant::now() + HANG_GUARD;
+        for step in steps {
+            let (kind, name) = step.parts();
+            loop {
+                match self.seen.pop_front() {
+                    Some((seen, file)) if seen == kind && file == name.as_bytes() => break,
+                    Some(_) => {}
+                    None => self.read_within(deadline, name),
+                }
+            }
+        }
+    }
+
+    fn read_within(&mut self, deadline: Instant, name: &str) {
+        use rustix::fs::inotify::ReadFlags;
+        use rustix::fs::inotify::Reader;
+
+        let mut reader = Reader::new(&self.inotify, &mut self.buffer);
+        loop {
+            match reader.next() {
+                Ok(event) => {
+                    let kind = if event.events().contains(ReadFlags::MOVED_TO) {
+                        Step::Published("")
+                    } else {
+                        Step::Opened("")
+                    };
+                    if let Some(file) = event.file_name() {
+                        self.seen.push_back((kind, file.to_bytes().to_vec()));
+                    }
+                }
+                Err(Errno::AGAIN) if !self.seen.is_empty() => return,
+                Err(Errno::AGAIN) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    let guard = Timespec {
+                        tv_sec: left.as_secs().try_into().expect("seconds"),
+                        tv_nsec: left.subsec_nanos().into(),
+                    };
+                    let mut watched = [PollFd::new(&self.inotify, PollFlags::IN)];
+                    let ready = poll(&mut watched, Some(&guard)).expect("poll on the watch");
+                    assert_eq!(ready, 1, "{name} was not opened within the hang guard");
+                }
+                Err(error) => panic!("reading the watch fails: {error}"),
+            }
+        }
+    }
+}
