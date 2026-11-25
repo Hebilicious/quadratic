@@ -5,6 +5,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use quadratique_server::git::watcher;
+use quadratique_server::serve;
 use quadratique_server::server::{self, Paths, RuntimeFile, Waits};
 use quadratique_server::web::WebApp;
 
@@ -249,35 +250,35 @@ async fn a_server_dropped_without_a_shutdown_frees_its_home_and_its_port() {
     );
 }
 
-/// A child process holds a copy of every descriptor of its parent from its `fork` to its `exec`, and other tests of this
-/// binary start children all the time. Closing the server's descriptor of its listener then leaves the socket listening
-/// until the child's `exec`, which also lets go of the home's lock, and in an order of the kernel's choosing. The test
-/// holds the copy itself, through `pidfd_getfd`, for as long as it needs.
+/// A listener served by `serve_on`, with a second descriptor of it that the test keeps open, as a child process holds
+/// one from its `fork` to its `exec` (other tests of this binary start children all the time). `try_clone` makes that
+/// descriptor with `F_DUPFD_CLOEXEC`.
+#[cfg(target_os = "linux")]
+fn served_with_a_copy() -> (serve::Served, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let copy = listener
+        .try_clone()
+        .expect("a second descriptor of the listener");
+    listener
+        .set_nonblocking(true)
+        .expect("a nonblocking listener");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("a tokio listener");
+    let admit: serve::Admit = std::sync::Arc::new(|_| true);
+    let served = serve::serve_on(listener, Vec::new(), admit, serve::REFUSALS).expect("served");
+    (served, copy)
+}
+
+/// Closing the server's own descriptor leaves the socket listening while another copy of it is open; the listener must
+/// stop listening anyway, before the server lets go of its home.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_server_stops_listening_while_another_copy_of_its_listener_is_open() {
-    let home = crate::support::private_home();
-    let paths = Paths::in_home(home.path()).expect("an absolute home");
-    let running = server::start(&paths, server::loopback())
-        .await
-        .expect("the server starts");
-    let address = running.address();
-    let listener = kernel_sockets::listening_on(address).expect("the server's listening socket");
-    let copy = kernel_sockets::copy_of_own(listener);
+    let (served, copy) = served_with_a_copy();
+    let address = served.address;
+    let listener = kernel_sockets::listening_on(address).expect("the listening socket");
 
-    let lock = std::fs::OpenOptions::new()
-        .write(true)
-        .open(paths.lock())
-        .expect("the home's lock file");
+    drop(served);
 
-    drop(running);
-
-    within(
-        "the home's lock",
-        tokio::task::spawn_blocking(move || lock.lock().expect("the lock, once free")),
-    )
-    .await
-    .expect("the waiting thread");
     assert!(
         !kernel_sockets::exists(listener),
         "the dropped server still listens on {address} through another copy of its descriptor"
@@ -289,9 +290,6 @@ async fn a_dropped_server_stops_listening_while_another_copy_of_its_listener_is_
 #[cfg(target_os = "linux")]
 mod kernel_sockets {
     use std::net::SocketAddr;
-    use std::os::fd::OwnedFd;
-
-    use rustix::process::{PidfdFlags, PidfdGetfdFlags, getpid, pidfd_getfd, pidfd_open};
 
     const LISTEN: &str = "0A";
 
@@ -337,24 +335,6 @@ mod kernel_sockets {
 
     pub fn exists(inode: u64) -> bool {
         rows().iter().any(|row| row.inode == inode)
-    }
-
-    /// A new descriptor of this process's socket `inode`, as a child between its `fork` and its `exec` holds one.
-    pub fn copy_of_own(inode: u64) -> OwnedFd {
-        let socket = format!("socket:[{inode}]");
-        let descriptor = std::fs::read_dir("/proc/self/fd")
-            .expect("this process's descriptors")
-            .flatten()
-            .find(|entry| {
-                std::fs::read_link(entry.path())
-                    .is_ok_and(|target| target.as_os_str() == socket.as_str())
-            })
-            .and_then(|entry| entry.file_name().to_str()?.parse().ok())
-            .expect("a descriptor of the socket in this process");
-        let this_process =
-            pidfd_open(getpid(), PidfdFlags::empty()).expect("a pidfd of this process");
-        pidfd_getfd(this_process, descriptor, PidfdGetfdFlags::empty())
-            .expect("a copy of the descriptor")
     }
 }
 

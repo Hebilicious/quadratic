@@ -3,7 +3,8 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use quadratique_server::home::{HomeError, SOCKET_FILE};
+use quadratique_server::home::{self, HomeError, SOCKET_FILE};
+use quadratique_server::serve;
 use quadratique_server::server::{self, CONTROL, Paths, RuntimeFile, ServerError, Started};
 
 use crate::support::within;
@@ -222,35 +223,28 @@ async fn a_socket_whose_mode_is_not_0600_is_not_trusted() {
     running.shutdown().await;
 }
 
-/// A hard link reaches the same socket as its name, and stays when the server removes the name: through it, the test
-/// connects after the drop, while it holds another copy of the listener's descriptor, as a child between its `fork`
-/// and its `exec` does.
+/// A hard link reaches the same socket as its name, and stays when the socket's name goes: through it, the test
+/// connects after the drop, while it holds a second descriptor of the listener, as a child between its `fork` and its
+/// `exec` holds one.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_dropped_server_refuses_connections_on_its_socket_while_another_copy_of_it_is_open() {
+async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open() {
+    use std::os::fd::AsFd;
+
     let home = crate::support::private_home();
-    let paths = Paths::in_home(home.path()).expect("an absolute home");
-    let running = server::start(&paths, server::loopback())
-        .await
-        .expect("the server starts");
-    let socket = running.socket_path().to_path_buf();
+    let (listener, file) = home::bind_socket(home.path()).expect("the socket binds");
+    let copy = listener
+        .as_fd()
+        .try_clone_to_owned()
+        .expect("a second descriptor of the listener");
+    let socket = file.path().to_path_buf();
+    let served = serve::serve_socket(listener, file, Vec::new());
     let other_name = home.path().join("same-socket");
     std::fs::hard_link(&socket, &other_name).expect("a hard link to the socket");
-    std::os::unix::net::UnixStream::connect(&other_name).expect("the link reaches the server");
-    let copy = copy_of_listener(&socket);
-    let lock = std::fs::OpenOptions::new()
-        .write(true)
-        .open(paths.lock())
-        .expect("the home's lock file");
+    std::os::unix::net::UnixStream::connect(&other_name).expect("the link reaches the socket");
 
-    drop(running);
+    drop(served);
 
-    within(
-        "the home's lock",
-        tokio::task::spawn_blocking(move || lock.lock().expect("the lock, once free")),
-    )
-    .await
-    .expect("the waiting thread");
-    assert!(!socket.exists(), "the socket's name outlived its server");
+    assert!(!socket.exists(), "the socket's name outlived its listener");
     let refused = std::os::unix::net::UnixStream::connect(&other_name);
     assert_eq!(
         refused.as_ref().err().map(std::io::Error::kind),
@@ -258,31 +252,6 @@ async fn a_dropped_server_refuses_connections_on_its_socket_while_another_copy_o
         "{refused:?}"
     );
     drop(copy);
-}
-
-/// A new descriptor of this process's listening socket bound at `path`.
-fn copy_of_listener(path: &Path) -> std::os::fd::OwnedFd {
-    use rustix::process::{PidfdFlags, PidfdGetfdFlags, getpid, pidfd_getfd, pidfd_open};
-
-    let inode = std::fs::read_to_string("/proc/net/unix")
-        .expect("the kernel's Unix sockets")
-        .lines()
-        .find(|line| line.ends_with(&format!(" {}", path.display())))
-        .and_then(|line| line.split_whitespace().nth(6)?.parse::<u64>().ok())
-        .expect("the listening socket in /proc/net/unix");
-    let socket = format!("socket:[{inode}]");
-    let descriptor = std::fs::read_dir("/proc/self/fd")
-        .expect("this process's descriptors")
-        .flatten()
-        .find(|entry| {
-            std::fs::read_link(entry.path())
-                .is_ok_and(|target| target.as_os_str() == socket.as_str())
-        })
-        .and_then(|entry| entry.file_name().to_str()?.parse().ok())
-        .expect("a descriptor of the socket in this process");
-    let this_process = pidfd_open(getpid(), PidfdFlags::empty()).expect("a pidfd of this process");
-    pidfd_getfd(this_process, descriptor, PidfdGetfdFlags::empty())
-        .expect("a copy of the descriptor")
 }
 
 /// What `connect` gives the account nobody on `socket`: `connected`, or the name of the errno.

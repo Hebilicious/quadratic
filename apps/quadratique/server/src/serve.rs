@@ -66,19 +66,27 @@ impl Served {
 impl Drop for Served {
     fn drop(&mut self) {
         self.stop.cancel();
-        stop_listening(&*self.listener);
+        if let Err(error) = stop_listening(&*self.listener) {
+            eprintln!(
+                "quadratique server: could not stop listening on {}: {error}; a child process may keep the port until it starts its program",
+                self.address
+            );
+        }
     }
 }
 
 /// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it: a TCP socket
-/// stops listening, and a Unix socket refuses every later `connect`.
+/// stops listening, and a Unix socket refuses every later `connect`. A sandbox or a policy may refuse the call: the
+/// error then goes to the server's log.
 #[cfg(target_os = "linux")]
-fn stop_listening(listener: impl std::os::fd::AsFd) {
-    let _ = rustix::net::shutdown(listener, rustix::net::Shutdown::Both);
+fn stop_listening(listener: impl std::os::fd::AsFd) -> std::io::Result<()> {
+    rustix::net::shutdown(listener, rustix::net::Shutdown::Both).map_err(std::io::Error::from)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn stop_listening<L>(_listener: L) {}
+fn stop_listening<L>(_listener: L) -> std::io::Result<()> {
+    Ok(())
+}
 
 pub async fn serve(address: SocketAddr, routes: Routes, admit: Admit) -> std::io::Result<Served> {
     serve_with(address, routes, admit, REFUSALS).await
@@ -90,7 +98,18 @@ pub async fn serve_with(
     admit: Admit,
     refusals: Refusals,
 ) -> std::io::Result<Served> {
-    let listener = Arc::new(TcpListener::bind(address).await?);
+    serve_on(TcpListener::bind(address).await?, routes, admit, refusals)
+}
+
+/// Serves on a listener bound beforehand. From here the listener belongs to the returned `Served`, which stops it
+/// listening when it is dropped.
+pub fn serve_on(
+    listener: TcpListener,
+    routes: Routes,
+    admit: Admit,
+    refusals: Refusals,
+) -> std::io::Result<Served> {
+    let listener = Arc::new(listener);
     let address = listener.local_addr()?;
     let mut routes = routes;
     routes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
@@ -159,7 +178,12 @@ impl ServedSocket {
 impl Drop for ServedSocket {
     fn drop(&mut self) {
         self.stop.cancel();
-        stop_listening(&*self.listener);
+        if let Err(error) = stop_listening(&*self.listener) {
+            eprintln!(
+                "quadratique server: could not stop listening on {}: {error}; a child process may connect to it until it starts its program",
+                self.file.path().display()
+            );
+        }
     }
 }
 
