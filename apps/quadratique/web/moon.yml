@@ -82,6 +82,7 @@ tasks:
         "@group(e2e)",
         "dist/**/*",
         "/apps/quadratique/target/debug/quadratique",
+        "/apps/quadratique/target/debug/quadratique.exe",
         "/apps/quadratique/server/tests/fixtures/findings/site.json",
       ]
     tags: ["candidate"]
