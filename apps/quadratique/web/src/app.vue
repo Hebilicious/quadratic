@@ -40,6 +40,7 @@ const { board, keys, commands, savedViews, router } = useWorkspace();
 const snapshot = useSnapshot(board);
 const savedSnapshot = useSnapshot(savedViews);
 const views = computed(() => savedSnapshot.value.context.views);
+const importReport = computed(() => savedSnapshot.value.context.report);
 const keysSnapshot = useSnapshot(keys);
 const connectionActor = board.getSnapshot().children.connection;
 if (connectionActor === undefined) {
@@ -398,6 +399,26 @@ const phaseLabel = {
           @follow="follow"
         />
       </template>
+      <section
+        v-if="importReport.shortened.length > 0 ||
+          importReport.kept.length > 0 ||
+          importReport.interrupted"
+        class="nav-note"
+        role="status"
+        aria-label="Views from this browser"
+      >
+        <p v-for="each in importReport.shortened" :key="`cut:${each.from}`">
+          The view {{ each.from }} from this browser is saved as {{ each.to }}: a name has at most
+          100 characters.
+        </p>
+        <p v-for="each in importReport.kept" :key="`kept:${each.name}`">
+          The view {{ each.name }} stays in this browser, not imported: {{ each.reason }}.
+        </p>
+        <p v-if="importReport.interrupted">
+          The views of this browser are not all imported yet: the server did not answer. The next
+          page goes on.
+        </p>
+      </section>
       <div class="sidebar-foot">
         <button
           class="ghost-button"

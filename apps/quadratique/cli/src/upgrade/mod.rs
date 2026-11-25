@@ -41,7 +41,7 @@ const REPORT_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
 /// The first release that opened each store schema, oldest first. A build that adds a migration
 /// adds its row with the version it will be released as; a test fails until the build's schema
 /// is here.
-const SCHEMA_RELEASES: &[(i64, &str)] = &[(1, "0.1.0")];
+const SCHEMA_RELEASES: &[(i64, &str)] = &[(1, "0.1.0"), (2, "0.2.0")];
 
 /// The file at the binary's path: device, inode, size and modification time.
 type Identity = (u64, u64, u64, Option<std::time::SystemTime>);

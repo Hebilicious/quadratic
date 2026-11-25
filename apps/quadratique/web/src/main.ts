@@ -99,31 +99,31 @@ const keys = createActor(
     },
   }),
 );
-const SAVED_VIEWS = "quadratique.saved-views";
+/** Where the browser kept saved views before the server kept them; read to import them, then removed. */
+const LEGACY_SAVED_VIEWS = "quadratique.saved-views";
 const savedViews = createActor(
   savedViewsMachine({
-    read: () => {
-      try {
-        // BOUNDARY: what this browser stored; the store decodes it.
-        return JSON.parse(localStorage.getItem(SAVED_VIEWS) ?? "null");
-      } catch {
-        return null;
-      }
+    ...quadratique.views,
+    legacy: {
+      read: () => {
+        try {
+          return localStorage.getItem(LEGACY_SAVED_VIEWS);
+        } catch {
+          return null;
+        }
+      },
+      write: (value) => {
+        localStorage.setItem(LEGACY_SAVED_VIEWS, value);
+      },
+      removeIf: (value) => {
+        if (localStorage.getItem(LEGACY_SAVED_VIEWS) === value) {
+          localStorage.removeItem(LEGACY_SAVED_VIEWS);
+        }
+      },
     },
-    write: (stored) => {
-      localStorage.setItem(SAVED_VIEWS, JSON.stringify(stored));
-    },
+    newSource: () => crypto.randomUUID(),
   }),
 );
-window.addEventListener("storage", (event) => {
-  if (event.key === SAVED_VIEWS) {
-    try {
-      savedViews.send({ type: "loaded", stored: JSON.parse(event.newValue ?? "null") });
-    } catch {
-      savedViews.send({ type: "loaded", stored: null });
-    }
-  }
-});
 
 board.start();
 commands.start();

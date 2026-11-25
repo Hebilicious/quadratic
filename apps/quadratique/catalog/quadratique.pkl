@@ -529,6 +529,55 @@ types {
     }
     required { "key"; "name"; "workflow" }
   }
+  ["SavedViewId"] {
+    type = "string"
+    maxLength = 20
+    pattern = "^v[1-9][0-9]{0,8}$"
+    description = "A saved view, such as `v3`. The server gives the id; it never changes and no other view of the data folder ever has it."
+  }
+  ["SavedViewName"] {
+    type = "string"
+    minLength = 1
+    maxLength = 100
+    pattern = #"\S"#
+    description = "The name of a saved view. The server keeps it without its leading and trailing spaces. Two views never have names that are the same once trimmed and lowercased."
+  }
+  ["SavedViewFilter"] {
+    type = "string"
+    maxLength = 8192
+    description = "The filters of a saved view, as the query of the web app's address that shows them, such as `label=web&ready=true`. Empty for no filter. The server keeps it as it is given. The limit is about twice the longest query the web app's filters can make (4,265 characters: every list at its cap and a search of 200 four-byte characters, percent-encoded)."
+  }
+  ["SavedView"] {
+    type = "object"
+    description = "A named filter of the web app. It belongs to the data folder, and so to the human."
+    properties {
+      id = module.ref("SavedViewId")
+      name = module.ref("SavedViewName")
+      project {
+        ["$ref"] = "#/$defs/ProjectKey"
+        description = "The project whose issues the view shows. Absent: every project."
+      }
+      filter = module.ref("SavedViewFilter")
+    }
+    required { "id"; "name"; "filter" }
+  }
+  ["SavedViewRevision"] {
+    type = "integer"
+    minimum = 0
+    description = "The revision of the list of saved views. It grows with each database commit that changes the list and never goes back: of two lists, the one with the higher revision is newer."
+  }
+  ["SavedViews"] {
+    type = "object"
+    description = "Every saved view, in the order the web app shows them, under `items`, at most 100: every write and every `view.changed` carries the whole list, and 100 views of the longest filter stay under 1 MiB."
+    properties {
+      revision = module.ref("SavedViewRevision")
+      items = array(module.ref("SavedView"), 100, null)
+    }
+    required { "revision"; "items" }
+  }
+  ["TooManyViews"] = failure("TooManyViews", new Dynamic {
+    most { type = "integer"; ["const"] = 100 }
+  }, new Listing { "most" })
   ["IssueAnswer"] {
     type = "object"
     description = "The answer about one issue: the issue, with its body, relations and children, under `issue`."
@@ -551,7 +600,7 @@ types {
   }
 
   ["NotFound"] = failure("NotFound", new Dynamic {
-    kind { type = "string"; enum { "issue"; "project" } }
+    kind { type = "string"; enum { "issue"; "project"; "view" } }
     id = string(64, null)
   }, new Listing { "kind"; "id" })
   ["NoProject"] = failure("NoProject", new Dynamic {}, new Listing {})
@@ -582,6 +631,7 @@ types {
     project = module.ref("ProjectKey")
   }, new Listing { "project" })
   ["BadCursor"] = failure("BadCursor", new Dynamic {}, new Listing {})
+  ["NameTaken"] = failure("NameTaken", new Dynamic { view = module.ref("SavedViewId") }, new Listing { "view" })
 }
 
 local tokenLabel = token(32, "The name of the agent that the token stands for: lowercase letters, digits and single hyphens, as a role. Unique among the tokens, and never the name of one of the server's own actors (`quadratique`, `agent`, `browser`, `human`), else `LabelTaken`.")
@@ -1137,6 +1187,115 @@ capabilities {
     readOnly = true
   }
 
+  ["view.list"] {
+    description = "List the saved views of the web app, in their order, with the list's revision. Changes nothing."
+    audience { "web" }
+    output = module.ref("SavedViews")
+    readOnly = true
+  }
+
+  ["view.save"] {
+    description = "Save the filters of a page of the web app under a name. Without `replace`, a new view comes last: `NameTaken` when a view has the name (trimmed, in any case), `TooManyViews` when 100 views exist. With `replace`, that view takes the project and filters and keeps its id, name and place: `NotFound` when no view has the id, `Renamed` when its name is no longer `name` (another page renamed it). Both checks are made in the write's transaction, so a page that saw an older list never changes a view it did not mean. Answers every saved view. One database commit by the caller when something changed, and no change to any issue or project."
+    audience { "web" }
+    input {
+      type = "object"
+      title = "ViewSaveInput"
+      additionalProperties = false
+      properties {
+        name = module.ref("SavedViewName")
+        project = module.ref("ProjectKey")
+        filter = module.ref("SavedViewFilter")
+        replace {
+          ["$ref"] = "#/$defs/SavedViewId"
+          description = "The view whose filters the page replaces: the view it showed under `name`."
+        }
+      }
+      required { "name"; "filter" }
+    }
+    output = module.ref("SavedViews")
+    failures {
+      ["NotFound"] = module.ref("NotFound")
+      ["NameTaken"] = module.ref("NameTaken")
+      ["Renamed"] = failure("Renamed", new Dynamic {
+        view = module.ref("SavedViewId")
+        name = module.ref("SavedViewName")
+      }, new Listing { "view"; "name" })
+      ["TooManyViews"] = module.ref("TooManyViews")
+    }
+  }
+
+  ["view.rename"] {
+    description = "Rename a saved view. `NotFound` when no view has the id, for example after another page deleted it; else `NameTaken` when another view has the name (trimmed, in any case). Answers every saved view. One database commit by the caller when something changed."
+    audience { "web" }
+    input {
+      type = "object"
+      title = "ViewRenameInput"
+      additionalProperties = false
+      properties {
+        view = module.ref("SavedViewId")
+        name = module.ref("SavedViewName")
+      }
+      required { "view"; "name" }
+    }
+    output = module.ref("SavedViews")
+    failures {
+      ["NotFound"] = module.ref("NotFound")
+      ["NameTaken"] = module.ref("NameTaken")
+    }
+  }
+
+  ["view.delete"] {
+    description = "Delete a saved view. A view that no longer exists is no failure. Answers every saved view. One database commit by the caller when something changed."
+    audience { "web" }
+    input {
+      type = "object"
+      title = "ViewDeleteInput"
+      additionalProperties = false
+      properties { view = module.ref("SavedViewId") }
+      required { "view" }
+    }
+    output = module.ref("SavedViews")
+  }
+
+  ["views.import"] {
+    description = "Add views that a browser kept before the server kept them, in their order, after the saved views, in one database commit. The browser names itself with `source`, and each old view by its own id `old`. The server keeps a receipt per imported old view: an old view with a receipt is skipped, so a repeated or resumed import adds each old view once, and two old views never become one. A view whose name is taken comes in as `<name> (imported)`, or `<name> (imported 2)` and so on. Old views that would make more than 100 views are not imported and are listed under `full`. Send at most 100 views per call; a browser with more sends several calls. Answers every saved view."
+    audience { "web" }
+    input {
+      type = "object"
+      title = "ViewsImportInput"
+      additionalProperties = false
+      properties {
+        source {
+          type = "string"
+          pattern = "^[A-Za-z0-9_-]{8,64}$"
+          description = "An id of the browser's old views that the page made once and keeps with them."
+        }
+        views = array(new Dynamic {
+          type = "object"
+          additionalProperties = false
+          properties {
+            old = string(64, "The old view's id in the browser.")
+            name = module.ref("SavedViewName")
+            project = module.ref("ProjectKey")
+            filter = module.ref("SavedViewFilter")
+          }
+          required { "old"; "name"; "filter" }
+        }, 100, null)
+      }
+      required { "source"; "views" }
+    }
+    output {
+      type = "object"
+      title = "ViewsImported"
+      properties {
+        revision = module.ref("SavedViewRevision")
+        items = array(module.ref("SavedView"), 100, null)
+        full = array(string(64, null), 100, "The `old` ids of the views not imported because 100 views exist.")
+      }
+      required { "revision"; "items"; "full" }
+    }
+  }
+
   ["token.create"] {
     description = "Create an agent token. The server writes its value, `qdt_` and 32 random bytes in base64url, to a new file at `file` with mode 0600, and keeps only its SHA-256, with the label and the date, in `credentials.json` beside the database. The value is in no answer, output or log. `NotAbsolute` when `file` is a relative path; `InDataFolder` when its folder, with symbolic links resolved, is the server's data folder; `FileExists` when something is at `file`, which stays untouched; `LabelTaken` when a token has the label. No backend accepts a token yet."
     audience { "cli" }
@@ -1248,6 +1407,30 @@ events {
         }
       }
       required { "commit"; "at"; "author"; "operation"; "issues"; "projects" }
+    }
+  }
+
+  ["view.changed"] {
+    description = "A database commit changed the saved views: the occurrence gives the commit, its author and operation, and every saved view after it with the list's revision. A page that subscribes, or subscribes again after the stream ended, reads `view.list` once it is open, and keeps of the lists it gets the one with the highest revision: this event replays nothing."
+    audience { "web" }
+    input {
+      type = "object"
+      title = "ViewChangedInput"
+      additionalProperties = false
+      properties {}
+    }
+    payload {
+      type = "object"
+      title = "ViewChangedPayload"
+      properties {
+        commit = module.ref("CommitHash")
+        at = timestamp
+        author = module.ref("Actor")
+        operation = string(128, null)
+        revision = module.ref("SavedViewRevision")
+        items = array(module.ref("SavedView"), 100, null)
+      }
+      required { "commit"; "at"; "author"; "operation"; "revision"; "items" }
     }
   }
 }

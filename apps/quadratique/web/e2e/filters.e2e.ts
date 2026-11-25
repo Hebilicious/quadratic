@@ -124,33 +124,20 @@ test("the human filters the list by label and readiness, sees it follow the agen
     await expect(edit).toBeFocused();
   });
 
-  await test.step("on the filters of Ready web, Save view starts from its name; when this browser's storage is full, the form stays open and says so", async () => {
+  await test.step("on the filters of Ready web, Save view starts from its name; when the server does not keep the view, the form stays open and says so", async () => {
     await page.getByRole("button", { name: "Save view" }).click();
     const name = page.getByLabel("Name of the view");
     await expect(name).toHaveValue("Ready web");
-    const filled = await page.evaluate(() => {
-      let size = 1 << 20;
-      let count = 0;
-      while (size >= 1) {
-        try {
-          localStorage.setItem(`fill-${String(count)}`, "x".repeat(size));
-          count += 1;
-        } catch {
-          size = Math.floor(size / 2);
-        }
-      }
-      return count;
-    });
-    expect(filled).toBeGreaterThan(0);
+    await page.route("**/web/capabilities/view.save", (route) => route.abort());
     await name.fill("Ready web, again");
     await page.keyboard.press("Enter");
     await expect(page.getByRole("alert")).toContainText("could not be saved");
     await expect(name).toHaveValue("Ready web, again");
-    await page.evaluate(() => {
-      for (const key of Object.keys(localStorage).filter((each) => each.startsWith("fill-"))) {
-        localStorage.removeItem(key);
-      }
-    });
+    await page.unroute("**/web/capabilities/view.save");
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("navigation").getByRole("link", { name: "Ready web, again" }),
+    ).toBeVisible();
   });
 
   await test.step("a label that no issue carries any more, chosen in the address, stays listed, checked, and can be removed", async () => {

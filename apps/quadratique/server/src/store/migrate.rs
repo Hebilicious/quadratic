@@ -9,10 +9,16 @@ pub(crate) struct Migration {
 }
 
 // The schema version of a store is `PRAGMA user_version`, which doltlite keeps in each commit.
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    name: "the first schema",
-    sql: SCHEMA,
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "the first schema",
+        sql: SCHEMA,
+    },
+    Migration {
+        name: "saved views",
+        sql: include_str!("saved_views.sql"),
+    },
+];
 
 pub(crate) enum Version {
     Current,

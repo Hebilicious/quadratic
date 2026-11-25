@@ -50,6 +50,8 @@ mod stacked;
 mod tokens;
 #[path = "server/updates.rs"]
 mod updates;
+#[path = "server/views.rs"]
+mod views;
 #[path = "server/watcher.rs"]
 mod watcher;
 #[path = "server/web.rs"]

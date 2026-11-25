@@ -1,9 +1,15 @@
 <script setup lang="ts" vapor>
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watchEffect } from "vue";
 
-import { nameProblem, refusedWrite, type SavedView } from "../board/saved-views.machine.ts";
+import {
+  nameProblem,
+  refusalOf,
+  writeState,
+  type SavedView,
+} from "../board/saved-views.machine.ts";
 import { useSnapshot } from "../use-actor.ts";
 import { useWorkspace } from "../workspace.ts";
+import { viewProblemText } from "./present.ts";
 
 const props = defineProps<{
   readonly view: SavedView;
@@ -50,10 +56,21 @@ function rename(event: Event): void {
   }
   const form = renameForm.value;
   savedViews.send({ type: "rename", form, id: props.view.id, name: editing.value.name });
-  if (!refusedWrite(savedViews.getSnapshot(), form)) {
+  renamed.value = true;
+}
+
+const renameState = computed(() => writeState(savedSnapshot.value, renameForm.value));
+const removeState = computed(() => writeState(savedSnapshot.value, removeForm.value));
+const renamed = ref(false);
+watchEffect(() => {
+  if (!renamed.value || renameState.value === "pending") {
+    return;
+  }
+  renamed.value = false;
+  if (renameState.value === "idle") {
     void close();
   }
-}
+});
 
 async function close(): Promise<void> {
   forget();
@@ -75,10 +92,10 @@ function remove(): void {
 
 const notSaved = computed(() => {
   const current = editing.value;
-  return (
-    (current.kind === "renaming" && refusedWrite(savedSnapshot.value, renameForm.value)) ||
-    (current.kind === "deleting" && refusedWrite(savedSnapshot.value, removeForm.value))
-  );
+  if (current.kind === "renaming") {
+    return refusalOf(savedSnapshot.value, renameForm.value);
+  }
+  return current.kind === "deleting" ? refusalOf(savedSnapshot.value, removeForm.value) : undefined;
 });
 
 function typed(event: Event): void {
@@ -134,22 +151,31 @@ function cancel(event: KeyboardEvent): void {
         />
       </label>
       <p v-if="problem !== undefined" class="field-error" role="alert">{{ problem }}</p>
-      <p v-else-if="notSaved" class="field-error" role="alert">
-        The view could not be renamed: this browser does not keep site data here.
+      <p v-else-if="notSaved !== undefined" class="field-error" role="alert">
+        {{ viewProblemText(notSaved, "renamed") }}
       </p>
       <div class="saved-view-actions">
-        <button class="primary-button" type="submit" :disabled="problem !== undefined">Rename</button>
+        <button
+          class="primary-button"
+          type="submit"
+          :disabled="problem !== undefined || renameState === 'pending'"
+        >Rename</button>
         <button class="ghost-button danger" type="button" @click="confirmDelete">Delete…</button>
         <button class="ghost-button" type="button" @click="close">Cancel</button>
       </div>
     </form>
     <div v-else class="saved-view-form" role="group" :aria-label="`Delete the view ${view.name}`">
       <p class="nav-note">Delete the view {{ view.name }}? Its issues stay as they are.</p>
-      <p v-if="notSaved" class="field-error" role="alert">
-        The view could not be deleted: this browser does not keep site data here.
+      <p v-if="notSaved !== undefined" class="field-error" role="alert">
+        {{ viewProblemText(notSaved, "deleted") }}
       </p>
       <div class="saved-view-actions">
-        <button class="primary-button" type="button" @click="remove">Delete</button>
+        <button
+          class="primary-button"
+          type="button"
+          :disabled="removeState === 'pending'"
+          @click="remove"
+        >Delete</button>
         <button :id="`keep-${view.id}`" class="ghost-button" type="button" @click="close">Keep it</button>
       </div>
     </div>

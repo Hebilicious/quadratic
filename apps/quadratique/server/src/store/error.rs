@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub enum Kind {
     Project,
     Issue,
+    View,
 }
 
 impl fmt::Display for Kind {
@@ -12,6 +13,7 @@ impl fmt::Display for Kind {
         f.write_str(match self {
             Kind::Project => "project",
             Kind::Issue => "issue",
+            Kind::View => "view",
         })
     }
 }
