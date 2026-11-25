@@ -138,7 +138,12 @@ workspace=$scratch/workspace
 mkdir -p "$workspace/apps/quadratique"
 cp "$repository/LICENSE" "$workspace/LICENSE"
 # The targets of the crates' links first: Git's bash on Windows copies a link's target, which must exist by then.
-for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md catalog skill server cli; do
+# The catalog's node_modules is not part of a crate, and its links are junctions that Git's bash cannot copy.
+mkdir "$workspace/apps/quadratique/catalog"
+for entry in "$root/catalog"/*; do
+  [ "${entry##*/}" = node_modules ] || cp -a "$entry" "$workspace/apps/quadratique/catalog/"
+done
+for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md skill server cli; do
   cp -a "$root/$path" "$workspace/apps/quadratique/$path"
 done
 rm -rf "$workspace/apps/quadratique/server/web-dist"

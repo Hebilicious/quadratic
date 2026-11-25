@@ -71,10 +71,10 @@ jobs:
           quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test quadratique-web:e2e
 
   # The same checks on macOS and Windows, one step per area, so that each platform reports every area that fails and
-  # not only the first. Quadratique runs on Linux only so far (QUA-6): on these platforms the server refuses to start
-  # until it can check who connects to its local listener there (docs/decisions/0003-the-caller-check-on-macos-and-windows.md),
-  # so every test that starts a server fails. `continue-on-error` keeps those expected failures out of the run's
-  # result; each job still shows its own outcome. Remove it once a platform's checks pass.
+  # not only the first. The server serves only on Linux until it can check who connects to its local listener
+  # elsewhere (docs/decisions/0003-the-caller-check-on-macos-and-windows.md), and the installer is Linux-only until the
+  # install stages of QUA-6. The steps that fail for those reasons say so and carry `continue-on-error`, so the job
+  # stays green on them and turns red on any other failure. Remove each one when its issue lands.
   portability:
     name: checks on ${{ matrix.os }}
     strategy:
@@ -82,7 +82,6 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     # Only stops a hang: a full check takes far less.
     timeout-minutes: 60
     defaults:
@@ -124,11 +123,6 @@ jobs:
             apps/quadratique/target/debug/quadratique.exe
           if-no-files-found: error
 
-      - name: Probe doltlite (temporary)
-        if: runner.os == 'Windows' && !cancelled()
-        working-directory: apps/quadratique
-        run: cargo test -p quadratique-server --test windows_probe -- --nocapture
-
       - name: Server tests
         if: ${{ !cancelled() }}
         run: moon run quadratique-server:test
@@ -141,11 +135,16 @@ jobs:
       - name: Package test
         if: ${{ !cancelled() }}
         run: moon run quadratique-server:package-test
-      - name: Install test
+      # Expected to fail: install.sh writes a systemd user unit, test.sh fakes systemctl and reads /proc, and
+      # package.sh uses GNU tar (QUA-36, QUA-37, QUA-38).
+      - name: Install test (expected to fail until QUA-36, QUA-37, QUA-38)
         if: ${{ !cancelled() }}
+        continue-on-error: true
         run: moon run quadratique-install:test
+      # Expected to fail on Windows: the harness ends agents with POSIX process groups (QUA-40).
       - name: Eval test
         if: ${{ !cancelled() }}
+        continue-on-error: ${{ runner.os == 'Windows' }}
         run: moon run quadratique-eval:test
       - name: Catalog check
         if: ${{ !cancelled() }}
@@ -153,8 +152,10 @@ jobs:
       - name: Web checks
         if: ${{ !cancelled() }}
         run: moon run quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test
-      - name: Web journeys
+      # Expected to fail: the journeys start a server, which refuses to start here (QUA-33, QUA-34).
+      - name: Web journeys (expected to fail until QUA-33, QUA-34)
         if: ${{ !cancelled() }}
+        continue-on-error: true
         run: |
           pnpm --filter quadratique-web exec playwright install chromium-headless-shell
           moon run quadratique-web:e2e

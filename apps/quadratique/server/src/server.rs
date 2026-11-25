@@ -20,7 +20,7 @@ use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
 use crate::git::repository::GIT_LIMIT;
 use crate::git::watcher::{self, Watcher};
 use crate::serve::{self, Admit, Connection, OWNER_ONLY};
-use crate::store::{Store, StoreError, refuse_git_work_tree};
+use crate::store::{Store, StoreError, canonical_folder, refuse_git_work_tree};
 use crate::web::{self, WebApp};
 
 mod closing;
@@ -376,9 +376,8 @@ async fn own(paths: &Paths, waits: Waits) -> Result<File, ServerError> {
     let directory = paths.database.parent().unwrap_or(Path::new("."));
     refuse_git_work_tree(directory)?;
     std::fs::create_dir_all(directory)?;
-    let database = directory
-        .canonicalize()?
-        .join(paths.database.file_name().unwrap_or_default());
+    let database =
+        canonical_folder(directory)?.join(paths.database.file_name().unwrap_or_default());
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use quadratique_server::app::interface;
 use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered, identity};
-use quadratique_server::store::{StoreError, refuse_git_work_tree};
+use quadratique_server::store::{StoreError, canonical_folder, refuse_git_work_tree};
 
 use crate::process::{alive, ask_to_stop, detach};
 use crate::route::McpTool;
@@ -186,8 +186,7 @@ impl Home {
 
     fn database(&self) -> PathBuf {
         let file = self.paths.database.file_name().unwrap_or_default();
-        self.directory
-            .canonicalize()
+        canonical_folder(&self.directory)
             .map(|directory| directory.join(file))
             .unwrap_or_else(|_| self.paths.database.clone())
     }

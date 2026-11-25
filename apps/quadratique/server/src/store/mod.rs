@@ -12,7 +12,7 @@ mod types;
 mod view;
 mod writer;
 
-pub use engine::refuse_git_work_tree;
+pub use engine::{canonical_folder, refuse_git_work_tree};
 pub use error::{Kind, StoreError};
 pub use git::{ClaimStart, ClaimedWork, GitLanding, GitWatch, GitWork};
 pub use tx::Tx;
