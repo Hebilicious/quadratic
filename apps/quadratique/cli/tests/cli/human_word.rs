@@ -118,3 +118,13 @@ fn rule_4_an_agent_on_the_command_line_moves_an_issue_assigned_to_the_human_only
     ]);
     assert_ne!(refused.code, 0, "{refused:?}");
 }
+
+#[test]
+fn rule_4_the_skill_says_the_words_are_what_the_human_said_to_the_agent_in_this_session() {
+    let skill = include_str!("../../../skill/quadratique/SKILL.md");
+    let line = skill
+        .lines()
+        .find(|line| line.contains("--humanWords"))
+        .expect("the skill's line about the human's words");
+    assert!(line.contains("said to you in this session"), "{line}");
+}

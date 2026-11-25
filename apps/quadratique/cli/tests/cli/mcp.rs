@@ -226,6 +226,10 @@ fn rule_4_an_agent_over_mcp_gives_the_humans_words_on_every_move_that_human_only
             .unwrap_or_else(|| panic!("no tool {name}: {listed}"));
         let properties = &tool["inputSchema"]["properties"];
         assert_eq!(properties["humanWords"]["maxLength"], 400, "{tool}");
+        let said = properties["humanWords"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(said.contains("said to you in this session"), "{tool}");
         assert_eq!(
             properties["confidence"]["enum"],
             json!(["high", "medium", "low"]),

@@ -244,3 +244,70 @@ fn rule_4_the_humans_own_calls_ignore_the_words() {
         }
     }
 }
+
+#[test]
+fn rule_4_at_medium_or_low_a_refusal_after_human_only_keeps_its_place() {
+    for board in boards() {
+        let held_by_another = assigned(
+            claimed(board.issue(board.in_progress), claim_of(&other_agent())),
+            Assignee::Human,
+        );
+        for confidence in [Confidence::Medium, Confidence::Low] {
+            for event in [update_to(board.in_review), Event::Close, Event::Release] {
+                assert!(
+                    matches!(
+                        decide_on_word(
+                            &event,
+                            &held_by_another,
+                            &agent(),
+                            &board.project,
+                            Some(confidence)
+                        ),
+                        Err(Failure::Held { .. })
+                    ),
+                    "{}: {event:?} at {confidence:?}",
+                    board.label
+                );
+            }
+            assert_eq!(
+                decide_on_word(
+                    &Event::Close,
+                    &decision(&board),
+                    &agent(),
+                    &board.project,
+                    Some(confidence)
+                ),
+                Err(Failure::NotClaimed {
+                    issue: "DEM-12".into()
+                }),
+                "{}",
+                board.label
+            );
+        }
+    }
+}
+
+#[test]
+fn rule_4_on_an_issue_not_assigned_to_the_human_the_words_change_nothing() {
+    for board in boards() {
+        let held_by_another = claimed(board.issue(board.in_progress), claim_of(&other_agent()));
+        let own = claimed(board.issue(board.in_progress), claim_of(&agent()));
+        let unclaimed = board.issue(board.todo);
+        for confidence in [Confidence::High, Confidence::Medium, Confidence::Low] {
+            for (event, issue) in [
+                (update_to(board.todo), &held_by_another),
+                (Event::Release, &held_by_another),
+                (Event::Close, &unclaimed),
+                (update_to(board.in_review), &own),
+                (Event::Close, &own),
+            ] {
+                assert_eq!(
+                    decide_on_word(&event, issue, &agent(), &board.project, Some(confidence)),
+                    decide(&event, issue, &agent(), &board.project),
+                    "{}: {event:?} at {confidence:?}",
+                    board.label
+                );
+            }
+        }
+    }
+}

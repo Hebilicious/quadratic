@@ -110,14 +110,16 @@ local function committedThen(check: String): String = " One database commit per 
 
 local committed = committedThen("read the issue")
 
-local humanWordsSchema = string(400, "The human's own words that decide this call, quoted. Needs `confidence`.")
+local humanWordsSchema = (string(400, "What the human said to you in this session about this issue, quoted. Needs `confidence`.")) {
+  pattern = #"\S"#
+}
 
 local confidenceSchema = new Dynamic {
   type = "string"
   enum { "high"; "medium"; "low" }
 }
 
-local onHumanWords = " With `humanWords` and `confidence` (how sure the agent is that the words decide it), an agent passes `HumanOnly` at `high`, and a note quotes the words; at `medium` or `low` nothing changes but that note, and the answer has `leftForHuman`: a success, not to retry at `high`."
+local onHumanWords = " Where `HumanOnly` would refuse an agent, `humanWords` and `confidence` (how sure the agent is that the words decide it) pass it at `high`, and a note quotes the words; at `medium` or `low`, a call that would change the issue changes nothing but that note, and the answer has `leftForHuman`: a success, not to retry at `high`. Every other refusal keeps its place; elsewhere the two are ignored."
 
 local asOnUpdate = " `humanWords` and `confidence` work as in `issue.update`."
 
@@ -1022,7 +1024,7 @@ capabilities {
   }
 
   ["issues.close"] {
-    description = "`issue.close` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.close`. All or nothing: when `issue.close` would fail on one issue, nothing changes and the call fails with `NotClosed`, naming that issue and giving its failure." + committed
+    description = "`issue.close` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.close`. All or nothing: when `issue.close` would fail on one issue, nothing changes and the call fails with `NotClosed`, naming that issue and giving its failure. It takes no `humanWords`: the human's words settle one issue, through `issue.close` (`quadratique issue close`)." + committed
     audience { "cli" }
     input {
       type = "object"
@@ -1037,8 +1039,6 @@ capabilities {
           description = "The issues to close: give the flag once per issue."
         }
         evidence = bodyField("What was checked, and how: commands, results, links.")
-        humanWords = humanWordsSchema
-        confidence = confidenceSchema
       }
       required { "issue"; "evidence" }
     }
@@ -1047,7 +1047,6 @@ capabilities {
       title = "IssuesCloseAnswer"
       properties {
         items = array(module.ref("IssueSummary"), 50, "The issues as the call left them, in the order given.")
-        leftForHuman = array(module.ref("IssueId"), 50, "The issues that `confidence` below `high` left for the human.")
       }
       required { "items" }
     }

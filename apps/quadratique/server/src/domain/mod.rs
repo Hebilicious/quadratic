@@ -18,6 +18,7 @@ pub use findings::{
 pub use issue::{Assignee, Caller, Claim, HolderKey, Issue, IssueId, Project, WorkingCopy};
 pub use lifecycle::{
     Change, ClaimAfter, Confidence, Event, Landing, Outcome, create_status, decide, decide_on_word,
+    uses_human_word,
 };
 pub use project::check_project_update;
 pub use readiness::{Readiness, Wait, WaitKind, readiness};

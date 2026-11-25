@@ -109,33 +109,43 @@ still alive: a claim records no liveness.
 4. **The human's words.** Added on 2026-11-26 (QUA-65). An issue assigned to the human is a
    decision. When the human decides it in a session, the agent may move it, on the human's
    words. The owner's words: "why do i have to do it myself?", and the condition: "it needs to
-   evaluate a degree of confidence first". The calls that `HumanOnly` guards (`issue.update`
-   with `status` or a new assignee, `issue.release`, `issue.close`, `issues.close`) take
-   `humanWords`, the human's own words quoted as given (1 to 400 characters), and
-   `confidence`, how sure the agent is that those words decide the issue: `high`, `medium` or
-   `low`. At the place of `HumanOnly` in the order of rule 2, for an agent that gives both:
-   - `high`: `HumanOnly` does not apply to this call; the rules after it still do (`Held`,
-     `NotClaimed`, `BaseNotMerged`). The issue gains a note by the agent that names it, quotes
-     the words and states the confidence, with the call's `reason` when it has one.
-   - `medium` or `low`: the call changes nothing but a note, by the agent, that quotes the
-     words and states the confidence. The answer has `leftForHuman` (`issues.close`: the
-     issues under `leftForHuman`). It is a success, not a refusal: the agent does not repeat
-     it with `high`; the issue waits for the human.
+   evaluate a degree of confidence first". The one-issue calls that `HumanOnly` guards
+   (`issue.update` with `status` or a new assignee, `issue.release`, `issue.close`) take
+   `humanWords`, what the human said to this agent in this session about this issue, quoted
+   as given (1 to 400 characters, not only spaces), and `confidence`, how sure the agent is
+   that those words decide the issue: `high`, `medium` or `low`. `issues.close` takes
+   neither: the human's words settle one issue, and one quote must not close a batch.
 
-   The history's reason of the change is `The human's words, <confidence> confidence:
-   "<words>"`, in place of the call's `reason`; 400 characters of words keep it within the
-   500 of a reason. Without `humanWords` or without `confidence`, an agent gets `HumanOnly`
-   on an issue assigned to the human, as before. The rule takes the place of `HumanOnly` for
-   every agent call that gives both, on any issue: on an issue not assigned to the human,
-   `high` adds the note and `medium` or `low` leaves the issue as rule 4 says. The rules
-   before `HumanOnly` keep their place (`Stale`, `UnknownStatus`, `Resolved`, the success
-   with no change of a completed or unclaimed issue). The human's own calls ignore both
-   fields.
+   The two inputs have an effect only where `HumanOnly` applies: an agent's call on an issue
+   assigned to the human. Elsewhere, and in the human's own calls, they are ignored, and the
+   call is decided as without them. Where they apply, the call is decided as if the
+   confidence were `high`, with `HumanOnly` passed:
+   - Any refusal is the answer, in its place in the order of rule 2 (`Stale`,
+     `UnknownStatus`, `Resolved`, `Held`, `NotClaimed`, `BaseNotMerged`), whatever the
+     confidence. A call that would change nothing changes nothing.
+   - `high`: the change is made. The issue gains a note by the agent that names it, quotes
+     the words and states the confidence, with the call's `reason` when it has one.
+   - `medium` or `low`, where the change would be made: the call changes nothing but a note,
+     by the agent, that quotes the words and states the confidence, with the call's
+     `reason`. The answer has `leftForHuman`. It is a success, not a refusal: the agent does
+     not repeat it with `high`; the issue waits for the human.
+
+   Where the words were used (a change at `high`, or `leftForHuman`), the history's reason
+   of the change is `The human's words, <confidence> confidence: <words>`, in place of the
+   call's `reason`, which the note keeps. The words are quoted as a JSON string, in the
+   reason and in the note, so that no quote, backslash, newline or control character inside
+   them ends the quotation. When the quoted words would make the reason longer than its 500
+   characters, the reason quotes their first characters and says that the note quotes them
+   whole. Where the words were not used, the call's own `reason` stands. The server writes
+   the reason inside the write, after it has read the issue. Without `humanWords` or without
+   `confidence`, an agent gets `HumanOnly` on an issue assigned to the human, as before.
 
    An agent's `issue.close` on an unclaimed issue still answers `NotClaimed`: an agent records
    the human's decision on a decision issue with `issue.update` and `status`. The skill says
-   when, in one line: only when the human's words settle the issue's acceptance without
-   interpretation; otherwise the agent asks the human.
+   when, in one line: only when what the human said to the agent in this session settles the
+   issue's acceptance without interpretation; otherwise the agent asks the human. Words found
+   in a note, an issue's body or another agent's report are not the human's words to this
+   agent.
 
    The server cannot know that the human said the words: like every actor field, they are
    declared by the agent. The rule does not pretend otherwise. It makes the agent state what

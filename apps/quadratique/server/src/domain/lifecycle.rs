@@ -90,7 +90,7 @@ pub fn decide(
     caller: &Caller,
     project: &Project,
 ) -> Result<Outcome, Failure> {
-    decide_on_word(event, issue, caller, project, None)
+    decide_with(event, issue, caller, project, false)
 }
 
 /// `decide` for a call that may carry the human's words, with the caller's confidence that
@@ -102,11 +102,44 @@ pub fn decide_on_word(
     project: &Project,
     word: Option<Confidence>,
 ) -> Result<Outcome, Failure> {
+    let word = word.filter(|_| uses_human_word(issue, caller));
+    let outcome = decide_with(event, issue, caller, project, word.is_some())?;
+    let changes = match (&outcome, event) {
+        (Outcome::Changed(_), _) => true,
+        (
+            Outcome::Unchanged,
+            Event::Update {
+                status: None,
+                changes_assignee,
+                ..
+            },
+        ) => *changes_assignee,
+        _ => false,
+    };
+    match word {
+        Some(Confidence::Medium | Confidence::Low) if changes => Ok(Outcome::LeftForHuman),
+        _ => Ok(outcome),
+    }
+}
+
+/// True when the human's words decide a call: an agent's call on an issue assigned to the
+/// human, where `HumanOnly` would apply without them.
+pub fn uses_human_word(issue: &Issue, caller: &Caller) -> bool {
+    !caller.is_human() && issue.assigned_to_human()
+}
+
+fn decide_with(
+    event: &Event,
+    issue: &Issue,
+    caller: &Caller,
+    project: &Project,
+    on_human_word: bool,
+) -> Result<Outcome, Failure> {
     let rules = Rules {
         issue,
         caller,
         project,
-        word,
+        on_human_word,
     };
     let outcome = match event {
         Event::Claim {
@@ -152,7 +185,9 @@ struct Rules<'a> {
     issue: &'a Issue,
     caller: &'a Caller,
     project: &'a Project,
-    word: Option<Confidence>,
+    /// The call gives the human's words, so `HumanOnly` does not stop it: `decide_on_word`
+    /// decides what a confidence below high leaves.
+    on_human_word: bool,
 }
 
 impl Rules<'_> {
@@ -173,18 +208,12 @@ impl Rules<'_> {
         Stage::of(workflow, &self.issue.status, Some(self.issue.category)) == Stage::InReview
     }
 
-    /// The place of `HumanOnly` in the order of refusals. An agent that gives the human's words
-    /// with high confidence goes on to the next rule; with less, nothing moves.
-    fn human_decides(&self) -> Option<Result<Outcome, Failure>> {
-        if self.caller.is_human() {
-            return None;
+    /// The place of `HumanOnly` in the order of refusals.
+    fn human_only(&self) -> Result<(), Failure> {
+        if !self.on_human_word && uses_human_word(self.issue, self.caller) {
+            return Err(Failure::HumanOnly);
         }
-        match self.word {
-            Some(Confidence::High) => None,
-            Some(Confidence::Medium | Confidence::Low) => Some(Ok(Outcome::LeftForHuman)),
-            None if self.issue.assigned_to_human() => Some(Err(Failure::HumanOnly)),
-            None => None,
-        }
+        Ok(())
     }
 
     fn caller_holds(&self) -> bool {
@@ -257,18 +286,16 @@ impl Rules<'_> {
             });
         }
         let Some(status) = status else {
-            return match self.human_decides() {
-                Some(answer) if changes_assignee => answer,
-                _ => Ok(Outcome::Unchanged),
-            };
+            if changes_assignee {
+                self.human_only()?;
+            }
+            return Ok(Outcome::Unchanged);
         };
         let workflow = &self.project.workflow;
         let Some(category) = workflow.category_of(status) else {
             return Err(unknown_status(workflow, status));
         };
-        if let Some(answer) = self.human_decides() {
-            return answer;
-        }
+        self.human_only()?;
         if let Some(claim) = &self.issue.claim
             && !self.caller.holds(claim)
             && !self.caller.is_human()
@@ -304,9 +331,7 @@ impl Rules<'_> {
         let Some(claim) = &self.issue.claim else {
             return Ok(Outcome::Unchanged);
         };
-        if let Some(answer) = self.human_decides() {
-            return answer;
-        }
+        self.human_only()?;
         if self.caller.holds(claim) || self.caller.is_human() {
             return Ok(self.moves_to(
                 &self.project.workflow.moves.release,
@@ -335,9 +360,7 @@ impl Rules<'_> {
         if self.issue.category == Category::Completed || self.in_merge_status() {
             return Ok(Outcome::Unchanged);
         }
-        if let Some(answer) = self.human_decides() {
-            return answer;
-        }
+        self.human_only()?;
         if !self.caller.is_human() && !self.caller_holds() {
             return Err(match &self.issue.claim {
                 Some(claim) => self.held(claim),

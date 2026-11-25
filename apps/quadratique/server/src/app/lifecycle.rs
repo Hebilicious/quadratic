@@ -11,7 +11,7 @@ use super::model::{self, Issue, IssueAnswer, IssueSummary};
 use super::{Context, IssueReader, Refused, finish};
 use crate::domain::{
     Actor, Caller, Change, Claim, ClaimAfter, Confidence, Event, Failure, Landing, Outcome,
-    WorkingCopy, decide, decide_on_word,
+    WorkingCopy, decide, decide_on_word, uses_human_word,
 };
 use crate::git::repository::{GIT_LIMIT, Repository};
 use crate::store::{AsOf, ClaimStart, IssueFields, Tx};
@@ -152,14 +152,6 @@ impl Request {
             Request::Claim { .. } => None,
         }
     }
-
-    /// The reason of the history's change: the human's words when the call gives them.
-    fn history_reason(&self) -> Option<String> {
-        match self.word() {
-            Some(word) => Some(word.history_reason()),
-            None => self.reason().map(str::to_owned),
-        }
-    }
 }
 
 async fn move_issue<R: Send + 'static>(
@@ -172,14 +164,14 @@ async fn move_issue<R: Send + 'static>(
     let ((started, left_for_human), answered) = context
         .write_then_read(
             request.operation(),
-            request.history_reason(),
+            request.reason().map(str::to_owned),
             move |tx| {
                 let record = board::issue(tx, &id)?;
                 let project = model::domain_project(&board::project(tx, &record.project)?)?;
                 let board = Board::load(tx)?;
                 let issue = board.issue(&record)?;
                 let event = request.event(tx, &board, &id);
-                let word = request.word();
+                let word = request.word().filter(|_| uses_human_word(&issue, &caller));
                 let reason = request.reason();
                 let confidence = HumanWord::confidence(word);
                 let mut started = None;
@@ -187,7 +179,7 @@ async fn move_issue<R: Send + 'static>(
                     Outcome::Unchanged => {}
                     Outcome::LeftForHuman => {
                         if let Some(word) = word {
-                            word.note_left(tx, &id, &caller, reason)?;
+                            word.record_left(tx, &id, &caller, reason)?;
                         }
                         return Ok(((None, true), id));
                     }
@@ -197,7 +189,7 @@ async fn move_issue<R: Send + 'static>(
                             note_freed(tx, &id, &caller, former, &change.status, reason)?;
                         }
                         if let Some(word) = word {
-                            word.note_moved(tx, &id, &caller, &change.status, reason)?;
+                            word.record_moved(tx, &id, &caller, &change.status, reason)?;
                         }
                         let in_bound_repository = project.repository.is_some()
                             && project.repository == caller.working_copy.repository;
@@ -384,28 +376,20 @@ pub(super) fn close() -> CapabilityDefinition<Context, CloseInput, IssueAnswer<I
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct CloseSeveralInput {
     issue: Vec<String>,
     evidence: String,
-    human_words: Option<String>,
-    confidence: Option<Confidence>,
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct ClosedSeveral {
     items: Vec<IssueSummary>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    left_for_human: Vec<String>,
 }
 
 pub(super) fn close_several()
 -> CapabilityDefinition<Context, CloseSeveralInput, ClosedSeveral, Value> {
     capability::<CloseSeveralInput, ClosedSeveral>("issues.close").run(|input, call| async move {
-        let context = call.context();
-        let word = HumanWord::given(&context.caller, input.human_words, input.confidence);
-        finish(close_issues(context, input.issue, input.evidence, word).await)
+        finish(close_issues(call.context(), input.issue, input.evidence).await)
     })
 }
 
@@ -415,35 +399,25 @@ async fn close_issues(
     context: &Context,
     ids: Vec<String>,
     evidence: String,
-    word: Option<HumanWord>,
 ) -> Result<ClosedSeveral, Refused> {
     let caller = context.caller.clone();
-    let reason = word.as_ref().map(HumanWord::history_reason);
     let written = context
-        .write("issue.close", reason, {
+        .write("issue.close", None, {
             let ids = ids.clone();
             move |tx| {
-                let mut left_for_human = Vec::new();
                 for id in &ids {
-                    let left = close_in(tx, id, &caller, &evidence, word.as_ref())
+                    close_in(tx, id, &caller, &evidence)
                         .map_err(|refused| not_closed(id, refused))?;
-                    if left {
-                        left_for_human.push(id.clone());
-                    }
                 }
-                let items = ids
-                    .iter()
+                ids.iter()
                     .map(|id| board::summary(tx, id, &caller))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok((items, left_for_human))
+                    .collect::<Result<Vec<_>, _>>()
             }
         })
         .await?;
-    let (items, left_for_human) = written.value;
     let Some(commit) = written.commit else {
         return Ok(ClosedSeveral {
-            items,
-            left_for_human,
+            items: written.value,
         });
     };
     let caller = context.caller.clone();
@@ -454,40 +428,17 @@ async fn close_issues(
                 .collect::<Result<Vec<_>, _>>()
         })
         .await?;
-    Ok(ClosedSeveral {
-        items,
-        left_for_human,
-    })
+    Ok(ClosedSeveral { items })
 }
 
-/// Closes one issue; true when it was left for the human.
-fn close_in(
-    tx: &mut Tx<'_>,
-    id: &str,
-    caller: &Caller,
-    evidence: &str,
-    word: Option<&HumanWord>,
-) -> Result<bool, Refused> {
+fn close_in(tx: &mut Tx<'_>, id: &str, caller: &Caller, evidence: &str) -> Result<(), Refused> {
     let record = board::issue(tx, id)?;
     let project = model::domain_project(&board::project(tx, &record.project)?)?;
     let issue = Board::load(tx)?.issue(&record)?;
-    let confidence = HumanWord::confidence(word);
-    match decide_on_word(&Event::Close, &issue, caller, &project, confidence)? {
-        Outcome::Unchanged => Ok(false),
-        Outcome::LeftForHuman => {
-            if let Some(word) = word {
-                word.note_left(tx, id, caller, None)?;
-            }
-            Ok(true)
-        }
-        Outcome::Changed(change) => {
-            apply(tx, id, &change, Some(evidence))?;
-            if let Some(word) = word {
-                word.note_moved(tx, id, caller, &change.status, None)?;
-            }
-            Ok(false)
-        }
+    if let Outcome::Changed(change) = decide(&Event::Close, &issue, caller, &project)? {
+        apply(tx, id, &change, Some(evidence))?;
     }
+    Ok(())
 }
 
 fn not_closed(id: &str, refused: Refused) -> Refused {

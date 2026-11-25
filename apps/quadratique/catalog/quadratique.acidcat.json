@@ -1860,9 +1860,10 @@
             "type": "string"
           },
           "humanWords": {
-            "description": "The human's own words that decide this call, quoted. Needs `confidence`.",
+            "description": "What the human said to you in this session about this issue, quoted. Needs `confidence`.",
             "maxLength": 400,
             "minLength": 1,
+            "pattern": "\\S",
             "type": "string"
           },
           "issue": {
@@ -2370,9 +2371,10 @@
             "type": "string"
           },
           "humanWords": {
-            "description": "The human's own words that decide this call, quoted. Needs `confidence`.",
+            "description": "What the human said to you in this session about this issue, quoted. Needs `confidence`.",
             "maxLength": 400,
             "minLength": 1,
+            "pattern": "\\S",
             "type": "string"
           },
           "issue": {
@@ -2410,7 +2412,7 @@
       }
     },
     "issue.update": {
-      "description": "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). With `humanWords` and `confidence` (how sure the agent is that the words decide it), an agent passes `HumanOnly` at `high`, and a note quotes the words; at `medium` or `low` nothing changes but that note, and the answer has `leftForHuman`: a success, not to retry at `high`. Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A move into the `merge` status, or a later status that is not canceled, fails with `BaseNotMerged` while an issue it is stacked on is not merged. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Where `HumanOnly` would refuse an agent, `humanWords` and `confidence` (how sure the agent is that the words decide it) pass it at `high`, and a note quotes the words; at `medium` or `low`, a call that would change the issue changes nothing but that note, and the answer has `leftForHuman`: a success, not to retry at `high`. Every other refusal keeps its place; elsewhere the two are ignored. Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A move into the `merge` status, or a later status that is not canceled, fails with `BaseNotMerged` while an issue it is stacked on is not merged. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
       "audience": [
         "cli",
         "mcp",
@@ -2462,9 +2464,10 @@
             "$ref": "#/$defs/Date"
           },
           "humanWords": {
-            "description": "The human's own words that decide this call, quoted. Needs `confidence`.",
+            "description": "What the human said to you in this session about this issue, quoted. Needs `confidence`.",
             "maxLength": 400,
             "minLength": 1,
+            "pattern": "\\S",
             "type": "string"
           },
           "issue": {
@@ -2567,30 +2570,16 @@
       }
     },
     "issues.close": {
-      "description": "`issue.close` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.close`. All or nothing: when `issue.close` would fail on one issue, nothing changes and the call fails with `NotClosed`, naming that issue and giving its failure. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "`issue.close` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.close`. All or nothing: when `issue.close` would fail on one issue, nothing changes and the call fails with `NotClosed`, naming that issue and giving its failure. It takes no `humanWords`: the human's words settle one issue, through `issue.close` (`quadratique issue close`). One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
       "audience": [
         "cli"
       ],
       "input": {
         "additionalProperties": false,
         "properties": {
-          "confidence": {
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ],
-            "type": "string"
-          },
           "evidence": {
             "description": "What was checked, and how: commands, results, links.",
             "maxLength": 20000,
-            "minLength": 1,
-            "type": "string"
-          },
-          "humanWords": {
-            "description": "The human's own words that decide this call, quoted. Needs `confidence`.",
-            "maxLength": 400,
             "minLength": 1,
             "type": "string"
           },
@@ -2617,14 +2606,6 @@
             "description": "The issues as the call left them, in the order given.",
             "items": {
               "$ref": "#/$defs/IssueSummary"
-            },
-            "maxItems": 50,
-            "type": "array"
-          },
-          "leftForHuman": {
-            "description": "The issues that `confidence` below `high` left for the human.",
-            "items": {
-              "$ref": "#/$defs/IssueId"
             },
             "maxItems": 50,
             "type": "array"

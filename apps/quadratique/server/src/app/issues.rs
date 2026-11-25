@@ -16,7 +16,7 @@ use super::model::{
 use super::{Context, Refused, finish};
 use crate::domain::{
     Assignee, Caller, Category, Confidence, Event, Link, Outcome, RelationChange, create_status,
-    decide_on_word,
+    decide_on_word, uses_human_word,
 };
 use crate::git::remote;
 use crate::git::repository::{GIT_LIMIT, Repository as GitRepository};
@@ -558,10 +558,7 @@ async fn update_issue(
     let caller = context.caller.clone();
     let author = serde_json::to_string(&caller.actor).map_err(Refused::defect)?;
     let word = HumanWord::given(&caller, input.human_words.clone(), input.confidence);
-    let reason = match &word {
-        Some(word) => Some(word.history_reason()),
-        None => input.reason.clone(),
-    };
+    let reason = input.reason.clone();
     let (left_for_human, issue) = context
         .write_issue("issue.update", reason, move |tx| {
             let record = board::issue(tx, &input.issue)?;
@@ -576,11 +573,12 @@ async fn update_issue(
                 status: input.status.clone(),
                 changes_assignee,
             };
+            let word = word.filter(|_| uses_human_word(&issue, &caller));
             let confidence = HumanWord::confidence(word.as_ref());
             let outcome = decide_on_word(&event, &issue, &caller, &project, confidence)?;
             if outcome == Outcome::LeftForHuman {
                 if let Some(word) = &word {
-                    word.note_left(tx, &record.id, &caller, input.reason.as_deref())?;
+                    word.record_left(tx, &record.id, &caller, input.reason.as_deref())?;
                 }
                 return Ok((true, record.id));
             }
@@ -632,7 +630,7 @@ async fn update_issue(
                 }
             };
             if let (Some(word), Some(status)) = (&word, moved_status) {
-                word.note_moved(tx, &record.id, &caller, &status, input.reason.as_deref())?;
+                word.record_moved(tx, &record.id, &caller, &status, input.reason.as_deref())?;
             }
             Ok((false, record.id))
         })
