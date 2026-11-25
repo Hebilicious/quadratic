@@ -1,7 +1,9 @@
 use std::io::Write;
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rustix::fs::{Mode, OFlags};
@@ -276,8 +278,27 @@ impl Drop for StalledRefs {
     }
 }
 
+/// git by its full path. When a command names its program without a path and its environment
+/// changes PATH, as `env_clear` does, std forks this whole test process instead of spawning the
+/// program. Each fork copies the page tables of every test that runs at that moment and stalls
+/// their threads, so the tests that allocate most slowed down twenty times or more.
+pub fn git_program() -> &'static Path {
+    static GIT: OnceLock<PathBuf> = OnceLock::new();
+    GIT.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|directory| directory.join("git"))
+            .find(|candidate| {
+                candidate
+                    .metadata()
+                    .is_ok_and(|file| file.is_file() && file.permissions().mode() & 0o111 != 0)
+            })
+            .expect("git is on the PATH")
+    })
+}
+
 fn git_command(directory: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new("git");
+    let mut command = Command::new(git_program());
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())

@@ -1095,7 +1095,7 @@ async fn git_writes_no_trace_of_the_remote_even_when_the_global_configuration_as
     .expect("a global configuration");
     let traced = |path: &PathBuf| std::fs::read_to_string(path).unwrap_or_default();
 
-    let control = std::process::Command::new("git")
+    let control = std::process::Command::new(crate::repository::git_program())
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("GIT_CONFIG_GLOBAL", &global)
