@@ -594,6 +594,12 @@ fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_handed_over_
 
     let answered = during.finish().ok();
     await_exit(old_pid);
+    let old_log =
+        std::fs::read_to_string(home.path().join("server.log")).expect("the old server's log");
+    assert!(
+        !old_log.contains("could not stop listening"),
+        "the stopped server could not close a listener: {old_log}"
+    );
     let new = status(&home);
     assert_eq!(
         (&new["pid"], &new["started"]),

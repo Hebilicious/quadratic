@@ -205,9 +205,13 @@ impl Drop for Served {
 /// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it: a TCP socket
 /// stops listening, and a Unix socket refuses every later `connect`. A sandbox or a policy may refuse the call: the
 /// error then goes to the server's log.
+/// `ENOTCONN` means the socket no longer listens: a stop request took it out of the listening state before the drop.
 #[cfg(target_os = "linux")]
 fn stop_listening(listener: impl std::os::fd::AsFd) -> std::io::Result<()> {
-    rustix::net::shutdown(listener, rustix::net::Shutdown::Both).map_err(std::io::Error::from)
+    match rustix::net::shutdown(listener, rustix::net::Shutdown::Both) {
+        Ok(()) | Err(rustix::io::Errno::NOTCONN) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
