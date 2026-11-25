@@ -107,16 +107,15 @@ read (`open-<random>.html`) and opens that file, so the code never appears in a 
 server removes the file once the code is used or has expired, and at its next start. Without
 `--open`, `ui` prints the link as `link`, for a browser you start yourself or an SSH forward.
 
+The page takes the code out of its address before anything else runs, and exchanges it at
+`POST /session` for the token, which it saves in the browser and sends as `Authorization: Bearer`
+on every request and on its live channel.
+
 `ui --open` answers `"opened": true` once the opener (`xdg-open`, or `open` on macOS) ran and
 exited without an error; that does not prove a browser read the file. A browser in a sandbox
 (Firefox as a snap, a Flatpak browser) usually cannot read the data folder, and `xdg-open` may
 hand an `.html` file to an editor. When the browser shows no web app, run `quadratique ui` and
 open the `link` it prints, within 60 seconds.
-
-The
-page takes the code out of its address before anything else runs, and exchanges it at
-`POST /session` for the token, which it saves in the browser and sends as `Authorization: Bearer`
-on every request and on its live channel.
 
 The server keeps the token in `web-token` in the data folder, mode `0600`. To sign every browser
 out, run `quadratique server sign-out`: it makes a new token, and each browser shows the sentence
