@@ -230,7 +230,7 @@ pub async fn start_with(
         return Err(ServerError::NotLoopback(address));
     }
     let own_account = callers::own_account()?;
-    callers::check_own_connection(own_account)?;
+    callers::check_own_connection(&own_account)?;
     let owner: closing::HomeLock = Arc::new(own(paths, waits).await?);
     let credentials = Credentials::open(paths.credentials())?.holding(Arc::clone(&owner));
     let store = Store::open(&paths.database)?;
@@ -324,11 +324,13 @@ mod callers {
         peer::owner_only(own_uid)
     }
 
-    pub fn check_own_connection(own_uid: u32) -> Result<(), ServerError> {
-        peer::check_own_connection(own_uid).map_err(unknown)
+    pub fn check_own_connection(own_uid: &u32) -> Result<(), ServerError> {
+        peer::check_own_connection(*own_uid).map_err(unknown)
     }
 }
 
+/// Only Linux tells this server which account owns the other end of a loopback connection. Elsewhere it refuses to
+/// start rather than answer another account of the machine: docs/decisions/0003-the-caller-check-on-macos-and-windows.md.
 #[cfg(not(target_os = "linux"))]
 mod callers {
     use std::sync::Arc;
@@ -337,14 +339,17 @@ mod callers {
     use crate::serve::Admit;
 
     pub fn own_account() -> Result<(), ServerError> {
-        Ok(())
+        Err(ServerError::CallersUnknown(format!(
+            "Quadratique cannot yet tell which account connects to its local listener on {}, so it does not serve there: another account of this machine could read and change your issues. Linux is supported; macOS is QUA-33, Windows QUA-34",
+            std::env::consts::OS
+        )))
     }
 
     pub fn owner_only((): ()) -> Admit {
-        Arc::new(|_| true)
+        Arc::new(|_| false)
     }
 
-    pub fn check_own_connection((): ()) -> Result<(), ServerError> {
+    pub fn check_own_connection((): &()) -> Result<(), ServerError> {
         Ok(())
     }
 }
