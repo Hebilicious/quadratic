@@ -366,6 +366,8 @@ jobs:
         needs.publish.result == 'success'
       )
     runs-on: ubuntu-latest
+    # The next push to main waits for this run: an index that does not answer must not hold it.
+    timeout-minutes: 5
     outputs:
       crates: ${{ steps.crates.outputs.crates }}
     steps:
@@ -379,7 +381,7 @@ jobs:
           # Prints the SHA-256 that the index records for $VERSION of the crate, or nothing when the index lacks it.
           indexed() {
             local answer
-            answer=$(curl --silent --show-error --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
+            answer=$(curl --silent --show-error --connect-timeout 10 --max-time 60 --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
               --write-out '\n%{http_code}' "https://index.crates.io/qu/ad/$1") || fail "crates.io's index did not answer for $1"
             case ${answer##*$'\n'} in
               200) jq -s -r --arg version "$VERSION" \
@@ -544,7 +546,7 @@ jobs:
           fail() { echo "::error::$*" >&2; exit 1; }
           indexed() {
             local answer
-            answer=$(curl --silent --show-error --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
+            answer=$(curl --silent --show-error --connect-timeout 10 --max-time 60 --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
               --write-out '\n%{http_code}' "https://index.crates.io/qu/ad/$1") || fail "crates.io's index did not answer for $1"
             case ${answer##*$'\n'} in
               200) jq -s -r --arg version "$VERSION" \
@@ -596,7 +598,7 @@ jobs:
           fail() { echo "::error::$*" >&2; exit 1; }
           indexed() {
             local answer
-            answer=$(curl --silent --show-error --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
+            answer=$(curl --silent --show-error --connect-timeout 10 --max-time 60 --user-agent "quadratique-release (https://github.com/$GITHUB_REPOSITORY)" \
               --write-out '\n%{http_code}' "https://index.crates.io/qu/ad/$1") || fail "crates.io's index did not answer for $1"
             case ${answer##*$'\n'} in
               200) jq -s -r --arg version "$VERSION" \

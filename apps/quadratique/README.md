@@ -821,7 +821,8 @@ runs on every push to `main`:
      uploads the server first and waits up to 60 seconds for the index to list it before it
      uploads the command line. Last, the index must record the recorded SHA-256 for both crates.
 
-   A crate version that the index already lists, with the recorded SHA-256, is skipped. No job
+   A crate version that the index already lists, with the recorded SHA-256, is skipped. When the
+   index already lists both crates, nothing is built and nothing compares their bytes. No job
    holds an App token and a crates.io token together, and no secret is stored for crates.io.
 
 The workflow writes with tokens of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
