@@ -91,7 +91,17 @@ embedding() {
   fi
   generated=$(printf '%s' "$report" | jq -r .out_dir)/web_app.rs
   [ -f "$generated" ] || { echo "the build script set embedded_web but wrote no $generated" >> "$scratch/check.log"; return 1; }
-  sed -n 's/.*include_bytes!("\(.*\)\/index\.html").*/\1/p' "$generated"
+  sed -n -E 's/.*include_bytes!\("(.*)(\/|\\\\)index\.html"\).*/\1/p' "$generated"
+}
+
+# A folder as the comparison needs it. On Windows (Git's bash, which has cygpath) build.rs writes the canonical Windows
+# path, `\\?\D:\a\...` with each backslash doubled, and the shell knows the folder as `/d/a/...`: both become `D:/a/...`.
+comparable() {
+  if [ "$1" = false ] || ! command -v cygpath > /dev/null; then
+    printf '%s\n' "$1"
+    return
+  fi
+  cygpath -m -l "$(printf '%s' "$1" | sed 's/\\\\/\\/g; s/^\\\\?\\//')"
 }
 
 expect_embedding() {
@@ -99,7 +109,7 @@ expect_embedding() {
   what=$2
   shift 2
   got=$(embedding "$@") || fail "$what: the build fails: $(tail -n 5 "$scratch/check.log")"
-  [ "$got" = "$wanted" ] || fail "$what: it embeds ${got:-a folder with no index.html}, not $wanted"
+  [ "$(comparable "$got")" = "$(comparable "$wanted")" ] || fail "$what: it embeds ${got:-a folder with no index.html}, not $wanted"
   pass "$what"
 }
 
@@ -127,7 +137,13 @@ QUADRATIQUE_WEB_DIST=$other expect_embedding "$other" "a build in the repository
 workspace=$scratch/workspace
 mkdir -p "$workspace/apps/quadratique"
 cp "$repository/LICENSE" "$workspace/LICENSE"
-for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md server cli catalog skill; do
+# The targets of the crates' links first: Git's bash on Windows copies a link's target, which must exist by then.
+# The catalog's node_modules is not part of a crate, and its links are junctions that Git's bash cannot copy.
+mkdir "$workspace/apps/quadratique/catalog"
+for entry in "$root/catalog"/*; do
+  [ "${entry##*/}" = node_modules ] || cp -a "$entry" "$workspace/apps/quadratique/catalog/"
+done
+for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md skill server cli; do
   cp -a "$root/$path" "$workspace/apps/quadratique/$path"
 done
 rm -rf "$workspace/apps/quadratique/server/web-dist"

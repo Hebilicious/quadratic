@@ -24,12 +24,12 @@ acid-cat-core.workspace = true
 bytes.workspace = true
 flate2.workspace = true
 futures.workspace = true
+getrandom.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util.workspace = true
 quadratique-server.workspace = true
-rustix = { workspace = true, features = ["fs", "rand"] }
 rustls.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -38,9 +38,14 @@ tokio-rustls.workspace = true
 webpki-roots.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
-rustix = { workspace = true, features = ["event"] }
 tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["event"] }
 
 # Lets `cargo binstall` download the archive of a GitHub release instead of building.
 [package.metadata.binstall]
