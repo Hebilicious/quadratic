@@ -19,8 +19,13 @@ use super::{
 
 /// What the command line can say about the process that the runtime file names.
 pub enum Evidence {
+    /// Made only on Linux; elsewhere `Proof` has no value.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Proven(Proof),
-    Unproven { pid: Option<u32>, why: String },
+    Unproven {
+        pid: Option<u32>,
+        why: String,
+    },
 }
 
 /// A process pinned by a pidfd, which runs a binary this install ran before and holds this home's lock.
