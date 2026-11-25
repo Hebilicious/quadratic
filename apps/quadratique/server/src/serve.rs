@@ -71,12 +71,12 @@ impl Drop for Served {
 }
 
 /// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn stop_listening(listener: &TcpListener) {
     let _ = rustix::net::shutdown(listener, rustix::net::Shutdown::Both);
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn stop_listening(_listener: &TcpListener) {}
 
 pub async fn serve(address: SocketAddr, routes: Routes, admit: Admit) -> std::io::Result<Served> {

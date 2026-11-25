@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
 use crate::git::repository::GIT_LIMIT;
 use crate::git::watcher::{self, Watcher};
 use crate::serve::{self, Admit, Connection, OWNER_ONLY};
-use crate::store::{Store, StoreError, refuse_git_work_tree};
+use crate::store::{Store, StoreError, canonical_folder, refuse_git_work_tree};
 use crate::web::{self, WebApp};
 
 mod closing;
@@ -54,7 +55,9 @@ impl Default for Waits {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
-    #[error("no directory for the workspace: set QUADRATIQUE_HOME, or HOME")]
+    #[error(
+        "no directory for the workspace: set QUADRATIQUE_HOME, or HOME (LOCALAPPDATA on Windows)"
+    )]
     NoHome,
     #[error(
         "{0} is not an IPv4 loopback address: Quadratique serves only this machine, on 127.0.0.1"
@@ -100,8 +103,14 @@ impl Paths {
     }
 
     pub fn from_env() -> Result<Paths, ServerError> {
+        Paths::from_variables(|name| std::env::var_os(name))
+    }
+
+    /// `QUADRATIQUE_HOME`, else the platform's folder for an application's data: `%LOCALAPPDATA%` on Windows,
+    /// `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` elsewhere.
+    fn from_variables(read: impl Fn(&str) -> Option<OsString>) -> Result<Paths, ServerError> {
         let variable = |name: &str| -> std::io::Result<Option<PathBuf>> {
-            std::env::var_os(name)
+            read(name)
                 .filter(|value| !value.is_empty())
                 .map(std::path::absolute)
                 .transpose()
@@ -109,11 +118,15 @@ impl Paths {
         if let Some(home) = variable("QUADRATIQUE_HOME")? {
             return Paths::in_home(&home);
         }
-        let user_home = variable("HOME")?.ok_or(ServerError::NoHome)?;
-        let data = if cfg!(target_os = "macos") {
-            user_home.join("Library/Application Support")
+        let data = if cfg!(windows) {
+            variable("LOCALAPPDATA")?.ok_or(ServerError::NoHome)?
         } else {
-            variable("XDG_DATA_HOME")?.unwrap_or_else(|| user_home.join(".local/share"))
+            let user_home = variable("HOME")?.ok_or(ServerError::NoHome)?;
+            if cfg!(target_os = "macos") {
+                user_home.join("Library/Application Support")
+            } else {
+                variable("XDG_DATA_HOME")?.unwrap_or_else(|| user_home.join(".local/share"))
+            }
         }
         .join(DIRECTORY);
         Ok(Paths {
@@ -230,7 +243,7 @@ pub async fn start_with(
         return Err(ServerError::NotLoopback(address));
     }
     let own_account = callers::own_account()?;
-    callers::check_own_connection(own_account)?;
+    callers::check_own_connection(&own_account)?;
     let owner: closing::HomeLock = Arc::new(own(paths, waits).await?);
     let credentials = Credentials::open(paths.credentials())?.holding(Arc::clone(&owner));
     let store = Store::open(&paths.database)?;
@@ -324,11 +337,13 @@ mod callers {
         peer::owner_only(own_uid)
     }
 
-    pub fn check_own_connection(own_uid: u32) -> Result<(), ServerError> {
-        peer::check_own_connection(own_uid).map_err(unknown)
+    pub fn check_own_connection(own_uid: &u32) -> Result<(), ServerError> {
+        peer::check_own_connection(*own_uid).map_err(unknown)
     }
 }
 
+/// Only Linux tells this server which account owns the other end of a loopback connection. Elsewhere it refuses to
+/// start rather than answer another account of the machine: docs/decisions/0003-the-caller-check-on-macos-and-windows.md.
 #[cfg(not(target_os = "linux"))]
 mod callers {
     use std::sync::Arc;
@@ -336,15 +351,21 @@ mod callers {
     use super::ServerError;
     use crate::serve::Admit;
 
-    pub fn own_account() -> Result<(), ServerError> {
-        Ok(())
+    /// Never made: `own_account` always fails here.
+    pub struct NoAccount;
+
+    pub fn own_account() -> Result<NoAccount, ServerError> {
+        Err(ServerError::CallersUnknown(format!(
+            "Quadratique cannot yet tell which account connects to its local listener on {}, so it does not serve there: another account of this machine could read and change your issues. Linux is supported; macOS is QUA-33, Windows QUA-34",
+            std::env::consts::OS
+        )))
     }
 
-    pub fn owner_only((): ()) -> Admit {
-        Arc::new(|_| true)
+    pub fn owner_only(_: NoAccount) -> Admit {
+        Arc::new(|_| false)
     }
 
-    pub fn check_own_connection((): ()) -> Result<(), ServerError> {
+    pub fn check_own_connection(_: &NoAccount) -> Result<(), ServerError> {
         Ok(())
     }
 }
@@ -355,9 +376,8 @@ async fn own(paths: &Paths, waits: Waits) -> Result<File, ServerError> {
     let directory = paths.database.parent().unwrap_or(Path::new("."));
     refuse_git_work_tree(directory)?;
     std::fs::create_dir_all(directory)?;
-    let database = directory
-        .canonicalize()?
-        .join(paths.database.file_name().unwrap_or_default());
+    let database =
+        canonical_folder(directory)?.join(paths.database.file_name().unwrap_or_default());
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -495,4 +515,71 @@ async fn stopped() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use super::{Paths, ServerError};
+
+    fn paths_with(variables: &[(&str, &str)]) -> Result<Paths, ServerError> {
+        Paths::from_variables(|name| {
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| OsString::from(value))
+        })
+    }
+
+    fn folder(parts: &[&str]) -> PathBuf {
+        let mut root = std::path::absolute(std::path::MAIN_SEPARATOR_STR).expect("the root");
+        root.extend(parts);
+        root
+    }
+
+    #[test]
+    fn quadratique_home_names_the_folder_on_every_platform() {
+        let home = folder(&["q"]);
+        let paths =
+            paths_with(&[("QUADRATIQUE_HOME", home.to_str().expect("a path"))]).expect("paths");
+
+        assert_eq!(paths.database, home.join("workspace.db"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_store_is_in_local_app_data() {
+        let local = folder(&["Users", "me", "AppData", "Local"]);
+        let paths =
+            paths_with(&[("LOCALAPPDATA", local.to_str().expect("a path"))]).expect("paths");
+
+        assert_eq!(
+            paths.database,
+            local.join("quadratique").join("workspace.db")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_the_store_is_in_application_support() {
+        let paths = paths_with(&[("HOME", "/Users/me")]).expect("paths");
+
+        assert_eq!(
+            paths.database,
+            PathBuf::from("/Users/me/Library/Application Support/quadratique/workspace.db")
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn elsewhere_the_store_is_in_the_xdg_data_folder() {
+        let paths = paths_with(&[("HOME", "/home/me")]).expect("paths");
+
+        assert_eq!(
+            paths.database,
+            PathBuf::from("/home/me/.local/share/quadratique/workspace.db")
+        );
+    }
 }

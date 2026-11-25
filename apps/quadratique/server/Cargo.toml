@@ -24,14 +24,15 @@ acid-cat-core.workspace = true
 base64.workspace = true
 bytes.workspace = true
 doltlite.workspace = true
+dunce.workspace = true
 futures.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+getrandom.workspace = true
 jiff.workspace = true
 jsonschema.workspace = true
-rustix = { workspace = true, features = ["net", "rand"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -39,9 +40,19 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
+# The caller check of the local listener (src/peer.rs) asks the Linux kernel.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["net"] }
+
+# doltlite links zlib by name and Windows has none: this builds one from source for it to link.
+[target.'cfg(windows)'.dependencies]
+libz-sys.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true
-rustix = { workspace = true, features = ["event", "fs", "process"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-util.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["event", "fs", "process"] }

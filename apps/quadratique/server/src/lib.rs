@@ -1,3 +1,7 @@
+// doltlite links zlib by name, and this is the zlib it finds on Windows.
+#[cfg(windows)]
+use libz_sys as _;
+
 pub mod app;
 pub mod assets;
 pub mod credentials;

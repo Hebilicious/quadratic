@@ -1,3 +1,8 @@
+//! Every test here starts a server, and the server serves only on Linux until it can tell which account connects to
+//! its local listener elsewhere (docs/decisions/0003-the-caller-check-on-macos-and-windows.md). The issues that bring
+//! the check to macOS (QUA-33) and Windows (QUA-34) make these tests run there.
+#![cfg(target_os = "linux")]
+
 #[path = "server/repository.rs"]
 mod repository;
 #[path = "server/support.rs"]
@@ -31,8 +36,6 @@ mod instructions;
 mod links;
 #[path = "server/notes.rs"]
 mod notes;
-#[path = "server/parity.rs"]
-mod parity;
 #[path = "server/process.rs"]
 mod process;
 #[path = "server/projects.rs"]

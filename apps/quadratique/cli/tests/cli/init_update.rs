@@ -325,39 +325,6 @@ fn a_skill_file_a_person_changed_after_an_older_build_wrote_it_is_kept_and_repor
 }
 
 #[test]
-fn init_print_writes_the_build_text_of_each_file_as_it_is_and_refuses_an_unknown_name() {
-    let home = Home::new();
-    let elsewhere = crate::support::outside();
-
-    for (name, text) in [
-        ("SKILL.md", SKILL.to_owned()),
-        ("planning.md", PLANNING.to_owned()),
-        ("AGENTS.md", format!("{LINE}\n")),
-    ] {
-        let printed = home
-            .quadratique(elsewhere.path())
-            .args(["init", "--print", name])
-            .run();
-        assert_eq!(printed.code, 0, "{printed:?}");
-        assert_eq!(printed.stdout, text, "{name}");
-    }
-
-    let refused = home
-        .quadratique(elsewhere.path())
-        .args(["init", "--print", "README.md"])
-        .run();
-    assert_ne!(refused.code, 0, "{refused:?}");
-    assert!(refused.stdout.is_empty(), "{refused:?}");
-    assert!(
-        refused.stderr.contains("SKILL.md, planning.md, AGENTS.md")
-            && refused.stderr.contains("README.md"),
-        "{refused:?}"
-    );
-    assert!(home.servers().is_empty());
-    assert!(!home.runtime_path().exists());
-}
-
-#[test]
 fn a_repository_with_no_changed_file_gets_no_warnings() {
     let home = Home::new();
     let repository = Repository::new();

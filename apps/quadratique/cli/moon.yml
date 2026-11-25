@@ -24,7 +24,12 @@ tasks:
   build:
     command: "cargo build -p quadratique"
     inputs: ["$CFLAGS", "@group(sources)", "@group(server)", "@group(workspace)"]
-    outputs: ["/apps/quadratique/target/debug/quadratique"]
+    # The binary is `quadratique`, or `quadratique.exe` on Windows; cargo writes its dependency list and debug symbols
+    # next to it.
+    outputs:
+      - "/apps/quadratique/target/debug/quadratique*"
+      - "!/apps/quadratique/target/debug/quadratique.d"
+      - "!/apps/quadratique/target/debug/quadratique.pdb"
   test:
     description: "The command line's tests, built in their own target folder: cargo test links another quadratique binary than cargo build, and replacing target/debug/quadratique while a test runs it breaks the test."
     command: "cargo test -p quadratique --target-dir ../target/cli-test"
