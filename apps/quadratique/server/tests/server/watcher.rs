@@ -1,22 +1,10 @@
-#[cfg(target_os = "linux")]
-use std::os::fd::OwnedFd;
-use std::sync::Arc;
 use std::time::Duration;
 
-use acid_cat_core::{Outcome, Session};
-use quadratique_server::app::{Context, application};
-use quadratique_server::domain::{Actor, Caller, WorkingCopy};
 use quadratique_server::git::watcher::{LookFailed, Watcher};
 use quadratique_server::store::{
     AsOf, Author, Call, NewIssue, Project, Store, Workflow, WorkflowStatus,
 };
-#[cfg(target_os = "linux")]
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
-#[cfg(target_os = "linux")]
-use rustix::process::{Pid, PidfdFlags, pidfd_open};
-use serde_json::json;
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
 
 use crate::repository::Repository;
 use crate::support::{HANG_GUARD, within};
@@ -227,112 +215,124 @@ async fn confirmations_asked_during_a_look_are_answered_by_the_next_look_each_wi
     within("the watcher's stop", watcher.stop()).await;
 }
 
-/// Watches git through Linux's pidfd and /proc.
+/// These tests watch git through Linux's pidfd and /proc.
 #[cfg(target_os = "linux")]
-#[tokio::test(flavor = "multi_thread")]
-async fn a_stop_during_a_look_ends_it_without_waiting_for_git() {
-    let board = Board::open();
-    let stalled = Repository::new();
-    let _stalled_refs = stalled.stall_ref_reads();
-    board.project("AAA", &stalled).await;
-    let watcher = Watcher::start(board.store.clone(), HANG_GUARD, HANG_GUARD * 10, HANG_GUARD);
-    let repository = stalled.common_dir();
-    within("git starting on the stalled repository", async {
-        while git_running_on(&repository).is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
+mod git_processes {
+    use std::os::fd::OwnedFd;
+    use std::sync::Arc;
 
-    let stalled_git: Vec<OwnedFd> = git_running_on(&repository)
-        .iter()
-        .filter_map(|pid| pidfd(pid))
-        .collect();
-    assert!(!stalled_git.is_empty(), "no stalled git to wait on");
+    use acid_cat_core::{Outcome, Session};
+    use quadratique_server::app::{Context, application};
+    use quadratique_server::domain::{Actor, Caller, WorkingCopy};
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    use rustix::process::{Pid, PidfdFlags, pidfd_open};
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
 
-    within("the watcher's stop", watcher.stop()).await;
+    use super::*;
 
-    for git in &stalled_git {
-        assert!(
-            ended_within(git, HANG_GUARD),
-            "the stalled git still runs {HANG_GUARD:?} after the stop"
-        );
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn pidfd(pid: &str) -> Option<OwnedFd> {
-    let pid = Pid::from_raw(pid.parse().ok()?)?;
-    pidfd_open(pid, PidfdFlags::empty()).ok()
-}
-
-#[cfg(target_os = "linux")]
-fn ended_within(process: &OwnedFd, limit: Duration) -> bool {
-    let limit = Timespec::try_from(limit).expect("a limit poll can take");
-    let mut fds = [PollFd::new(process, PollFlags::IN)];
-    poll(&mut fds, Some(&limit)).expect("the process can be waited on") == 1
-}
-
-/// Watches git through Linux's pidfd and /proc.
-#[cfg(target_os = "linux")]
-#[tokio::test(flavor = "multi_thread")]
-async fn a_read_of_a_started_issue_asks_for_a_look_and_answers_while_git_still_stalls() {
-    let board = Board::open();
-    let stalled = Repository::new();
-    board.project("ABC", &stalled).await;
-    let issue = board
-        .issue_in("ABC", "Parse the headers", "in-review")
-        .await;
-    let read_wait = Duration::from_millis(200);
-    let git_limit = HANG_GUARD * 10;
-    let watcher = Watcher::start(board.store.clone(), HANG_GUARD * 10, git_limit, read_wait);
-    within("the first look", watcher.look()).await;
-    let _stalled_refs = stalled.stall_ref_reads();
-    let repository = stalled.common_dir();
-    assert_eq!(git_running_on(&repository), Vec::<String>::new());
-    let app = application().expect("the application");
-    let human = Caller {
-        actor: Actor::without_header(),
-        working_copy: WorkingCopy::default(),
-    };
-    let context = Context::watching(board.store.clone(), human, watcher.looks());
-    let session = Session::open(&app, "cli", Arc::new(context));
-
-    let read = within(
-        "a read shorter than the git limit",
-        session.invoke(
-            "issue.get",
-            json!({ "issue": issue }),
-            &CancellationToken::new(),
-        ),
-    )
-    .await;
-
-    match read {
-        Outcome::Value(answer) => assert_eq!(answer["issue"]["status"], "in-review", "{answer}"),
-        other => panic!("the read failed: {other:?}"),
-    }
-    within("git started by the read's look", async {
-        while git_running_on(&repository).is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    within("the watcher's stop", watcher.stop()).await;
-}
-
-#[cfg(target_os = "linux")]
-fn git_running_on(repository: &str) -> Vec<String> {
-    let wanted = format!("--git-dir={repository}");
-    std::fs::read_dir("/proc")
-        .expect("the process list is readable")
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let arguments = std::fs::read(entry.path().join("cmdline")).ok()?;
-            arguments
-                .split(|byte| *byte == 0)
-                .any(|argument| argument == wanted.as_bytes())
-                .then(|| entry.file_name().to_string_lossy().into_owned())
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_during_a_look_ends_it_without_waiting_for_git() {
+        let board = Board::open();
+        let stalled = Repository::new();
+        let _stalled_refs = stalled.stall_ref_reads();
+        board.project("AAA", &stalled).await;
+        let watcher = Watcher::start(board.store.clone(), HANG_GUARD, HANG_GUARD * 10, HANG_GUARD);
+        let repository = stalled.common_dir();
+        within("git starting on the stalled repository", async {
+            while git_running_on(&repository).is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         })
-        .collect()
+        .await;
+
+        let stalled_git: Vec<OwnedFd> = git_running_on(&repository)
+            .iter()
+            .filter_map(|pid| pidfd(pid))
+            .collect();
+        assert!(!stalled_git.is_empty(), "no stalled git to wait on");
+
+        within("the watcher's stop", watcher.stop()).await;
+
+        for git in &stalled_git {
+            assert!(
+                ended_within(git, HANG_GUARD),
+                "the stalled git still runs {HANG_GUARD:?} after the stop"
+            );
+        }
+    }
+
+    fn pidfd(pid: &str) -> Option<OwnedFd> {
+        let pid = Pid::from_raw(pid.parse().ok()?)?;
+        pidfd_open(pid, PidfdFlags::empty()).ok()
+    }
+
+    fn ended_within(process: &OwnedFd, limit: Duration) -> bool {
+        let limit = Timespec::try_from(limit).expect("a limit poll can take");
+        let mut fds = [PollFd::new(process, PollFlags::IN)];
+        poll(&mut fds, Some(&limit)).expect("the process can be waited on") == 1
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_of_a_started_issue_asks_for_a_look_and_answers_while_git_still_stalls() {
+        let board = Board::open();
+        let stalled = Repository::new();
+        board.project("ABC", &stalled).await;
+        let issue = board
+            .issue_in("ABC", "Parse the headers", "in-review")
+            .await;
+        let read_wait = Duration::from_millis(200);
+        let git_limit = HANG_GUARD * 10;
+        let watcher = Watcher::start(board.store.clone(), HANG_GUARD * 10, git_limit, read_wait);
+        within("the first look", watcher.look()).await;
+        let _stalled_refs = stalled.stall_ref_reads();
+        let repository = stalled.common_dir();
+        assert_eq!(git_running_on(&repository), Vec::<String>::new());
+        let app = application().expect("the application");
+        let human = Caller {
+            actor: Actor::without_header(),
+            working_copy: WorkingCopy::default(),
+        };
+        let context = Context::watching(board.store.clone(), human, watcher.looks());
+        let session = Session::open(&app, "cli", Arc::new(context));
+
+        let read = within(
+            "a read shorter than the git limit",
+            session.invoke(
+                "issue.get",
+                json!({ "issue": issue }),
+                &CancellationToken::new(),
+            ),
+        )
+        .await;
+
+        match read {
+            Outcome::Value(answer) => {
+                assert_eq!(answer["issue"]["status"], "in-review", "{answer}")
+            }
+            other => panic!("the read failed: {other:?}"),
+        }
+        within("git started by the read's look", async {
+            while git_running_on(&repository).is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        within("the watcher's stop", watcher.stop()).await;
+    }
+
+    fn git_running_on(repository: &str) -> Vec<String> {
+        let wanted = format!("--git-dir={repository}");
+        std::fs::read_dir("/proc")
+            .expect("the process list is readable")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let arguments = std::fs::read(entry.path().join("cmdline")).ok()?;
+                arguments
+                    .split(|byte| *byte == 0)
+                    .any(|argument| argument == wanted.as_bytes())
+                    .then(|| entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect()
+    }
 }

@@ -233,12 +233,15 @@ Quadratique reads.
 
 ## Who can talk to the server
 
-The server listens on `127.0.0.1`, and on Linux it answers only processes of the account that
-runs it. At each connection it asks the kernel which account owns the caller's socket
-(`NETLINK_SOCK_DIAG`). A process of any other account, `root` included, gets `403` "This server
+The server listens on `127.0.0.1`, and on Linux and macOS it answers only processes of the
+account that runs it. At each connection it asks the kernel which account owns the caller's
+socket: on Linux through `NETLINK_SOCK_DIAG`; on macOS by looking for the caller's socket among
+the sockets of its own account's processes (`libproc`), which the kernel shows to no other
+account. On Windows the server does not start yet (QUA-34). A process of any other account, `root` included, gets `403` "This server
 answers only processes of its own account." A server that cannot ask the kernel who is
 connecting, in a sandbox that forbids netlink or on a kernel without its `inet_diag` module, does
-not start and says why. So does a server that runs in a user namespace where its account is not
+not start and says why; on macOS, so does a server that cannot find the socket of a test
+connection of its own. So does a server that runs in a user namespace where its account is not
 mapped, where the kernel would show every unmapped caller as that same account. If a lookup
 fails once the server runs, the server refuses that connection and says so once in its log.
 Every process of your own account is you, whatever name it gives. The rule sees only the process at the other end of the connection: a proxy or port

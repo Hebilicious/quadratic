@@ -21,7 +21,12 @@ It has these parts:
 
 You need:
 
-- Linux with a running systemd user manager (`systemctl --user status` answers).
+- Linux with a running systemd user manager (`systemctl --user status` answers). On macOS the
+  server and the command line build and run: after `proto use` and `pnpm install`, `moon run
+  quadratique-web:build`, then `sh apps/quadratique/install/build.sh apps/quadratique/web/dist
+  target` prints the path of the binary (it needs the Xcode command line tools). The install
+  script below is Linux-only until QUA-37.
+  Windows is not supported yet (QUA-34).
 - git, a C compiler and the zlib development files: the store engine is compiled from C. On
   Debian or Ubuntu: `sudo apt install git build-essential zlib1g-dev`.
 - [proto](https://moonrepo.dev/proto), which installs the other tools at the versions that

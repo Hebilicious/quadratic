@@ -134,8 +134,7 @@ impl Repository {
 
     pub fn stall_ref_reads(&self) -> StalledRefs {
         let fifo = self.root.join(".git/packed-refs");
-        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::RUSR | Mode::WUSR)
-            .expect("the stalled refs are made");
+        make_fifo(&fifo);
         StalledRefs { fifo }
     }
 
@@ -400,4 +399,21 @@ impl Running {
         let (home, code) = self.stop().await;
         Running::resume(home, code).await
     }
+}
+
+#[cfg(target_os = "linux")]
+fn make_fifo(path: &Path) {
+    rustix::fs::mkfifoat(rustix::fs::CWD, path, Mode::RUSR | Mode::WUSR)
+        .expect("the stalled refs are made");
+}
+
+/// rustix has no `mkfifoat` on macOS.
+#[cfg(target_os = "macos")]
+fn make_fifo(path: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "the stalled refs are made");
 }

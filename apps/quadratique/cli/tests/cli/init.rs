@@ -298,6 +298,8 @@ fn a_project_key_that_another_repository_has_is_refused_before_any_change() {
     assert!(!second.root.join("AGENTS.md").exists());
 }
 
+/// macOS file systems refuse a name that is not UTF-8 (`EILSEQ`), so the path cannot exist there.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_agents_file_that_leads_to_a_path_that_is_not_utf8_is_refused_before_any_change() {
     use std::os::unix::ffi::OsStrExt;
