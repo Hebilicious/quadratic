@@ -21,6 +21,7 @@ base64 = "0.22"
 bytes = "1"
 doltlite = "=0.51.13"
 dunce = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures = "0.3"
 getrandom = "0.3"
 http = "1"
@@ -32,13 +33,17 @@ jsonschema = { version = "0.58", default-features = false }
 jiff = "0.2"
 proptest = "1.7"
 rustix = { version = "1", features = ["process"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
 tempfile = "3"
 thiserror = "2"
 tokio = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = "0.7"
+webpki-roots = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

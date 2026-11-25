@@ -90,7 +90,12 @@ impl Home {
     }
 
     pub fn quadratique(&self, directory: &Path) -> Quadratique {
-        let mut command = Command::new(BINARY);
+        self.quadratique_at(Path::new(BINARY), directory)
+    }
+
+    /// The binary at `program` instead of the one under test, as installed elsewhere.
+    pub fn quadratique_at(&self, program: &Path, directory: &Path) -> Quadratique {
+        let mut command = Command::new(program);
         command
             .current_dir(directory)
             .env_clear()
