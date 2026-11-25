@@ -275,12 +275,42 @@ impl Drop for Pass {
     }
 }
 
+/// Writes an executable file through a child process. A file that this test process held open
+/// for writing could be inherited by a process that another test forks at that moment, and an
+/// exec of the file would then fail with "Text file busy".
+fn write_executable(path: &Path, from: Option<&Path>, text: &str) {
+    let mut command = std::process::Command::new("sh");
+    match from {
+        Some(source) => command
+            .args(["-c", "cp -- \"$1\" \"$0\""])
+            .arg(path)
+            .arg(source),
+        None => command.args(["-c", "cat > \"$0\""]).arg(path),
+    };
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("sh runs");
+    let mut stdin = child.stdin.take().expect("a piped standard input");
+    stdin
+        .write_all(text.as_bytes())
+        .expect("the text is written");
+    drop(stdin);
+    assert!(child.wait().expect("sh ends").success());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A copy of the binary under test: a new file, written by a child process.
+fn copy_binary(path: &Path) {
+    write_executable(path, Some(Path::new(BINARY)), "");
+}
+
 /// A copy of the binary under test at `path`: a hard link where the file system allows it. An
 /// upgrade renames a new file over it and never writes into the linked file.
 fn place_binary(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     if std::fs::hard_link(BINARY, path).is_err() {
-        std::fs::copy(BINARY, path).unwrap();
+        copy_binary(path);
     }
 }
 
@@ -326,9 +356,9 @@ impl Installed {
     }
 
     fn systemctl(&self, script: &str) {
-        let path = self.tools.join("systemctl");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let staged = self.tools.join("systemctl.new");
+        write_executable(&staged, None, script);
+        std::fs::rename(&staged, self.tools.join("systemctl")).unwrap();
     }
 
     fn quadratique(&self, releases: &Releases) -> Quadratique {
@@ -390,7 +420,7 @@ impl Installed {
         let servers = self.home.servers();
         assert_eq!(servers.len(), 1, "{servers:?}");
         let copy = self.binary.with_file_name("copy");
-        std::fs::copy(BINARY, &copy).unwrap();
+        copy_binary(&copy);
         std::fs::rename(&copy, &self.binary).unwrap();
         servers[0]
     }
@@ -789,7 +819,7 @@ fn a_binary_replaced_while_the_upgrade_ran_is_not_replaced_again() {
         Reply::After(
             Arc::new(move || {
                 let copy = binary.with_file_name("copy");
-                std::fs::copy(BINARY, &copy).unwrap();
+                copy_binary(&copy);
                 std::fs::rename(&copy, &binary).unwrap();
             }),
             Box::new(described),
