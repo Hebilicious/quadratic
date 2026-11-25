@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -54,7 +55,9 @@ impl Default for Waits {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
-    #[error("no directory for the workspace: set QUADRATIQUE_HOME, or HOME")]
+    #[error(
+        "no directory for the workspace: set QUADRATIQUE_HOME, or HOME (LOCALAPPDATA on Windows)"
+    )]
     NoHome,
     #[error(
         "{0} is not an IPv4 loopback address: Quadratique serves only this machine, on 127.0.0.1"
@@ -100,8 +103,14 @@ impl Paths {
     }
 
     pub fn from_env() -> Result<Paths, ServerError> {
+        Paths::from_variables(|name| std::env::var_os(name))
+    }
+
+    /// `QUADRATIQUE_HOME`, else the platform's folder for an application's data: `%LOCALAPPDATA%` on Windows,
+    /// `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` elsewhere.
+    fn from_variables(read: impl Fn(&str) -> Option<OsString>) -> Result<Paths, ServerError> {
         let variable = |name: &str| -> std::io::Result<Option<PathBuf>> {
-            std::env::var_os(name)
+            read(name)
                 .filter(|value| !value.is_empty())
                 .map(std::path::absolute)
                 .transpose()
@@ -109,11 +118,15 @@ impl Paths {
         if let Some(home) = variable("QUADRATIQUE_HOME")? {
             return Paths::in_home(&home);
         }
-        let user_home = variable("HOME")?.ok_or(ServerError::NoHome)?;
-        let data = if cfg!(target_os = "macos") {
-            user_home.join("Library/Application Support")
+        let data = if cfg!(windows) {
+            variable("LOCALAPPDATA")?.ok_or(ServerError::NoHome)?
         } else {
-            variable("XDG_DATA_HOME")?.unwrap_or_else(|| user_home.join(".local/share"))
+            let user_home = variable("HOME")?.ok_or(ServerError::NoHome)?;
+            if cfg!(target_os = "macos") {
+                user_home.join("Library/Application Support")
+            } else {
+                variable("XDG_DATA_HOME")?.unwrap_or_else(|| user_home.join(".local/share"))
+            }
         }
         .join(DIRECTORY);
         Ok(Paths {
@@ -500,4 +513,71 @@ async fn stopped() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use super::{Paths, ServerError};
+
+    fn paths_with(variables: &[(&str, &str)]) -> Result<Paths, ServerError> {
+        Paths::from_variables(|name| {
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| OsString::from(value))
+        })
+    }
+
+    fn folder(parts: &[&str]) -> PathBuf {
+        let mut root = std::path::absolute(std::path::MAIN_SEPARATOR_STR).expect("the root");
+        root.extend(parts);
+        root
+    }
+
+    #[test]
+    fn quadratique_home_names_the_folder_on_every_platform() {
+        let home = folder(&["q"]);
+        let paths =
+            paths_with(&[("QUADRATIQUE_HOME", home.to_str().expect("a path"))]).expect("paths");
+
+        assert_eq!(paths.database, home.join("workspace.db"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_store_is_in_local_app_data() {
+        let local = folder(&["Users", "me", "AppData", "Local"]);
+        let paths =
+            paths_with(&[("LOCALAPPDATA", local.to_str().expect("a path"))]).expect("paths");
+
+        assert_eq!(
+            paths.database,
+            local.join("quadratique").join("workspace.db")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_the_store_is_in_application_support() {
+        let paths = paths_with(&[("HOME", "/Users/me")]).expect("paths");
+
+        assert_eq!(
+            paths.database,
+            PathBuf::from("/Users/me/Library/Application Support/quadratique/workspace.db")
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn elsewhere_the_store_is_in_the_xdg_data_folder() {
+        let paths = paths_with(&[("HOME", "/home/me")]).expect("paths");
+
+        assert_eq!(
+            paths.database,
+            PathBuf::from("/home/me/.local/share/quadratique/workspace.db")
+        );
+    }
 }
