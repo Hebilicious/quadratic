@@ -14,29 +14,46 @@ use super::{Attempt, Found, Home, LifeError, OwnedChild, POLL, Stopped, find, lo
 use crate::process::{alive, ask_to_stop};
 
 pub(super) async fn ensure(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
-    match drive(home, Phase::Finding, limit).await? {
+    match drive(home, Phase::Finding, limit, false).await? {
         Settled::Running(runtime) => Ok(runtime),
-        Settled::NotRunning | Settled::Stopped { .. } | Settled::Closing { .. } => {
-            Err(LifeError::NoAnswer {
-                pid: None,
-                log: home.log(),
-            })
-        }
+        Settled::NotRunning
+        | Settled::Stopped { .. }
+        | Settled::Closing { .. }
+        | Settled::NotLegacy => Err(LifeError::NoAnswer {
+            pid: None,
+            log: home.log(),
+        }),
     }
 }
 
-pub(super) async fn stop(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
-    match drive(home, Phase::FindingToStop, limit).await? {
-        Settled::Stopped { pid } => Ok(Stopped::Ended {
-            pid,
-            generation: None,
-        }),
-        Settled::Closing { pid } => Ok(Stopped::Closing {
-            pid,
-            generation: None,
-        }),
-        Settled::NotRunning | Settled::Running(_) => Ok(Stopped::NotRunning),
-    }
+pub(super) enum Stop {
+    Done(Stopped),
+    /// The server answered with a control version: it is not a build before the socket, and this path signals
+    /// nothing. The caller goes on through the socket.
+    NotLegacy,
+}
+
+/// Signals the process number that the server's identity gives. With `only_legacy`, the identity is checked again
+/// right before the signal, and one with a control version ends this path without a signal.
+pub(super) async fn stop(
+    home: &Home,
+    limit: Duration,
+    only_legacy: bool,
+) -> Result<Stop, LifeError> {
+    Ok(
+        match drive(home, Phase::FindingToStop, limit, only_legacy).await? {
+            Settled::Stopped { pid } => Stop::Done(Stopped::Ended {
+                pid,
+                generation: None,
+            }),
+            Settled::Closing { pid } => Stop::Done(Stopped::Closing {
+                pid,
+                generation: None,
+            }),
+            Settled::NotRunning | Settled::Running(_) => Stop::Done(Stopped::NotRunning),
+            Settled::NotLegacy => Stop::NotLegacy,
+        },
+    )
 }
 
 enum Phase {
@@ -53,6 +70,7 @@ enum Settled {
     NotRunning,
     Stopped { pid: u32 },
     Closing { pid: Option<u32> },
+    NotLegacy,
 }
 
 enum Next {
@@ -61,11 +79,16 @@ enum Next {
     Settled(Settled),
 }
 
-async fn drive(home: &Home, first: Phase, limit: Duration) -> Result<Settled, LifeError> {
+async fn drive(
+    home: &Home,
+    first: Phase,
+    limit: Duration,
+    only_legacy: bool,
+) -> Result<Settled, LifeError> {
     let deadline = Instant::now() + limit;
     let mut phase = first;
     loop {
-        phase = match step(home, phase).await? {
+        phase = match step(home, phase, only_legacy).await? {
             Next::Settled(settled) => return Ok(settled),
             Next::Now(next) => next,
             Next::AfterPoll(next) => {
@@ -87,7 +110,7 @@ async fn drive(home: &Home, first: Phase, limit: Duration) -> Result<Settled, Li
     }
 }
 
-async fn step(home: &Home, phase: Phase) -> Result<Next, LifeError> {
+async fn step(home: &Home, phase: Phase, only_legacy: bool) -> Result<Next, LifeError> {
     Ok(match phase {
         Phase::Finding => match find(home).await? {
             Found::Ours(runtime) => Next::Settled(Settled::Running(runtime)),
@@ -168,6 +191,11 @@ async fn step(home: &Home, phase: Phase) -> Result<Next, LifeError> {
                 return Ok(Next::Settled(Settled::NotRunning));
             }
             match find(home).await? {
+                Found::Ours(runtime) | Found::OtherInterface { runtime, .. }
+                    if only_legacy && runtime.control.is_some() =>
+                {
+                    Next::Settled(Settled::NotLegacy)
+                }
                 Found::Ours(runtime) | Found::OtherInterface { runtime, .. } => {
                     ask_to_stop(runtime.pid)?;
                     Next::AfterPoll(Phase::Stopping { pid: runtime.pid })

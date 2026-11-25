@@ -452,6 +452,29 @@ pub async fn start_by(
     .await
 }
 
+/// As [`start_by`], within what is left of the caller's deadline: a take-over passes the rest of its own, so that the
+/// whole command keeps one deadline.
+pub async fn start_by_within(
+    home: &Prepared,
+    address: SocketAddr,
+    started: Started,
+    left: Duration,
+) -> Result<Server, ServerError> {
+    let waits = Waits {
+        start: left,
+        probe: PROBE_LIMIT.min(left),
+    };
+    start_prepared(
+        home,
+        address,
+        WebApp::from_env(),
+        watcher::EVERY,
+        waits,
+        started,
+    )
+    .await
+}
+
 pub async fn start_with(
     paths: &Paths,
     address: SocketAddr,
@@ -745,6 +768,27 @@ pub enum Unanswered {
 }
 
 impl Unanswered {
+    /// A connection that the server closed or reset is nobody listening; any other failure is not an answer.
+    fn of_write(error: std::io::Error) -> Unanswered {
+        match error.kind() {
+            std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted => Unanswered::NotListening(error),
+            _ => Unanswered::Malformed(format!("the connection failed: {error}")),
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Unanswered::NotListening(error)
+            | Unanswered::NotPermitted(error)
+            | Unanswered::PathError(error) => error.to_string(),
+            Unanswered::NotReady(why) | Unanswered::Malformed(why) => why.clone(),
+            Unanswered::OwnerOnly => OWNER_ONLY.to_owned(),
+            Unanswered::Stalled => "no full answer".to_owned(),
+        }
+    }
+
     pub fn of_connect(error: std::io::Error) -> Unanswered {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             Unanswered::NotPermitted(error)
@@ -817,20 +861,43 @@ pub enum StopAnswer {
     OtherGeneration(Option<String>),
     /// Any other status: a server that does not serve the stop request.
     Refused(String),
+    /// The whole request was sent and no answer came back: the server may have accepted the stop and failed to write
+    /// its answer, or never read the request. Why.
+    Unconfirmed(String),
 }
 
-/// Asks the server on the socket of `home` to stop, if it is still the generation `generation`, within the probe
-/// limit. The socket is checked as for [`identity_over_socket`].
+/// Asks the server on the socket of `home` to stop, if it is still the generation `generation`, within `limit`. The
+/// socket is checked as for [`identity_over_socket`]. Before the request is sent, the errors are those of an identity
+/// probe; after it, any failure, a timeout included, is [`StopAnswer::Unconfirmed`].
 #[cfg(unix)]
-pub async fn stop_over_socket(home: &Prepared, generation: &str) -> Result<StopAnswer, Unanswered> {
+pub async fn stop_over_socket(
+    home: &Prepared,
+    generation: &str,
+    limit: Duration,
+) -> Result<StopAnswer, Unanswered> {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let body = serde_json::json!({ "generation": generation }).to_string();
     let request = format!(
         "POST {STOP} HTTP/1.1\r\nHost: {SOCKET_AUTHORITY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
+    let sent = AtomicBool::new(false);
     let asking = async {
-        let stream = connect_socket(home).await?;
-        let (status, body) = exchange(stream, &request).await?;
+        let mut stream = connect_socket(home).await?;
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(Unanswered::of_write)?;
+        sent.store(true, Ordering::SeqCst);
+        let (status, body) = match read_answer(stream).await {
+            Ok(answer) => answer,
+            Err(unanswered) => {
+                return Ok(StopAnswer::Unconfirmed(format!(
+                    "the request was sent and the answer was lost ({})",
+                    unanswered.describe()
+                )));
+            }
+        };
         let named = || {
             serde_json::from_str::<StopAnswerBody>(&body)
                 .ok()
@@ -847,9 +914,13 @@ pub async fn stop_over_socket(home: &Prepared, generation: &str) -> Result<StopA
             other => StopAnswer::Refused(format!("the stop request got status {other}")),
         })
     };
-    tokio::time::timeout(PROBE_LIMIT, asking)
-        .await
-        .unwrap_or(Err(Unanswered::Stalled))
+    match tokio::time::timeout(limit, asking).await {
+        Ok(answer) => answer,
+        Err(_) if sent.load(Ordering::SeqCst) => Ok(StopAnswer::Unconfirmed(format!(
+            "the request was sent and no answer came within {limit:?}"
+        ))),
+        Err(_) => Err(Unanswered::Stalled),
+    }
 }
 
 /// A connection to the socket of `home`, trusted only as a socket of this account with mode 0600. `EINTR` and `EAGAIN`
@@ -906,19 +977,20 @@ async fn exchange(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     request: &str,
 ) -> Result<(String, String), Unanswered> {
-    let gone = |error: std::io::Error| match error.kind() {
-        std::io::ErrorKind::ConnectionReset
-        | std::io::ErrorKind::BrokenPipe
-        | std::io::ErrorKind::ConnectionAborted => Unanswered::NotListening(error),
-        _ => Unanswered::Malformed(format!("the connection failed: {error}")),
-    };
-    stream.write_all(request.as_bytes()).await.map_err(gone)?;
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(Unanswered::of_write)?;
+    read_answer(stream).await
+}
+
+async fn read_answer(mut stream: impl AsyncRead + Unpin) -> Result<(String, String), Unanswered> {
     let mut answer = Vec::new();
     (&mut stream)
         .take(IDENTITY_LIMIT as u64 + 1)
         .read_to_end(&mut answer)
         .await
-        .map_err(gone)?;
+        .map_err(Unanswered::of_write)?;
     if answer.is_empty() {
         return Err(Unanswered::NotListening(
             std::io::ErrorKind::UnexpectedEof.into(),

@@ -572,7 +572,7 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
 
     let refused = within(
         "a stop of another generation",
-        server::stop_over_socket(&prepared, &stale),
+        server::stop_over_socket(&prepared, &stale, server::PROBE_LIMIT),
     )
     .await
     .expect("an answer");
@@ -592,7 +592,7 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
 
     let accepted = within(
         "a stop of this generation",
-        server::stop_over_socket(&prepared, &generation),
+        server::stop_over_socket(&prepared, &generation, server::PROBE_LIMIT),
     )
     .await
     .expect("an answer");

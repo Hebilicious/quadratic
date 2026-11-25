@@ -90,6 +90,12 @@ pub enum LifeError {
     CannotStop {
         reason: String,
     },
+    /// The whole stop request was sent and its answer was lost: the server may or may not be stopping.
+    StopUnconfirmed {
+        generation: String,
+        reason: String,
+        lock: String,
+    },
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -232,6 +238,14 @@ impl std::fmt::Display for LifeError {
                     "the server of this home is no longer generation {asked}, which this command asked to stop: another generation{serving} serves now. Nothing was stopped."
                 )
             }
+            LifeError::StopUnconfirmed {
+                generation,
+                reason,
+                lock,
+            } => write!(
+                formatter,
+                "the stop of generation {generation} is not confirmed: {reason}. The home's lock is {lock}. Run `quadratique server status` to see what serves now."
+            ),
             LifeError::CannotStop { reason } => {
                 write!(
                     formatter,
@@ -490,6 +504,7 @@ pub async fn find(home: &Home) -> Result<Found, LifeError> {
         Ok(identity) if identity.database == database => {
             let runtime = RuntimeFile {
                 pid: identity.pid,
+                control: identity.control,
                 ..runtime
             };
             match identity.interface {
@@ -529,11 +544,6 @@ pub enum OnSocket {
 }
 
 #[cfg(unix)]
-pub async fn on_socket(home: &Home) -> OnSocket {
-    on_socket_within(home, PROBE_LIMIT).await
-}
-
-#[cfg(unix)]
 async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
     let socket = home.prepared.socket();
     let identity = match identity_over_socket_within(&home.prepared, limit).await {
@@ -555,21 +565,24 @@ async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
             return OnSocket::Malformed("the socket answered as a TCP listener does".to_owned());
         }
     };
+    // The generation and the database keep their meaning in every control version, so they are checked first: a newer
+    // server is stopped only by its generation, and only in its own home.
+    let generation_is_valid = identity.generation.as_deref().is_some_and(|generation| {
+        generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if !generation_is_valid {
+        return OnSocket::Malformed("the identity lacks a valid generation".to_owned());
+    }
+    if identity.database != home.database() {
+        return OnSocket::OtherDatabase(identity);
+    }
     match identity.control {
         None => return OnSocket::Malformed("the identity has no control version".to_owned()),
         Some(control) if control != CONTROL => return OnSocket::Newer(identity),
         Some(_) => {}
     }
-    let generation_is_valid = identity.generation.as_deref().is_some_and(|generation| {
-        generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit())
-    });
-    if !generation_is_valid || identity.started.is_none() || identity.url.is_none() {
-        return OnSocket::Malformed(
-            "the identity lacks a valid generation, its start or its url".to_owned(),
-        );
-    }
-    if identity.database != home.database() {
-        return OnSocket::OtherDatabase(identity);
+    if identity.started.is_none() || identity.url.is_none() {
+        return OnSocket::Malformed("the identity lacks its start or its url".to_owned());
     }
     OnSocket::Serving(identity)
 }
@@ -604,7 +617,12 @@ pub enum Observed {
 
 #[cfg(unix)]
 pub async fn observe(home: &Home) -> Result<Observed, LifeError> {
-    Ok(match on_socket(home).await {
+    observe_within(home, PROBE_LIMIT).await
+}
+
+#[cfg(unix)]
+async fn observe_within(home: &Home, limit: Duration) -> Result<Observed, LifeError> {
+    Ok(match on_socket_within(home, limit).await {
         OnSocket::Serving(identity) => match runtime_of(&identity) {
             Some(runtime) => Observed::Serving { identity, runtime },
             None => Observed::Malformed(
@@ -616,26 +634,68 @@ pub async fn observe(home: &Home) -> Result<Observed, LifeError> {
         OnSocket::Malformed(why) => Observed::Malformed(why),
         OnSocket::Stalled => Observed::Stalled,
         OnSocket::Denied(reason) | OnSocket::PathError(reason) => Observed::Unreachable(reason),
-        OnSocket::NotReady(why) => behind_the_socket(home, Some(why), false)?,
-        OnSocket::Absent => behind_the_socket(home, None, true)?,
+        OnSocket::NotReady(why) => behind_the_socket(home, Some(why), false),
+        OnSocket::Absent => behind_the_socket(home, None, true),
     })
 }
 
-/// A build before the socket never makes one, so only a missing socket can hide a legacy server.
+/// One deadline for one operation (record 0004, §2). Each probe gets what is left of it, at most the probe limit,
+/// and nothing new begins once it has passed.
+#[derive(Clone, Copy, Debug)]
+pub struct Deadline(Instant);
+
+impl Deadline {
+    pub fn after(limit: Duration) -> Deadline {
+        Deadline(Instant::now() + limit)
+    }
+
+    /// What is left, or nothing once the deadline has passed.
+    pub fn left(self) -> Option<Duration> {
+        Some(self.0.checked_duration_since(Instant::now())?).filter(|left| !left.is_zero())
+    }
+
+    /// Waits one poll, cut to what is left. False once the deadline has passed.
+    async fn pause(self) -> bool {
+        match self.left() {
+            Some(left) => {
+                tokio::time::sleep(POLL.min(left)).await;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// An observation within what is left of `deadline`, or nothing once it has passed. A probe that the deadline cut
+/// short is the deadline, not a stalled server.
 #[cfg(unix)]
-fn behind_the_socket(
-    home: &Home,
-    reason: Option<String>,
-    no_socket: bool,
-) -> Result<Observed, LifeError> {
+async fn observe_by(home: &Home, deadline: Deadline) -> Result<Option<Observed>, LifeError> {
+    let Some(left) = deadline.left() else {
+        return Ok(None);
+    };
+    let limit = PROBE_LIMIT.min(left);
+    match observe_within(home, limit).await? {
+        Observed::Stalled if limit < PROBE_LIMIT => Ok(None),
+        observed => Ok(Some(observed)),
+    }
+}
+
+/// A build before the socket never makes one, so only a missing socket can hide a legacy server. A lock that cannot
+/// be looked at is a path the command cannot use, as a socket that cannot be reached is.
+#[cfg(unix)]
+fn behind_the_socket(home: &Home, reason: Option<String>, no_socket: bool) -> Observed {
     match home.held() {
-        Ok(false) => Ok(Observed::Free),
-        Ok(true) if no_socket && home.legacy_hint() => Ok(Observed::Legacy),
-        Ok(true) => Ok(Observed::Starting { reason }),
-        Err(error) => match home.unusable(error, Attempt::Start) {
-            LifeError::Unreachable { reason } => Ok(Observed::Unreachable(reason)),
-            other => Err(other),
+        Ok(false) => Observed::Free,
+        Ok(true) if no_socket && home.legacy_hint() => Observed::Legacy,
+        Ok(true) => Observed::Starting { reason },
+        Err(error) if cannot_write(&error) => match home.unusable(error, Attempt::Start) {
+            LifeError::Unreachable { reason } => Observed::Unreachable(reason),
+            other => Observed::Unreachable(other.to_string()),
         },
+        Err(error) => Observed::Unreachable(format!(
+            "{} cannot be used: {error}",
+            home.prepared.lock().display()
+        )),
     }
 }
 
@@ -724,11 +784,18 @@ pub async fn ensure(home: &Home) -> Result<RuntimeFile, LifeError> {
 /// child is not ready by the deadline.
 #[cfg(unix)]
 async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
-    let deadline = Instant::now() + limit;
+    let deadline = Deadline::after(limit);
     let mut start_lock: Option<File> = None;
     let mut child: Option<OwnedChild> = None;
     loop {
-        match observe(home).await? {
+        let Some(observed) = observe_by(home, deadline).await? else {
+            return Err(not_ready_by_the_deadline(
+                home,
+                child.as_ref(),
+                start_lock.is_some(),
+            ));
+        };
+        match observed {
             Observed::Serving { identity, runtime } => {
                 if let Some(child) = child.take()
                     && child.id() == identity.pid
@@ -743,8 +810,8 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, Life
             Observed::Legacy => {
                 drop(child);
                 drop(start_lock);
-                return legacy::ensure(home, deadline.saturating_duration_since(Instant::now()))
-                    .await;
+                let left = deadline.left().unwrap_or_default();
+                return legacy::ensure(home, left).await;
             }
             Observed::Free if start_lock.is_none() => {
                 let lock = home
@@ -769,7 +836,7 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, Life
                         });
                     }
                 }
-                None if matches!(observed, Observed::Free) => {
+                None if matches!(observed, Observed::Free) && deadline.left().is_some() => {
                     child = Some(
                         OwnedChild::spawn(home)
                             .map_err(|error| home.unusable(error, Attempt::Start))?,
@@ -779,25 +846,35 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, Life
             },
             refused => return Err(refusal(home, refused, Attempt::Start)),
         }
-        if Instant::now() > deadline {
-            return Err(match (&child, &start_lock) {
-                (None, None) if !home.held().unwrap_or(true) => LifeError::NoAnswer {
-                    pid: home.pid_hint(),
-                    log: home.log(),
-                },
-                _ => LifeError::Hung {
-                    hang: Hang::NotReady,
-                    home: home.prepared.folder().to_path_buf(),
-                    log: home.log(),
-                    pid: child
-                        .as_ref()
-                        .map(OwnedChild::id)
-                        .or_else(|| home.pid_hint()),
-                    attempt: Attempt::Start,
-                },
-            });
+        if !deadline.pause().await {
+            return Err(not_ready_by_the_deadline(
+                home,
+                child.as_ref(),
+                start_lock.is_some(),
+            ));
         }
-        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Another starter that never lets go of `start.lock` is `NoAnswer`; anything else that is not ready is `Hung`.
+#[cfg(unix)]
+fn not_ready_by_the_deadline(
+    home: &Home,
+    child: Option<&OwnedChild>,
+    holds_start_lock: bool,
+) -> LifeError {
+    if child.is_none() && !holds_start_lock && !home.held().unwrap_or(true) {
+        return LifeError::NoAnswer {
+            pid: home.pid_hint(),
+            log: home.log(),
+        };
+    }
+    LifeError::Hung {
+        hang: Hang::NotReady,
+        home: home.prepared.folder().to_path_buf(),
+        log: home.log(),
+        pid: child.map(OwnedChild::id).or_else(|| home.pid_hint()),
+        attempt: Attempt::Start,
     }
 }
 
@@ -806,26 +883,39 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, Life
     legacy::ensure(home, limit).await
 }
 
-/// `start.lock`, held: no command starts a server while its holder starts, stops or hands off one.
+/// `start.lock`, held: no command starts a server while its holder starts, stops or hands off one. It carries the
+/// deadline of the command that took it, which the server's start then uses.
 pub struct StartLockHeld {
     _start_lock: File,
+    deadline: Deadline,
+}
+
+impl StartLockHeld {
+    /// What is left of the command's deadline for its own server's start.
+    pub fn left(&self) -> Duration {
+        self.deadline.left().unwrap_or_default()
+    }
 }
 
 /// `quadratique serve` holds `start.lock` while its server starts, as every start does.
 pub async fn reserve_start(home: &Home) -> Result<StartLockHeld, LifeError> {
-    let start_lock = await_start_lock(home, Instant::now() + START_LIMIT, Attempt::Start).await?;
+    let deadline = Deadline::after(START_LIMIT);
+    let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
     Ok(StartLockHeld {
         _start_lock: start_lock,
+        deadline,
     })
 }
 
 /// Stops the server of this home, of any build that serves this control version, and keeps `start.lock` until the
-/// caller's own server is ready. A server that does not let go by the deadline ends the take-over: nothing is served.
+/// caller's own server is ready, within one deadline for the whole command. A server that does not let go by the
+/// deadline ends the take-over: nothing is served.
 #[cfg(unix)]
 pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
-    let deadline = Instant::now() + START_LIMIT;
+    let deadline = Deadline::after(START_LIMIT);
     let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
-    if let Stopped::Closing { pid, .. } = stop_holding(home, deadline, Attempt::Start).await? {
+    if let Stopped::Closing { pid, .. } = stop_holding(home, deadline, Attempt::Start, None).await?
+    {
         return Err(LifeError::Hung {
             hang: Hang::NotStopped,
             home: home.prepared.folder().to_path_buf(),
@@ -836,39 +926,46 @@ pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
     }
     Ok(StartLockHeld {
         _start_lock: start_lock,
+        deadline,
     })
 }
 
 #[cfg(not(unix))]
 pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
-    let start_lock = await_start_lock(home, Instant::now() + START_LIMIT, Attempt::Start).await?;
-    legacy::stop(home, STOP_LIMIT).await?;
+    let deadline = Deadline::after(START_LIMIT);
+    let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
+    legacy::stop(home, deadline.left().unwrap_or_default(), false).await?;
     Ok(StartLockHeld {
         _start_lock: start_lock,
+        deadline,
     })
 }
 
+/// Tries the lock only while the deadline has not passed.
 async fn await_start_lock(
     home: &Home,
-    deadline: Instant,
+    deadline: Deadline,
     attempt: Attempt,
 ) -> Result<File, LifeError> {
     let start_lock = home
         .open_lock(&home.start_lock())
         .map_err(|error| home.unusable(error, attempt))?;
+    let expired = || LifeError::NoAnswer {
+        pid: home.pid_hint(),
+        log: home.log(),
+    };
     loop {
+        if deadline.left().is_none() {
+            return Err(expired());
+        }
         match start_lock.try_lock() {
             Ok(()) => return Ok(start_lock),
             Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
-        if Instant::now() > deadline {
-            return Err(LifeError::NoAnswer {
-                pid: home.pid_hint(),
-                log: home.log(),
-            });
+        if !deadline.pause().await {
+            return Err(expired());
         }
-        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -890,38 +987,69 @@ pub async fn stop(home: &Home) -> Result<Stopped, LifeError> {
 }
 
 /// A home that is free, or a server that may not be stopped, is answered without `start.lock`. Otherwise the stop
-/// takes it, observes again, and keeps it until the server has let go of the home.
+/// takes it, then observes again, and keeps it until the server has let go of the home: a server of a build before
+/// the socket too. The generation it first saw is the one it stops; one that becomes ready while it waits for the lock
+/// is stopped only if the first observation saw none.
 #[cfg(unix)]
 async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
-    let deadline = Instant::now() + limit;
-    match observe(home).await? {
+    let deadline = Deadline::after(limit);
+    let Some(first) = observe_by(home, deadline).await? else {
+        return Err(not_stopped_by_the_deadline(home, Attempt::Stop));
+    };
+    let meant = match first {
         Observed::Free => return Ok(Stopped::NotRunning),
-        Observed::Legacy => return legacy::stop(home, limit).await,
-        Observed::Serving { .. } | Observed::Starting { .. } => {}
-        Observed::Newer(identity) if lists_this_control(&identity) => {}
+        Observed::Legacy | Observed::Starting { .. } => None,
+        Observed::Serving { identity, .. } => identity.generation,
+        Observed::Newer(identity) if lists_this_control(&identity) => identity.generation,
         refused => return Err(refusal(home, refused, Attempt::Stop)),
-    }
+    };
     let _start_lock = await_start_lock(home, deadline, Attempt::Stop).await?;
-    stop_holding(home, deadline, Attempt::Stop).await
+    stop_holding(home, deadline, Attempt::Stop, meant).await
 }
 
 #[cfg(not(unix))]
 async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
-    legacy::stop(home, limit).await
+    legacy::stop(home, limit, false)
+        .await
+        .map(|stopped| match stopped {
+            legacy::Stop::Done(stopped) => stopped,
+            legacy::Stop::NotLegacy => Stopped::NotRunning,
+        })
+}
+
+#[cfg(unix)]
+fn not_stopped_by_the_deadline(home: &Home, attempt: Attempt) -> LifeError {
+    LifeError::Hung {
+        hang: Hang::NotReady,
+        home: home.prepared.folder().to_path_buf(),
+        log: home.log(),
+        pid: home.pid_hint(),
+        attempt,
+    }
 }
 
 /// Called with `start.lock` held. Asks the serving generation to stop, once, then waits for the home's lock to be
-/// free: the stopped server's successor can only be a server this command's caller starts. A take-over (`Start`)
-/// refuses a newer server even when it lists this control version, because it would replace it with an older one.
+/// free: the stopped server's successor can only be a server this command's caller starts.
+/// - `meant`: the generation the command saw before it waited for `start.lock`. Another generation serving now is
+///   refused, and nothing is stopped.
+/// - A take-over (`Start`) refuses a newer server even when it lists this control version, because it would replace
+///   it with an older one.
+/// - A server of a build before the socket is stopped by the legacy path, which hands back as soon as the server
+///   answers with a control version; from then on the socket alone decides.
 #[cfg(unix)]
 async fn stop_holding(
     home: &Home,
-    deadline: Instant,
+    deadline: Deadline,
     attempt: Attempt,
+    meant: Option<String>,
 ) -> Result<Stopped, LifeError> {
     let mut asked: Option<Identity> = None;
+    let mut legacy_possible = true;
     loop {
-        let serving = match observe(home).await? {
+        let Some(observed) = observe_by(home, deadline).await? else {
+            return closing_at_the_deadline(home, asked, attempt);
+        };
+        let serving = match observed {
             Observed::Free => {
                 return Ok(match asked {
                     Some(identity) => Stopped::Ended {
@@ -931,30 +1059,45 @@ async fn stop_holding(
                     None => Stopped::NotRunning,
                 });
             }
-            Observed::Legacy => {
-                return legacy::stop(home, deadline.saturating_duration_since(Instant::now()))
-                    .await;
+            Observed::Legacy if legacy_possible && asked.is_none() => {
+                let left = deadline.left().unwrap_or_default();
+                match legacy::stop(home, left, true).await? {
+                    legacy::Stop::Done(stopped) => return Ok(stopped),
+                    legacy::Stop::NotLegacy => {
+                        legacy_possible = false;
+                        None
+                    }
+                }
             }
+            Observed::Legacy | Observed::Starting { .. } => None,
             Observed::Serving { identity, .. } => Some(identity),
             Observed::Newer(identity)
                 if attempt == Attempt::Stop && lists_this_control(&identity) =>
             {
                 Some(identity)
             }
-            Observed::Starting { .. } => None,
             refused => return Err(refusal(home, refused, attempt)),
         };
         if let Some(identity) = serving {
             let generation = identity.generation.clone().unwrap_or_default();
-            match asked.as_ref().and_then(|asked| asked.generation.clone()) {
-                Some(stopped) if stopped != generation => {
+            if let Some(stopped) = asked.as_ref().and_then(|asked| asked.generation.clone()) {
+                if stopped != generation {
                     return Ok(Stopped::Ended {
                         pid: asked.as_ref().map_or(0, |asked| asked.pid),
                         generation: Some(stopped),
                     });
                 }
-                Some(_) => {}
-                None => match stop_over_socket(&home.prepared, &generation).await {
+            } else if let Some(meant) = meant.as_ref().filter(|meant| **meant != generation) {
+                return Err(LifeError::OtherGeneration {
+                    asked: meant.clone(),
+                    serving: Some(generation),
+                });
+            } else {
+                let Some(left) = deadline.left() else {
+                    return closing_at_the_deadline(home, asked, attempt);
+                };
+                let answer = stop_over_socket(&home.prepared, &generation, PROBE_LIMIT.min(left));
+                match answer.await {
                     Ok(StopAnswer::Accepted) => asked = Some(identity),
                     Ok(StopAnswer::OtherGeneration(serving)) => {
                         return Err(LifeError::OtherGeneration {
@@ -965,7 +1108,21 @@ async fn stop_holding(
                     Ok(StopAnswer::Refused(reason)) => {
                         return Err(LifeError::CannotStop { reason });
                     }
+                    Ok(StopAnswer::Unconfirmed(reason)) => {
+                        return Err(LifeError::StopUnconfirmed {
+                            generation,
+                            reason,
+                            lock: match home.held() {
+                                Ok(true) => "held: the server may still be stopping".to_owned(),
+                                Ok(false) => "free: no server holds the home now".to_owned(),
+                                Err(error) => format!("unknown ({error})"),
+                            },
+                        });
+                    }
                     Err(Unanswered::NotListening(_)) => {}
+                    Err(Unanswered::Stalled) if deadline.left().is_none() => {
+                        return closing_at_the_deadline(home, asked, attempt);
+                    }
                     Err(Unanswered::Stalled) => {
                         return Err(refusal(home, Observed::Stalled, attempt));
                     }
@@ -991,25 +1148,29 @@ async fn stop_holding(
                             attempt,
                         ));
                     }
-                },
+                }
             }
         }
-        if Instant::now() > deadline {
-            return match asked {
-                Some(identity) => Ok(Stopped::Closing {
-                    pid: Some(identity.pid),
-                    generation: identity.generation,
-                }),
-                None => Err(LifeError::Hung {
-                    hang: Hang::NotReady,
-                    home: home.prepared.folder().to_path_buf(),
-                    log: home.log(),
-                    pid: home.pid_hint(),
-                    attempt,
-                }),
-            };
+        if !deadline.pause().await {
+            return closing_at_the_deadline(home, asked, attempt);
         }
-        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// An acknowledged stop still holding the home is `Closing`; a server that never became ready to be stopped is
+/// `Hung`.
+#[cfg(unix)]
+fn closing_at_the_deadline(
+    home: &Home,
+    asked: Option<Identity>,
+    attempt: Attempt,
+) -> Result<Stopped, LifeError> {
+    match asked {
+        Some(identity) => Ok(Stopped::Closing {
+            pid: Some(identity.pid),
+            generation: identity.generation,
+        }),
+        None => Err(not_stopped_by_the_deadline(home, attempt)),
     }
 }
 

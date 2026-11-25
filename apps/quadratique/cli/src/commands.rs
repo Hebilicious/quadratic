@@ -151,7 +151,11 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
         Ok(taken) => taken,
         Err(error) => return report(io, Kind::Unavailable, error.to_string()),
     };
-    match server::start_by(home.prepared(), address, started).await {
+    // The start gets what is left of the deadline of the command that reserved it, so a take-over keeps one deadline.
+    let left = taken
+        .as_ref()
+        .map_or(server::START_LIMIT, background::StartLockHeld::left);
+    match server::start_by_within(home.prepared(), address, started, left).await {
         Ok(server) => {
             drop(taken);
             server::until_stopped(server).await;

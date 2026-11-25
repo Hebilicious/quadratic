@@ -276,7 +276,9 @@ SIGTERM as before. The other commands still use the TCP listener.
 The socket serves two requests, with any `Host` (use `quadratique.invalid`). Each server start has a
 **generation**, 32 hexadecimal digits that are new at each start. The protocol has a version,
 `control`, apart from the interface of the commands. A server keeps answering every control version
-it ever served, and lists them in `controls`. This is version 1:
+it ever served, and lists them in `controls`. Two fields keep their meaning in every version:
+`generation` and `database`. A command line checks them before it looks at the control versions, so
+it stops a newer server only in its own folder and only by its generation. This is version 1:
 
 | Request | Answer |
 | --- | --- |
@@ -291,6 +293,11 @@ curl --unix-socket "$QUADRATIQUE_HOME/server.sock" -X POST \
 
 `server stop` reads the generation, asks that generation to stop, and waits up to 30 seconds for
 the folder to be free. It answers `"stopped": true` with the `pid` and the `generation` it stopped.
+The generation it reads first is the one it stops. If it must wait for `start.lock` and another
+generation serves when it gets the lock, it stops nothing and names both. If the first look found a
+server that was still starting, it stops the first generation that becomes ready. If the stop
+request was sent and its answer was lost, `server stop` says the stop is not confirmed and whether
+the folder's lock is still held. Run `server status` to see what serves then.
 A server that does not answer, or does not let go in time, is never signalled: the message names
 the folder, the log and the last known pid, and says how to end it yourself. Every start and every
 stop holds `start.lock` in the data folder, so no command starts a server between a stop and the

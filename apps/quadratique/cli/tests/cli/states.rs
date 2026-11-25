@@ -12,11 +12,11 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use serde_json::{Value, json};
 
-use crate::support::{Home, Process, Run, Step, Watch, await_exit, outside};
+use crate::support::{HANG_GUARD, Home, Process, Run, Step, Watch, await_exit, outside};
 
 const UNAVAILABLE: i32 = 4;
 const GENERATION: &str = "0123456789abcdef0123456789abcdef";
@@ -105,17 +105,44 @@ fn http(status: &str, body: &str) -> String {
     )
 }
 
-/// A fake server on the socket: it answers `GET /server` with `answer`, and a stop of `GENERATION` with `202`, after
-/// which it stops listening and lets go of the home's lock, as a real server does once it has shut down. It records
-/// the first line of each request.
+/// What a [`Fake`] does with a stop of its own generation.
+enum OnStop {
+    /// Answers `202`, stops listening and lets go of the home's lock, as a real server does once it has shut down.
+    Release,
+    /// Reads the whole request, closes the connection without an answer, stops listening and lets go of the lock: a
+    /// server that committed to the stop and lost its answer.
+    LoseAnswer,
+    /// Answers `202` and stops listening, then keeps the lock until the test sends on the channel.
+    HoldUntil(mpsc::Receiver<()>),
+}
+
+/// A fake server on the socket: it answers `GET /server` with `answer`, a stop of the generation in `answer` as
+/// [`OnStop`] says, and a stop of another generation with `409`. It records the first line of each request, and says
+/// on `posted` when a stop request has arrived.
 struct Fake {
     requests: Arc<Mutex<Vec<String>>>,
+    posted: mpsc::Receiver<()>,
 }
 
 impl Fake {
-    fn start(listener: UnixListener, answer: String, mut lock: Option<File>) -> Fake {
+    fn start(listener: UnixListener, answer: String, lock: Option<File>) -> Fake {
+        Fake::start_with(listener, answer, lock, OnStop::Release)
+    }
+
+    fn start_with(
+        listener: UnixListener,
+        answer: String,
+        mut lock: Option<File>,
+        on_stop: OnStop,
+    ) -> Fake {
+        let generation = answer
+            .split_once("\r\n\r\n")
+            .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+            .and_then(|identity| identity["generation"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| GENERATION.to_owned());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
+        let (post, posted) = mpsc::channel();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
@@ -125,27 +152,41 @@ impl Fake {
                     .expect("the request log")
                     .push(first.clone());
                 let mut stream = stream;
-                if first.starts_with("POST /server/stop ") {
-                    let asked: Value = serde_json::from_str(&body).unwrap_or_default();
-                    let answer = json!({ "generation": GENERATION }).to_string();
-                    if asked["generation"] == GENERATION {
-                        let _ = stream.write_all(http("202 Accepted", &answer).as_bytes());
-                        drop(stream);
-                        drop(listener);
-                        drop(lock.take());
-                        return;
-                    }
-                    let _ = stream.write_all(http("409 Conflict", &answer).as_bytes());
-                } else {
+                if !first.starts_with("POST /server/stop ") {
                     let _ = stream.write_all(answer.as_bytes());
+                    continue;
                 }
+                let _ = post.send(());
+                let asked: Value = serde_json::from_str(&body).unwrap_or_default();
+                let named = json!({ "generation": generation }).to_string();
+                if asked["generation"] != generation.as_str() {
+                    let _ = stream.write_all(http("409 Conflict", &named).as_bytes());
+                    continue;
+                }
+                if !matches!(on_stop, OnStop::LoseAnswer) {
+                    let _ = stream.write_all(http("202 Accepted", &named).as_bytes());
+                }
+                drop(stream);
+                drop(listener);
+                if let OnStop::HoldUntil(release) = on_stop {
+                    let _ = release.recv();
+                }
+                drop(lock.take());
+                return;
             }
         });
-        Fake { requests }
+        Fake { requests, posted }
     }
 
     fn requests(&self) -> Vec<String> {
         self.requests.lock().expect("the request log").clone()
+    }
+
+    /// Returns once a stop request has reached the fake.
+    fn await_stop_request(&self) {
+        self.posted
+            .recv_timeout(HANG_GUARD)
+            .expect("a stop request within the hang guard");
     }
 }
 
@@ -573,10 +614,10 @@ fn row_a_newer_server_is_stopped_only_when_it_lists_this_control_version_and_nev
 }
 
 /// The server of this build: commands use it, `server stop` stops its generation, and a take-over stops it, waits
-/// for the home to be free while it keeps the start lock, then serves. No other starter gets in between.
+/// for the home to be free, then serves with a new generation.
 #[test]
-fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_handed_over_with_no_starter_in_between()
- {
+fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_taken_over_by_a_new_generation()
+{
     let home = Home::new();
     run(&home, &["project", "list"]).ok();
     let old = status(&home);
@@ -586,16 +627,8 @@ fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_handed_over_
 
     let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    // The take-over opens the lock only once the old server has stopped listening, so it holds the start lock now.
-    watch.await_steps(&[Step::Opened("start.lock"), Step::Opened("server.lock")]);
-    assert!(
-        !start_lock_is_free(&home),
-        "a command could start a server while the take-over hands the home over"
-    );
-    let during = spawn(&home, &["ui"]);
     let new_pid = served_by(&mut watch, &mut take_over);
 
-    let answered = during.finish().ok();
     await_exit(old_pid);
     let old_log =
         std::fs::read_to_string(home.path().join("server.log")).expect("the old server's log");
@@ -610,6 +643,48 @@ fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_handed_over_
         "{new}"
     );
     assert_ne!(new["generation"], old["generation"]);
+    assert_eq!(home.servers(), vec![new_pid]);
+    stop_real(&home, new_pid);
+}
+
+/// The handoff of a take-over, held at a step the test controls: the old server has accepted the stop and still
+/// holds the home. The take-over keeps `start.lock` through it, so a `serve` started then waits for the lock, and
+/// once the take-over's server is ready, finds the home owned. A command started then uses the new server.
+#[test]
+fn a_take_over_hands_off_with_no_other_starter_in_between() {
+    let home = Home::new();
+    let held = hold_the_home(&home);
+    let (release, released) = mpsc::channel();
+    let old = Fake::start_with(
+        fake_socket(&home),
+        http("200 OK", &this_build(&home).to_string()),
+        Some(held),
+        OnStop::HoldUntil(released),
+    );
+    let mut watch = Watch::of(&home);
+    let mut take_over = spawn(&home, &["serve", "--take-over"]);
+    old.await_stop_request();
+    assert!(
+        !start_lock_is_free(&home),
+        "a command could start a server while the take-over hands the home over"
+    );
+
+    watch.clear();
+    let contender = spawn(&home, &["serve"]);
+    watch.await_steps(&[Step::Opened("start.lock")]);
+    let during = spawn(&home, &["ui"]);
+    release.send(()).expect("the old server lets go");
+    let new_pid = served_by(&mut watch, &mut take_over);
+
+    let refused = contender.finish();
+    assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+    assert!(
+        message(&refused).contains("another server owns the database"),
+        "{refused:?}"
+    );
+    let answered = during.finish().ok();
+    let new = status(&home);
+    assert_eq!(new["pid"], new_pid, "{new}");
     assert_eq!(
         answered["url"],
         format!(
@@ -620,4 +695,233 @@ fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_handed_over_
     );
     assert_eq!(home.servers(), vec![new_pid]);
     stop_real(&home, new_pid);
+}
+
+/// A stop that saw generation A, then waited for `start.lock` while a handoff published B, stops nothing: it says
+/// which generation it meant and which serves.
+#[test]
+fn a_stop_that_waited_for_the_start_lock_refuses_a_generation_it_did_not_see() {
+    const SUCCESSOR: &str = "fedcba9876543210fedcba9876543210";
+    let home = Home::new();
+    let held = hold_the_home(&home);
+    let handoff = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.path().join("start.lock"))
+        .expect("the start lock");
+    handoff.lock().expect("a handoff holds the start lock");
+    let first = Fake::start(
+        fake_socket(&home),
+        http("200 OK", &this_build(&home).to_string()),
+        None,
+    );
+    let mut watch = Watch::of(&home);
+    let stop = spawn(&home, &["server", "stop"]);
+    watch.await_steps(&[Step::Opened("start.lock")]);
+    std::fs::remove_file(home.path().join("server.sock")).expect("the first socket goes");
+    let mut successor = this_build(&home);
+    successor["generation"] = json!(SUCCESSOR);
+    let second = Fake::start(
+        fake_socket(&home),
+        http("200 OK", &successor.to_string()),
+        Some(held),
+    );
+    drop(handoff);
+
+    let refused = stop.finish();
+
+    assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+    let message = message(&refused);
+    assert!(
+        message.contains(GENERATION)
+            && message.contains(SUCCESSOR)
+            && message.contains("Nothing was stopped."),
+        "{message}"
+    );
+    assert_eq!(first.requests(), ["GET /server HTTP/1.1"]);
+    assert!(
+        second
+            .requests()
+            .iter()
+            .all(|request| request.starts_with("GET /server ")),
+        "{:?}",
+        second.requests()
+    );
+}
+
+/// A newer server is checked for its database and its generation before its control versions: another database is
+/// refused even when it lists this control version, and an identity without a generation is malformed.
+#[test]
+fn a_newer_server_of_another_database_or_without_a_generation_is_never_stopped() {
+    let home = Home::new();
+    let _held = hold_the_home(&home);
+    let interface = quadratique_server::app::interface();
+    let mut elsewhere = identity(&home, &interface, 2, &[1, 2]);
+    elsewhere["database"] = json!("/elsewhere/workspace.db");
+    let other_database = Fake::start(
+        fake_socket(&home),
+        http("200 OK", &elsewhere.to_string()),
+        None,
+    );
+
+    assert_eq!(status(&home)["otherDatabase"], "/elsewhere/workspace.db");
+    let refused = run(&home, &["server", "stop"]);
+    assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+    assert!(
+        message(&refused).contains("serves another database"),
+        "{refused:?}"
+    );
+    assert!(
+        other_database
+            .requests()
+            .iter()
+            .all(|request| request.starts_with("GET /server ")),
+        "{:?}",
+        other_database.requests()
+    );
+    std::fs::remove_file(home.path().join("server.sock")).expect("the fake socket goes");
+
+    let mut nameless = identity(&home, &interface, 2, &[1, 2]);
+    nameless
+        .as_object_mut()
+        .expect("an object")
+        .remove("generation");
+    let without_generation = Fake::start(
+        fake_socket(&home),
+        http("200 OK", &nameless.to_string()),
+        None,
+    );
+
+    assert_eq!(status(&home)["malformed"], true);
+    let refused = run(&home, &["server", "stop"]);
+    assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+    assert!(message(&refused).contains("generation"), "{refused:?}");
+    assert!(
+        without_generation
+            .requests()
+            .iter()
+            .all(|request| request.starts_with("GET /server ")),
+        "{:?}",
+        without_generation.requests()
+    );
+}
+
+/// The server read the whole stop request and closed without an answer, then let go of the home: the stop is not
+/// confirmed, which is neither "nothing was running" nor "could not connect".
+#[test]
+fn a_stop_whose_answer_is_lost_says_it_is_not_confirmed_and_what_the_lock_shows() {
+    let home = Home::new();
+    let held = hold_the_home(&home);
+    let lost = Fake::start_with(
+        fake_socket(&home),
+        http("200 OK", &this_build(&home).to_string()),
+        Some(held),
+        OnStop::LoseAnswer,
+    );
+
+    let stopped = run(&home, &["server", "stop"]);
+
+    assert_eq!(stopped.code, UNAVAILABLE, "{stopped:?}");
+    let message = message(&stopped);
+    assert!(
+        message.contains(&format!(
+            "the stop of generation {GENERATION} is not confirmed"
+        )) && message.contains("the answer was lost")
+            && message.contains("lock is free"),
+        "{message}"
+    );
+    assert_eq!(
+        lost.requests().last().map(String::as_str),
+        Some("POST /server/stop HTTP/1.1")
+    );
+}
+
+/// A lock that cannot be looked at is the row "reachable: false" with a reason that names it: status answers, and no
+/// command starts or stops anything.
+#[test]
+fn a_lock_path_that_cannot_be_used_is_unreachable_and_named() {
+    let home = Home::new();
+    let lock = home.path().join("server.lock");
+    std::fs::create_dir(&lock).expect("a folder where the lock should be");
+
+    let status = status(&home);
+    let ensured = run(&home, &["project", "list"]);
+    let stopped = run(&home, &["server", "stop"]);
+
+    assert_eq!(status["reachable"], false, "{status}");
+    let reason = status["reason"].as_str().expect("a reason");
+    let lock = lock.canonicalize().expect("the lock's path");
+    assert!(reason.contains(&lock.display().to_string()), "{reason}");
+    assert_eq!(ensured.code, UNAVAILABLE, "{ensured:?}");
+    assert!(
+        message(&ensured).contains("Nothing was started"),
+        "{ensured:?}"
+    );
+    assert_eq!(stopped.code, UNAVAILABLE, "{stopped:?}");
+    assert!(
+        message(&stopped).contains("Nothing was stopped"),
+        "{stopped:?}"
+    );
+    assert!(home.servers().is_empty());
+}
+
+/// A server that a legacy probe found must still be a legacy server when the signal goes: here the runtime file has
+/// no control version, as a release 0.1 server's, but the server on its TCP address answers with one. The stop leaves
+/// the signal path without a signal, and the socket alone decides from then on.
+#[test]
+fn the_legacy_stop_signals_no_server_that_answers_with_a_control_version() {
+    let home = Home::new();
+    let held = hold_the_home(&home);
+    let elsewhere = outside();
+    let signaled = elsewhere.path().join("signaled");
+    let mut process = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "trap 'touch \"$0\"; exit 0' TERM; while :; do tail -f /dev/null & wait $!; done",
+            &signaled.display().to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("a process for the server's pid");
+    let mut answer = this_build(&home);
+    answer["pid"] = json!(process.id());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let address = listener.local_addr().expect("an address");
+    let (asked, identity_asked) = mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().expect("a stream"));
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                line.clear();
+            }
+            let _ = stream.write_all(http("200 OK", &answer.to_string()).as_bytes());
+            let _ = asked.send(());
+        }
+    });
+    let runtime_without_control = json!({
+        "pid": process.id(),
+        "address": address.to_string(),
+        "url": format!("http://{address}/cli"),
+        "database": database_of(&home),
+    });
+    std::fs::write(home.runtime_path(), runtime_without_control.to_string())
+        .expect("a runtime file");
+
+    let stop = spawn(&home, &["server", "stop"]);
+    identity_asked
+        .recv_timeout(HANG_GUARD)
+        .expect("the legacy path asks the identity over TCP");
+    drop(held);
+    let stopped = stop.finish().ok();
+
+    assert_eq!(stopped["stopped"], false, "{stopped}");
+    let _ = process.kill();
+    let _ = process.wait();
+    assert!(
+        !signaled.exists(),
+        "the stop signalled a server that answers with a control version"
+    );
 }
