@@ -3,6 +3,7 @@
 #![cfg(windows)]
 
 use doltlite::Connection;
+use quadratique_server as _;
 
 fn probe(label: &str, path: &std::path::Path) {
     let opened = Connection::open(path);
@@ -26,7 +27,11 @@ fn doltlite_on_windows() {
     let folder = tempfile::tempdir().expect("a folder");
     let plain = folder.path().join("plain.db");
     probe("plain", &plain);
-    let verbatim = folder.path().canonicalize().expect("canonical").join("verbatim.db");
+    let verbatim = folder
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join("verbatim.db");
     probe("verbatim", &verbatim);
     let relative_folder = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(folder.path()).expect("cd");
