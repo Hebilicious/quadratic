@@ -12,6 +12,10 @@ toolchains:
   typescript:
     syncProjectReferences: false
 
+# The task scripts are POSIX shell: on Windows they run in Git's bash, not PowerShell.
+taskOptions:
+  windowsShell: "bash"
+
 fileGroups:
   sources:
     - "src/**/*"
