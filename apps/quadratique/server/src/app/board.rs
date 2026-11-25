@@ -181,6 +181,10 @@ impl Board {
         Ok(self.graph.check(change)?)
     }
 
+    pub(crate) fn check_all(&self, changes: &[RelationChange]) -> Result<(), Refused> {
+        Ok(self.graph.check_all(changes)?)
+    }
+
     pub(crate) fn apply(&mut self, change: RelationChange) {
         self.graph.apply(change);
     }

@@ -409,6 +409,37 @@ async fn a_relation_made_by_hand_survives_every_import() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_decision_block_that_would_close_a_cycle_is_left_out_and_the_others_are_made() {
+    let board = start().await;
+    board.project("DEM").await;
+    let decision = with(
+        finding("D1", "Decide"),
+        json!({ "decision": true, "links": [fact("a")] }),
+    );
+    let first = with(finding("K1", "Work"), json!({ "links": [fact("b")] }));
+    let second = with(finding("K2", "More work"), json!({ "links": [fact("b")] }));
+    import(&board, vec![decision.clone(), first, second]).await;
+    let decision_id = issue_of(&board, "D1").await["id"].clone();
+    let first_id = issue_of(&board, "K1").await["id"].clone();
+    board
+        .ok(
+            &board.human(),
+            "issue.link",
+            json!({ "issue": first_id, "kind": "blocks", "target": decision_id }),
+        )
+        .await;
+
+    let first = with(finding("K1", "Work"), json!({ "links": [fact("a")] }));
+    let second = with(finding("K2", "More work"), json!({ "links": [fact("a")] }));
+    import(&board, vec![decision, first, second]).await;
+
+    let first = issue_of(&board, "K1").await;
+    assert_eq!(first["blockedBy"], json!([]), "{first}");
+    let second = issue_of(&board, "K2").await;
+    assert_eq!(second["blockedBy"], json!([decision_id]), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn two_findings_with_one_key_are_refused_and_change_nothing() {
     let board = start().await;
     board.project("DEM").await;

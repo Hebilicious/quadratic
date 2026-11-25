@@ -96,8 +96,17 @@ impl WaitGraph {
     }
 
     pub fn check(&self, change: &RelationChange) -> Result<(), Failure> {
+        self.check_all(std::slice::from_ref(change))
+    }
+
+    /// Whether the changes together close a cycle. Changes only add edges, so when all of them
+    /// close none, no part of them does: one search answers for the whole set, where checking
+    /// each change alone searches the whole graph once per change.
+    pub fn check_all(&self, changes: &[RelationChange]) -> Result<(), Failure> {
         let mut proposed = self.clone();
-        proposed.apply(change.clone());
+        for change in changes {
+            proposed.apply(change.clone());
+        }
         match proposed.find_cycle() {
             Some(path) => Err(Failure::Cycle { path }),
             None => Ok(()),

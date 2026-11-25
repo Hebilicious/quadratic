@@ -300,11 +300,21 @@ impl Run {
             tx.remove_relation(decision, "blocks", blocked)?;
         }
         let mut board = Board::load(tx)?;
-        for (decision, blocked) in implied.difference(&made) {
-            let change = RelationChange::Blocks {
+        let added: Vec<&(String, String)> = implied.difference(&made).collect();
+        let changes: Vec<RelationChange> = added
+            .iter()
+            .map(|(decision, blocked)| RelationChange::Blocks {
                 blocker: decision.clone(),
                 blocked: blocked.clone(),
-            };
+            })
+            .collect();
+        if board.check_all(&changes).is_ok() {
+            for (decision, blocked) in added {
+                tx.add_finding_block(decision, blocked)?;
+            }
+            return Ok(());
+        }
+        for ((decision, blocked), change) in added.into_iter().zip(changes) {
             if board.check(&change).is_ok() {
                 tx.add_finding_block(decision, blocked)?;
                 board.apply(change);
