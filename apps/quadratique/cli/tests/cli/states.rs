@@ -109,8 +109,8 @@ fn http(status: &str, body: &str) -> String {
 enum OnStop {
     /// Answers `202`, stops listening and lets go of the home's lock, as a real server does once it has shut down.
     Release,
-    /// Reads the whole request, closes the connection without an answer, stops listening and lets go of the lock: a
-    /// server that committed to the stop and lost its answer.
+    /// Reads the whole request, stops listening, lets go of the lock, then closes the connection without an answer: a
+    /// server that carried out the stop and lost its answer.
     LoseAnswer,
     /// Answers `202` and stops listening, then keeps the lock until the test sends on the channel.
     HoldUntil(mpsc::Receiver<()>),
@@ -163,9 +163,14 @@ impl Fake {
                     let _ = stream.write_all(http("409 Conflict", &named).as_bytes());
                     continue;
                 }
-                if !matches!(on_stop, OnStop::LoseAnswer) {
-                    let _ = stream.write_all(http("202 Accepted", &named).as_bytes());
+                if matches!(on_stop, OnStop::LoseAnswer) {
+                    // The home is free before the client reads the end of its connection, so the client sees it free.
+                    drop(listener);
+                    drop(lock.take());
+                    drop(stream);
+                    return;
                 }
+                let _ = stream.write_all(http("202 Accepted", &named).as_bytes());
                 drop(stream);
                 drop(listener);
                 if let OnStop::HoldUntil(release) = on_stop {
