@@ -90,13 +90,27 @@ impl Lock {
 
     /// The device and inode of the file that the last run replaced, when it recorded one.
     pub fn replaced(&mut self) -> Option<(u64, u64)> {
-        let mut text = String::new();
         self.file.rewind().ok()?;
-        (&self.file).take(256).read_to_string(&mut text).ok()?;
-        let mut words = text.split_whitespace();
-        (words.next()? == "replaced")
-            .then(|| Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?)))?
+        record_in(&self.file)
     }
+}
+
+/// The record of the last run, read without the lock and without creating the lock file: `None` when there is none.
+pub fn recorded_replaced(folder: &Path) -> Option<(u64, u64)> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(folder.join(LOCK_NAME))
+        .ok()?;
+    record_in(&file)
+}
+
+fn record_in(file: &File) -> Option<(u64, u64)> {
+    let mut text = String::new();
+    file.take(256).read_to_string(&mut text).ok()?;
+    let mut words = text.split_whitespace();
+    (words.next()? == "replaced")
+        .then(|| Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?)))?
 }
 
 /// What `remove_leftovers` did with the staging-like folders beside the binary.
