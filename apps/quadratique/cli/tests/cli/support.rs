@@ -65,7 +65,7 @@ pub fn await_exit(pid: u32) {
 /// The processes of this account on macOS, with their arguments and environment as the kernel keeps them
 /// (`KERN_PROCARGS2`), one string each, so a space in a path changes nothing.
 #[cfg(target_os = "macos")]
-mod macos {
+pub mod macos {
     use std::process::Command;
 
     use rustix::io::Errno;

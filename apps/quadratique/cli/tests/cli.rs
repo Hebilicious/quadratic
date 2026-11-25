@@ -26,6 +26,9 @@ mod init_update;
 mod mcp;
 #[path = "cli/other_build.rs"]
 mod other_build;
+#[cfg(target_os = "macos")]
+#[path = "cli/process_lookup.rs"]
+mod process_lookup;
 #[path = "cli/server_life.rs"]
 mod server_life;
 #[path = "cli/tokens.rs"]

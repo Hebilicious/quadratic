@@ -39,6 +39,7 @@ pub const UID_AT: usize = 64;
 pub const STATE_AT: usize = 36;
 
 const INP_IPV4: u8 = 0x1;
+pub const SYN_RECEIVED: i32 = 3;
 pub const ESTABLISHED: i32 = 4;
 
 /// One TCP connection over IPv4 of the table.
@@ -187,12 +188,16 @@ pub enum Found {
     NotEstablished(i32),
     /// Two connections go from the peer to the server.
     Several,
-    /// The accepted side, from the server to the peer, is not exactly one established connection.
+    /// The accepted side, from the server to the peer, is not exactly one connection that is established or about to
+    /// be.
     AcceptedSideGone,
 }
 
 /// The rule of docs/decisions/0003: the caller's socket is the accepted connection seen from the other side, and the
-/// accepted side must still be connected when the decision is made.
+/// accepted side must still be connected when the decision is made. That side may still be in `SYN_RECEIVED`: on
+/// loopback the client's last ACK reaches it a moment after the client is connected. A socket that the server has
+/// accepted is past that state, so it never helps a connection the server is deciding on; it only spares a check made
+/// before the accept, as `Server::admits` allows.
 pub fn caller(peer: SocketAddrV4, server: SocketAddrV4, records: &[Record]) -> Found {
     let between = |local: SocketAddrV4, remote: SocketAddrV4| -> Vec<&Record> {
         records
@@ -206,7 +211,9 @@ pub fn caller(peer: SocketAddrV4, server: SocketAddrV4, records: &[Record]) -> F
         [] => Found::Nothing,
         [one] if one.state != ESTABLISHED => Found::NotEstablished(one.state),
         [one] => match accepted.as_slice() {
-            [side] if side.state == ESTABLISHED => Found::Caller { uid: one.uid },
+            [side] if matches!(side.state, ESTABLISHED | SYN_RECEIVED) => {
+                Found::Caller { uid: one.uid }
+            }
             _ => Found::AcceptedSideGone,
         },
         _ => Found::Several,
@@ -395,6 +402,10 @@ mod tests {
         );
         assert_eq!(found(&[client, client, accepted]), Found::Several);
         assert_eq!(found(&[client]), Found::AcceptedSideGone);
+        assert_eq!(
+            found(&[client, record(SERVER, PEER, SYN_RECEIVED, OWNER)]),
+            Found::Caller { uid: OWNER }
+        );
         assert_eq!(
             found(&[client, record(SERVER, PEER, 5, OWNER)]),
             Found::AcceptedSideGone
