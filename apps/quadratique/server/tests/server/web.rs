@@ -532,3 +532,40 @@ async fn no_page_reaches_the_token_capabilities() {
         }
     }
 }
+
+/// The bearer guards only `/web`, `/webmcp` and their event streams: while the command line's routes are on the TCP
+/// listener, only the kernel check keeps other accounts from them. QUA-58 removes them from TCP and requires the
+/// bearer in one step, so requiring the bearer while either route still answers on TCP fails here.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bearer_is_required_only_once_no_command_line_route_answers_on_tcp() {
+    use quadratique_server::pairing::{REQUIRED, Requirement};
+
+    let site = start(built).await;
+    let host = site.address().to_string();
+    let command_line = request(
+        site.address(),
+        "POST",
+        "/cli/capabilities/project.list",
+        &[("Host", host.as_str())],
+        Some(json!({})),
+    )
+    .await;
+    let identity = request(
+        site.address(),
+        "GET",
+        "/server",
+        &[("Host", host.as_str())],
+        None,
+    )
+    .await;
+
+    let answering: Vec<&str> = [("/cli", command_line.status), ("/server", identity.status)]
+        .into_iter()
+        .filter(|(_, status)| *status != 404)
+        .map(|(route, _)| route)
+        .collect();
+    assert!(
+        REQUIRED == Requirement::Optional || answering.is_empty(),
+        "the bearer is required while {answering:?} still answer on TCP without it"
+    );
+}
