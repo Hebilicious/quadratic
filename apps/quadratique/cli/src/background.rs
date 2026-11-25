@@ -4,13 +4,19 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use quadratique_server::app::interface;
+use quadratique_server::home::{self, Prepared};
+#[cfg(unix)]
+use quadratique_server::server::{CONTROL, Identity, PROBE_LIMIT, identity_over_socket_within};
 use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered, identity};
-use quadratique_server::store::{StoreError, canonical_folder, refuse_git_work_tree};
+use quadratique_server::store::canonical_folder;
 
 use crate::process::{alive, ask_to_stop, detach};
 use crate::route::McpTool;
 
 const STOP_LIMIT: Duration = Duration::from_secs(30);
+/// Set in the environment of a server that a command starts, so that its identity says it was started on demand.
+pub const STARTED_VARIABLE: &str = "QUADRATIQUE_STARTED";
+pub const ON_DEMAND: &str = "on-demand";
 const POLL: Duration = Duration::from_millis(20);
 const LOG_TAIL: usize = 2000;
 
@@ -151,32 +157,42 @@ impl From<std::io::Error> for LifeError {
     }
 }
 
+/// The home of this command, as the policy checked it. Every file it names comes from `Prepared`, which only the
+/// policy makes.
 pub struct Home {
-    pub paths: Paths,
-    directory: PathBuf,
+    prepared: Prepared,
 }
 
 impl Home {
-    pub fn new(paths: Paths) -> Result<Home, StoreError> {
-        let directory = paths
-            .database
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        refuse_git_work_tree(&directory)?;
-        Ok(Home { paths, directory })
+    /// Applies the home policy before anything opens a lock file in the home or starts a server for it, and makes the
+    /// home when it is missing.
+    pub fn new(paths: Paths) -> Result<Home, String> {
+        let prepared = home::prepare(&paths).map_err(|refusal| match refusal.denied() {
+            Some(error) => LifeError::Unreachable {
+                reason: format!(
+                    "this process cannot use {}: {error}; a sandbox may be blocking it",
+                    paths.database.parent().unwrap_or(Path::new(".")).display()
+                ),
+            }
+            .to_string(),
+            None => refusal.to_string(),
+        })?;
+        Ok(Home { prepared })
+    }
+
+    pub fn prepared(&self) -> &Prepared {
+        &self.prepared
     }
 
     pub fn log(&self) -> PathBuf {
-        self.directory.join("server.log")
+        self.prepared.log()
     }
 
     fn start_lock(&self) -> PathBuf {
-        self.directory.join("start.lock")
+        self.prepared.start_lock()
     }
 
     fn open_lock(&self, path: &Path) -> std::io::Result<File> {
-        std::fs::create_dir_all(&self.directory)?;
         OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -184,24 +200,26 @@ impl Home {
             .open(path)
     }
 
+    /// The store's path as a server names it in its identity and its runtime file.
     fn database(&self) -> PathBuf {
-        let file = self.paths.database.file_name().unwrap_or_default();
-        canonical_folder(&self.directory)
+        let database = self.prepared.database();
+        let file = database.file_name().unwrap_or_default();
+        canonical_folder(self.prepared.folder())
             .map(|directory| directory.join(file))
-            .unwrap_or_else(|_| self.paths.database.clone())
+            .unwrap_or(database)
     }
 
     fn runtime_file(&self) -> Option<RuntimeFile> {
-        let text = std::fs::read(&self.paths.runtime).ok()?;
+        let text = std::fs::read(self.prepared.runtime()).ok()?;
         serde_json::from_slice(&text).ok()
     }
 
     /// A process that may not write the home can still ask: `flock` takes a lock on a read-only descriptor, and a
     /// missing lock file means that no server ever held the home.
     pub fn held(&self) -> std::io::Result<bool> {
-        let lock = match self.open_lock(&self.paths.lock()) {
+        let lock = match self.open_lock(&self.prepared.lock()) {
             Ok(lock) => lock,
-            Err(error) if cannot_write(&error) => match File::open(self.paths.lock()) {
+            Err(error) if cannot_write(&error) => match File::open(self.prepared.lock()) {
                 Ok(lock) => lock,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
                 Err(error) => return Err(error),
@@ -231,7 +249,7 @@ impl Home {
         }
         let reason = format!(
             "this process cannot write {}: {error}; a sandbox may be blocking it",
-            self.directory.display()
+            self.prepared.folder().display()
         );
         match attempt {
             Attempt::Start => LifeError::Unreachable { reason },
@@ -281,7 +299,11 @@ impl Found {
                     "the server at {address} answers only processes of its own account"
                 ),
             },
-            Unanswered::NotListening(_) | Unanswered::NoIdentity => Found::Nobody,
+            Unanswered::NotListening(_)
+            | Unanswered::PathError(_)
+            | Unanswered::Stalled
+            | Unanswered::Malformed(_)
+            | Unanswered::NotReady(_) => Found::Nobody,
         }
     }
 }
@@ -293,7 +315,7 @@ pub async fn find(home: &Home) -> Result<Found, LifeError> {
     let database = home.database();
     if runtime.database != database {
         return Err(LifeError::OtherDatabase {
-            runtime: home.paths.runtime.clone(),
+            runtime: home.prepared.runtime(),
             database: runtime.database,
         });
     }
@@ -318,6 +340,71 @@ pub async fn find(home: &Home) -> Result<Found, LifeError> {
         Ok(_) => Found::Nobody,
         Err(unanswered) => Found::unanswered(&runtime, unanswered),
     })
+}
+
+/// What the socket of this home shows, kept apart as the record's state table needs it (§2).
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum OnSocket {
+    /// A server of this build's control version, for this home's database.
+    Serving(Identity),
+    OtherDatabase(Identity),
+    /// A control version that this build does not know: a newer server.
+    Newer(Identity),
+    Malformed(String),
+    Stalled,
+    /// An entry that is not yet a socket of this account with mode 0600.
+    NotReady(String),
+    Denied(String),
+    PathError(String),
+    /// Confirmed absence or refusal: no socket, or `ECONNREFUSED`.
+    Absent,
+}
+
+#[cfg(unix)]
+pub async fn on_socket(home: &Home) -> OnSocket {
+    on_socket_within(home, PROBE_LIMIT).await
+}
+
+#[cfg(unix)]
+async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
+    let socket = home.prepared.socket();
+    let identity = match identity_over_socket_within(&home.prepared, limit).await {
+        Ok(identity) => identity,
+        Err(Unanswered::NotListening(_)) => return OnSocket::Absent,
+        Err(Unanswered::NotPermitted(error)) => {
+            return OnSocket::Denied(format!(
+                "connecting to {} is not permitted ({error})",
+                socket.display()
+            ));
+        }
+        Err(Unanswered::PathError(error)) => {
+            return OnSocket::PathError(format!("{} cannot be reached: {error}", socket.display()));
+        }
+        Err(Unanswered::NotReady(why)) => return OnSocket::NotReady(why),
+        Err(Unanswered::Stalled) => return OnSocket::Stalled,
+        Err(Unanswered::Malformed(why)) => return OnSocket::Malformed(why),
+        Err(Unanswered::OwnerOnly) => {
+            return OnSocket::Malformed("the socket answered as a TCP listener does".to_owned());
+        }
+    };
+    match identity.control {
+        None => return OnSocket::Malformed("the identity has no control version".to_owned()),
+        Some(control) if control != CONTROL => return OnSocket::Newer(identity),
+        Some(_) => {}
+    }
+    let generation_is_valid = identity.generation.as_deref().is_some_and(|generation| {
+        generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if !generation_is_valid || identity.started.is_none() || identity.url.is_none() {
+        return OnSocket::Malformed(
+            "the identity lacks a valid generation, its start or its url".to_owned(),
+        );
+    }
+    if identity.database != home.database() {
+        return OnSocket::OtherDatabase(identity);
+    }
+    OnSocket::Serving(identity)
 }
 
 pub async fn ensure(home: &Home) -> Result<RuntimeFile, LifeError> {
@@ -577,19 +664,25 @@ struct OwnedChild {
     child: Option<Child>,
 }
 
+/// The server that a command starts gets the checked home, by its resolved path, never the path as typed.
+fn serve_command(home: &Home) -> std::io::Result<Command> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("serve")
+        .env("QUADRATIQUE_HOME", home.prepared.folder())
+        .env(STARTED_VARIABLE, ON_DEMAND)
+        .current_dir(home.prepared.folder());
+    Ok(command)
+}
+
 impl OwnedChild {
     fn spawn(home: &Home) -> std::io::Result<OwnedChild> {
         let log = OpenOptions::new()
             .create(true)
             .append(true)
             .open(home.log())?;
-        let mut command = Command::new(std::env::current_exe()?);
-        if let Some(directory) = &home.paths.home {
-            command.env("QUADRATIQUE_HOME", directory);
-        }
+        let mut command = serve_command(home)?;
         let child = detach(&mut command)
-            .arg("serve")
-            .current_dir(&home.directory)
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)
@@ -640,7 +733,7 @@ fn remove_runtime(home: &Home, stopped: Option<u32>) {
         None => !alive(runtime.pid),
     });
     if stale {
-        let _ = std::fs::remove_file(&home.paths.runtime);
+        let _ = std::fs::remove_file(home.prepared.runtime());
     }
 }
 
@@ -654,9 +747,69 @@ mod tests {
 
     const HANG_GUARD: Duration = Duration::from_secs(20);
 
+    /// The home policy refuses a home that a group or other accounts may use, and `tempfile` makes 0755 folders.
+    fn private_home() -> tempfile::TempDir {
+        let builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::PermissionsExt;
+            let mut builder = builder;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+            builder
+        };
+        builder.tempdir().expect("a temporary home")
+    }
+
+    /// The checked home is named by its resolved path from then on: a link on the typed path that changes later
+    /// changes nothing that this command opens, and the server it starts gets the resolved path.
+    #[cfg(unix)]
+    #[test]
+    fn every_file_and_the_started_server_use_the_resolved_home_not_the_path_as_typed() {
+        let base = private_home();
+        let real = base.path().join("real");
+        let other = base.path().join("other");
+        std::fs::create_dir(&other).expect("another folder");
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("a link to the home");
+        let typed = link.join("quadratique");
+        std::fs::create_dir(&real).expect("the link's target");
+
+        let home = Home::new(Paths::in_home(&typed).expect("a home")).expect("a home");
+        std::fs::remove_file(&link).expect("the link goes");
+        std::os::unix::fs::symlink(&other, &link).expect("the link names another folder");
+
+        let resolved = base
+            .path()
+            .canonicalize()
+            .expect("a real path")
+            .join("real/quadratique");
+        assert_eq!(home.prepared().folder(), resolved);
+        for file in [
+            home.prepared().database(),
+            home.prepared().runtime(),
+            home.prepared().lock(),
+            home.start_lock(),
+            home.log(),
+            home.prepared().socket(),
+        ] {
+            assert!(file.starts_with(&resolved), "{}", file.display());
+        }
+        let command = super::serve_command(&home).expect("the server's command");
+        let environment: Vec<_> = command.get_envs().collect();
+        assert!(
+            environment.contains(&(
+                std::ffi::OsStr::new("QUADRATIQUE_HOME"),
+                Some(resolved.as_os_str())
+            )),
+            "{environment:?}"
+        );
+        assert_eq!(command.get_current_dir(), Some(resolved.as_path()));
+        assert!(!other.join("quadratique").exists());
+    }
+
     #[tokio::test]
     async fn a_start_lock_that_another_starter_never_releases_ends_at_the_deadline() {
-        let directory = tempfile::tempdir().expect("a temporary home");
+        let directory = private_home();
         let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
         let other_starter = home.open_lock(&home.start_lock()).expect("the start lock");
         other_starter
@@ -700,9 +853,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_of_a_home_that_stays_held_without_an_answer_says_the_server_is_stopping() {
-        let directory = tempfile::tempdir().expect("a temporary home");
+        let directory = private_home();
         let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
-        let closing_server = home.open_lock(&home.paths.lock()).expect("the home's lock");
+        let closing_server = home
+            .open_lock(&home.prepared.lock())
+            .expect("the home's lock");
         closing_server
             .lock()
             .expect("a server closing its store holds the home");

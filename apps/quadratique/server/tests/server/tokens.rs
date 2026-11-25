@@ -380,7 +380,7 @@ async fn a_second_revoke_changes_nothing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_damaged_credentials_file_stops_the_start_and_names_itself() {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     std::fs::write(paths.credentials(), "{ not json").expect("written");
 

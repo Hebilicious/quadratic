@@ -406,7 +406,7 @@ mod in_process {
 
     #[tokio::test]
     async fn a_repeated_claim_answers_with_its_own_claim_when_others_write_right_after_it() {
-        let home = tempfile::tempdir().expect("a temporary home");
+        let home = crate::support::private_home();
         let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
         let app = application().expect("the application");
         let open =

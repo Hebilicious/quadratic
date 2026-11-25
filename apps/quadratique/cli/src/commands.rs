@@ -94,7 +94,7 @@ fn words(args: &[String]) -> Vec<&str> {
 
 pub fn home() -> Result<Home, String> {
     let paths = Paths::from_env().map_err(|error| error.to_string())?;
-    Home::new(paths).map_err(|error| error.to_string())
+    Home::new(paths)
 }
 
 const TAKE_OVER_FLAG: &str = "--take-over";
@@ -133,7 +133,7 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
     (io.stderr)(&format!(
         "quadratique serve: pid {}, database {}",
         std::process::id(),
-        home.paths.database.display()
+        home.prepared().database().display()
     ));
     let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let taken = if take_over {
@@ -144,7 +144,11 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
     } else {
         None
     };
-    match server::start(&home.paths, address).await {
+    let started = match std::env::var(background::STARTED_VARIABLE) {
+        Ok(value) if value == background::ON_DEMAND => server::Started::OnDemand,
+        _ => server::Started::Serve,
+    };
+    match server::start_by(home.prepared(), address, started).await {
         Ok(server) => {
             drop(taken);
             server::until_stopped(server).await;
@@ -181,12 +185,113 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
 }
 
 fn located(home: &Home, mut value: Value) -> Value {
-    value["runtime"] = json!(home.paths.runtime);
+    value["runtime"] = json!(home.prepared().runtime());
     value["log"] = json!(home.log());
     value
 }
 
+/// One answer for each state of the record's table (§2). The socket decides, except when it is confirmed absent or
+/// refusing: then the home's lock tells a stopped home from one whose server is starting or stopping, or is of a build
+/// before the socket, which the runtime file and TCP still find.
+#[cfg(unix)]
 async fn status(home: &Home) -> Result<Value, background::LifeError> {
+    use background::OnSocket;
+
+    let database = home.prepared().database();
+    let value = match background::on_socket(home).await {
+        OnSocket::Serving(identity) => answered_over_socket(&identity),
+        OnSocket::OtherDatabase(identity) => json!({
+            "otherDatabase": identity.database,
+            "pid": identity.pid,
+            "database": database,
+        }),
+        OnSocket::Newer(identity) => json!({
+            "newer": true,
+            "control": identity.control,
+            "pid": identity.pid,
+            "generation": identity.generation,
+            "reason": format!(
+                "the server of this home speaks control version {}, which this build does not know: upgrade this command line",
+                identity.control.unwrap_or_default()
+            ),
+            "database": database,
+        }),
+        OnSocket::Malformed(why) => json!({
+            "malformed": true,
+            "reason": format!("the server's identity on {} is not valid: {why}", home.prepared().socket().display()),
+            "database": database,
+        }),
+        OnSocket::Stalled => json!({
+            "stalled": true,
+            "reason": format!(
+                "the server on {} accepted a connection and gave no full answer within {:?}",
+                home.prepared().socket().display(),
+                server::PROBE_LIMIT
+            ),
+            "database": database,
+        }),
+        OnSocket::Denied(reason) | OnSocket::PathError(reason) => unreachable(home, reason),
+        OnSocket::NotReady(why) => match held(home)? {
+            Held::Yes => {
+                json!({ "running": false, "starting": true, "reason": why, "database": database })
+            }
+            Held::No => json!({ "running": false, "database": database }),
+            Held::Unreachable(reason) => unreachable(home, reason),
+        },
+        OnSocket::Absent => match held(home)? {
+            Held::No => json!({ "running": false, "database": database }),
+            Held::Unreachable(reason) => unreachable(home, reason),
+            Held::Yes => match background::find(home).await? {
+                Found::Ours(runtime) => json!({
+                    "running": true,
+                    "legacy": true,
+                    "sameInterface": true,
+                    "pid": runtime.pid,
+                    "url": runtime.url,
+                    "database": runtime.database,
+                }),
+                Found::OtherInterface { runtime, theirs } => json!({
+                    "running": true,
+                    "legacy": true,
+                    "sameInterface": false,
+                    "interface": theirs.named(),
+                    "pid": runtime.pid,
+                    "url": runtime.url,
+                    "database": runtime.database,
+                }),
+                Found::Refused { reason } => unreachable(home, reason),
+                Found::Nobody => {
+                    json!({ "running": false, "starting": true, "database": database })
+                }
+            },
+        },
+    };
+    Ok(located(home, value))
+}
+
+#[cfg(unix)]
+enum Held {
+    Yes,
+    No,
+    Unreachable(String),
+}
+
+#[cfg(unix)]
+fn held(home: &Home) -> Result<Held, background::LifeError> {
+    match home.held() {
+        Ok(true) => Ok(Held::Yes),
+        Ok(false) => Ok(Held::No),
+        Err(error) => match home.unusable(error, Attempt::Start) {
+            background::LifeError::Unreachable { reason } => Ok(Held::Unreachable(reason)),
+            other => Err(other),
+        },
+    }
+}
+
+/// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
+#[cfg(not(unix))]
+async fn status(home: &Home) -> Result<Value, background::LifeError> {
+    let database = home.prepared().database();
     let value = match background::find(home).await? {
         Found::Ours(runtime) => json!({
             "running": true,
@@ -205,22 +310,41 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
         }),
         Found::Refused { reason } => match home.held() {
             Ok(true) => unreachable(home, reason),
-            Ok(false) => json!({ "running": false, "database": home.paths.database }),
+            Ok(false) => json!({ "running": false, "database": database }),
             Err(error) => match home.unusable(error, Attempt::Start) {
                 background::LifeError::Unreachable { reason } => unreachable(home, reason),
                 other => return Err(other),
             },
         },
-        Found::Nobody => json!({ "running": false, "database": home.paths.database }),
+        Found::Nobody => json!({ "running": false, "database": database }),
     };
     Ok(located(home, value))
+}
+
+#[cfg(unix)]
+fn answered_over_socket(identity: &server::Identity) -> Value {
+    let same = identity.interface.as_deref() == Some(quadratique_server::app::interface().as_str());
+    let mut value = json!({
+        "running": true,
+        "sameInterface": same,
+        "pid": identity.pid,
+        "url": identity.url,
+        "database": identity.database,
+        "generation": identity.generation,
+        "control": identity.control,
+        "started": identity.started,
+    });
+    if !same {
+        value["interface"] = json!(identity.interface);
+    }
+    value
 }
 
 fn unreachable(home: &Home, reason: String) -> Value {
     json!({
         "reachable": false,
         "reason": reason,
-        "database": home.paths.database,
+        "database": home.prepared().database(),
     })
 }
 

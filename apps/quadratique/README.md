@@ -247,7 +247,32 @@ forward that runs as you (`ssh -L`, socat, the userland forwarders of rootless c
 that process, so everyone who connects through it counts as you. No web page can call the routes
 of the command line, not even Quadratique's own.
 
-The server makes its data folder readable only by its own account (mode `0700`).
+The data folder must be private. The server and every command check it before they open a lock
+file in it, touch the store or start a server. When the check refuses the folder, the command
+exits with status 5 and says which rule failed and what to do. Nothing is changed for you: the
+check never runs `chmod`. Each cause has its own fix:
+
+| The message says | Do this |
+| --- | --- |
+| `<folder> is not private: its mode is 755 …` | `chmod 700 <folder>`. Quadratique 0.1 made the folder private itself; this release refuses a folder that a group or other accounts may use, and leaves it for you to change. |
+| `<folder> gives access to another account: its ACL lets …` | Remove the ACL entry, not the mode. On Linux: `setfacl -b <folder>` (its entries), or `setfacl -k <folder>` (its default ACL). On macOS: `chmod -N <folder>`. The message names the command. |
+| `another account can replace <folder above it> …` | That folder belongs to another account, or a group or other accounts may write it without the sticky bit. Remove their write access (`chmod go-w <folder>`) if the folder is yours, or set `QUADRATIQUE_HOME` to a folder that only you and root can change, such as one in your home folder. |
+| `<link> is a link that another account could change …` | Name the folder without that link, or set `QUADRATIQUE_HOME` to a folder whose path has no link that another account owns. |
+| `the server's socket would be … bytes long …` | Set `QUADRATIQUE_HOME` to a shorter folder. The path of `server.sock` may be at most 107 bytes on Linux and 103 on macOS. |
+| `<folder>/server.sock is a regular file …` | Remove that entry yourself if nothing needs it. The server removes only a socket of your account on which no process listens any more. |
+
+A missing data folder, and any missing folder above it, is made with mode `0700`.
+
+The server also listens on the Unix socket `server.sock` in the data folder, with mode `0600`.
+`server status` asks it there first, and reports one state: `running`, `starting` (a server holds
+the folder and does not answer yet), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
+command line), `reachable: false` with the reason, or `legacy: true` for a server of an earlier
+build, which only TCP reaches. The other commands still use the TCP listener.
+
+If a user service runs the server, a refusal stops it: the unit does not restart a server that
+exits with status 5 (`RestartPreventExitStatus`). Fix the cause, then
+`systemctl --user restart quadratique.service`. `quadratique upgrade` checks the folder before it
+looks for a release, and stops there with the reason and "Nothing was changed".
 
 Some agent sandboxes forbid connections to the loopback interface, and some make the file system
 read-only, so that a command can neither reach the server nor start or stop one in the data

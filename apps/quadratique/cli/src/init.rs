@@ -395,16 +395,7 @@ fn indexed_as(root: &Path, path: &str, digests: &[&str]) -> bool {
         .is_ok_and(|output| output.status.success() && shipped::is_listed(&output.stdout, digests))
 }
 
-pub fn shell_word(path: &str) -> String {
-    if path
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
-    {
-        path.to_owned()
-    } else {
-        format!("'{}'", path.replace('\'', "'\\''"))
-    }
-}
+pub use quadratique_server::home::shell_word;
 
 fn skill_content(file: &SkillFile) -> impl Fn(Vec<u8>) -> Content {
     |bytes| {

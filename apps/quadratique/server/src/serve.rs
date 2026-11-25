@@ -66,7 +66,7 @@ impl Served {
 impl Drop for Served {
     fn drop(&mut self) {
         self.stop.cancel();
-        if let Err(error) = stop_listening(&self.listener) {
+        if let Err(error) = stop_listening(&*self.listener) {
             eprintln!(
                 "quadratique server: could not stop listening on {}: {error}; a child process may keep the port until it starts its program",
                 self.address
@@ -75,15 +75,16 @@ impl Drop for Served {
     }
 }
 
-/// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it. A sandbox or a
-/// policy may refuse the call: the error then goes to the server's log.
+/// On Linux, `shutdown` takes a listening socket out of the listening state for every descriptor of it: a TCP socket
+/// stops listening, and a Unix socket refuses every later `connect`. A sandbox or a policy may refuse the call: the
+/// error then goes to the server's log.
 #[cfg(target_os = "linux")]
-fn stop_listening(listener: &TcpListener) -> std::io::Result<()> {
+fn stop_listening(listener: impl std::os::fd::AsFd) -> std::io::Result<()> {
     rustix::net::shutdown(listener, rustix::net::Shutdown::Both).map_err(std::io::Error::from)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn stop_listening(_listener: &TcpListener) -> std::io::Result<()> {
+fn stop_listening<L>(_listener: L) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -151,6 +152,96 @@ pub fn serve_on(
     })
 }
 
+/// The server's Unix socket: file permissions decide who connects, so it admits every connection it accepts.
+#[cfg(unix)]
+pub struct ServedSocket {
+    listener: Arc<tokio::net::UnixListener>,
+    stop: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+    file: crate::home::SocketFile,
+}
+
+#[cfg(unix)]
+impl ServedSocket {
+    pub fn path(&self) -> &std::path::Path {
+        self.file.path()
+    }
+
+    pub async fn close(mut self) {
+        self.stop.cancel();
+        let _ = (&mut self.task).await;
+    }
+}
+
+/// As for [`Served`]: the socket stops taking connections for every copy of its descriptor, then its file goes.
+#[cfg(unix)]
+impl Drop for ServedSocket {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        if let Err(error) = stop_listening(&*self.listener) {
+            eprintln!(
+                "quadratique server: could not stop listening on {}: {error}; a child process may connect to it until it starts its program",
+                self.file.path().display()
+            );
+        }
+    }
+}
+
+/// Accepts on a socket that `home::bind_socket` bound and checked.
+#[cfg(unix)]
+pub fn serve_socket(
+    listener: tokio::net::UnixListener,
+    file: crate::home::SocketFile,
+    routes: Routes,
+) -> ServedSocket {
+    let listener = Arc::new(listener);
+    let mut routes = routes;
+    routes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+    let routes = Arc::new(routes);
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let accepting = Arc::clone(&listener);
+    let task = tokio::spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                biased;
+                () = stopped.cancelled() => return,
+                accepted = accepting.accept() => accepted,
+            };
+            let Ok((stream, _)) = accepted else {
+                continue;
+            };
+            let routes = routes.clone();
+            let stopped = stopped.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = answer(stream, routes) => {}
+                    () = stopped.cancelled() => {}
+                }
+            });
+        }
+    });
+    ServedSocket {
+        listener,
+        stop,
+        task,
+        file,
+    }
+}
+
+async fn answer<S>(stream: S, routes: Arc<Routes>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+        let routes = routes.clone();
+        async move { Ok::<_, Infallible>(route(&routes, request_body(request)).await) }
+    });
+    let _ = hyper::server::conn::http1::Builder::new()
+        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+        .await;
+}
+
 async fn handle(
     stream: TcpStream,
     connection: Connection,
@@ -162,13 +253,7 @@ async fn handle(
         refuse(stream, drain).await;
         return;
     }
-    let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
-        let routes = routes.clone();
-        async move { Ok::<_, Infallible>(route(&routes, request_body(request)).await) }
-    });
-    let _ = hyper::server::conn::http1::Builder::new()
-        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
-        .await;
+    answer(stream, routes).await;
 }
 
 struct Drain {

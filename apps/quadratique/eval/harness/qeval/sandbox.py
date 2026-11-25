@@ -152,6 +152,8 @@ class Sandbox:
         for sub in ("home/.config", "home/.local/share", "home/.local/state", "home/.cache", "home/run", "qhome", "bin"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         (self.home / "run").chmod(0o700)
+        # Quadratique refuses a home that a group or other accounts may use.
+        (self.root / "qhome").chmod(0o700)
         exports = " ".join(f'{k}="{v}"' for k, v in self.tool_env().items())
         for name, real in self.binaries.items():
             wrapper = self.bin / name

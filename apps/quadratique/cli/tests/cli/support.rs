@@ -9,6 +9,8 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::Errno;
 use rustix::process::{Pid, PidfdFlags, Signal, kill_process, pidfd_open};
 use serde_json::Value;
+use std::os::unix::fs::PermissionsExt;
+
 use tempfile::TempDir;
 
 pub const BINARY: &str = env!("CARGO_BIN_EXE_quadratique");
@@ -71,6 +73,7 @@ impl Home {
         Home {
             directory: tempfile::Builder::new()
                 .prefix("quadratique-home-")
+                .permissions(std::fs::Permissions::from_mode(0o700))
                 .tempdir()
                 .expect("a temporary Quadratique home"),
         }

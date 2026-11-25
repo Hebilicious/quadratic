@@ -502,7 +502,7 @@ struct Ledger {
 
 impl Ledger {
     async fn open() -> Ledger {
-        let home = tempfile::tempdir().expect("a temporary home");
+        let home = crate::support::private_home();
         let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
         let repository = Repository::new();
         let author = Author::new(r#"{"kind":"human","name":"sam"}"#).expect("a valid actor");

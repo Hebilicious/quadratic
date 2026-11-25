@@ -27,7 +27,7 @@ async fn start_waiting(paths: &Paths, waits: Waits) -> Result<server::Server, se
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_server_publishes_its_loopback_address_while_it_runs_and_removes_it_on_shutdown() {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let running = server::start(&paths, server::loopback())
         .await
@@ -58,7 +58,7 @@ async fn the_server_publishes_its_loopback_address_while_it_runs_and_removes_it_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_server_on_the_same_home_is_refused_until_the_first_shuts_down() {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let first = server::start(&paths, server::loopback())
         .await
@@ -87,7 +87,7 @@ async fn a_second_server_on_the_same_home_is_refused_until_the_first_shuts_down(
 
 #[tokio::test]
 async fn a_server_waits_for_a_holder_of_the_lock_that_is_not_a_server_and_then_starts() {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let holder = OpenOptions::new()
         .create(true)
@@ -114,7 +114,7 @@ async fn a_server_waits_for_a_holder_of_the_lock_that_is_not_a_server_and_then_s
 
 #[tokio::test]
 async fn no_identity_probe_outlasts_the_wait_of_a_starting_server() {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let holder = OpenOptions::new()
         .create(true)
@@ -167,7 +167,7 @@ async fn written_runtime(paths: &Paths) -> Option<RuntimeFile> {
 async fn a_server_that_stops_never_removes_the_runtime_file_of_its_replacement() {
     use std::io::Write;
 
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let old = server::start(&paths, server::loopback())
         .await
@@ -223,7 +223,7 @@ async fn a_server_that_stops_never_removes_the_runtime_file_of_its_replacement()
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_dropped_without_a_shutdown_frees_its_home_and_its_port() {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let running = server::start(&paths, server::loopback())
         .await
@@ -338,31 +338,33 @@ mod kernel_sockets {
     }
 }
 
+/// The server never changes the mode of a home that exists: it refuses it, and names the command that makes it private.
 #[tokio::test]
-async fn the_server_makes_its_data_folder_private_to_its_account() {
+async fn the_server_refuses_a_data_folder_that_other_accounts_may_use_and_leaves_its_mode() {
     let parent = tempfile::tempdir().expect("a temporary folder");
     let home = parent.path().join("home");
     std::fs::create_dir(&home).expect("the home");
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).expect("mode 0755");
     let paths = Paths::in_home(&home).expect("an absolute home");
 
-    let running = server::start(&paths, server::loopback())
-        .await
-        .expect("the server starts");
+    let refused = server::start(&paths, server::loopback()).await.err();
 
     let mode = std::fs::metadata(&home)
         .expect("the home")
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(mode, 0o700, "mode {mode:o}");
-    running.shutdown().await;
+    assert_eq!(mode, 0o755, "mode {mode:o}");
+    let Some(error @ server::ServerError::Home(_)) = refused else {
+        panic!("the home was not refused: {refused:?}");
+    };
+    assert!(error.to_string().contains("chmod 700"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs sudo to act as the account nobody"]
 async fn a_process_of_another_account_is_refused() {
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let running = server::start(&paths, server::loopback())
         .await
@@ -411,7 +413,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
 
     use quadratique_server::serve::Connection;
 
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let running = server::start(&paths, server::loopback())
         .await
@@ -487,7 +489,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
 async fn a_started_server_admits_its_own_account_and_refuses_a_peer_with_no_connection() {
     use quadratique_server::serve::Connection;
 
-    let home = tempfile::tempdir().expect("a temporary home");
+    let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let running = server::start(&paths, server::loopback())
         .await
