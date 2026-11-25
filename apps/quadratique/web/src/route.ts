@@ -29,7 +29,7 @@ export type Route =
   | { readonly view: "list"; readonly scope: Scope; readonly query: ViewQuery }
   | { readonly view: "board"; readonly scope: Scope; readonly query: ViewQuery }
   | { readonly view: "history"; readonly scope: Scope }
-  | { readonly view: "issue"; readonly issue: string; readonly closing: boolean }
+  | { readonly view: "issue"; readonly issue: string; readonly finishing: boolean }
   | { readonly view: "now"; readonly section: "agents" | "waiting" }
   | { readonly view: "missing" };
 
@@ -191,7 +191,7 @@ export function routeOf(pathname: string, hash = "", search = ""): Route {
   }
   const issue = ISSUE.exec(pathname);
   if (issue?.[1] !== undefined) {
-    return { view: "issue", issue: decodeURIComponent(issue[1]), closing: hash === "#close" };
+    return { view: "issue", issue: decodeURIComponent(issue[1]), finishing: hash === "#finish" };
   }
   return { view: "missing" };
 }
@@ -205,7 +205,7 @@ export const paths = {
     `${scopePath(scope)}/board${searchOf(query)}`,
   history: (scope: Scope) => `${scopePath(scope)}/history`,
   issue: (issue: string) => `/issues/${encodeURIComponent(issue)}`,
-  closing: (issue: string) => `/issues/${encodeURIComponent(issue)}#close`,
+  finishing: (issue: string) => `/issues/${encodeURIComponent(issue)}#finish`,
   now: () => "/now",
   waiting: () => "/now#waiting",
 };

@@ -496,7 +496,7 @@ The command answers `{ "moved": …, "left": … }`, each a count and the first 
 - **Missed:** an issue whose landing the server never saw. It sees a landing when it looks at the
   repository after `git fetch` or a merge; it does not see one from before its first look at the
   project, or a branch deleted before its next look. A squash merge without `Refs: DEM-12` names no
-  issue, and a squash merge before the agent's `close` leaves the issue in review. After
+  issue, and a squash merge before the agent's `finish` leaves the issue in review. After
   a rewrite of the default branch, an issue whose old landing is no longer in its history is never
   moved. Move such an issue yourself.
 
@@ -597,6 +597,29 @@ GitHub, and whoever can publish a release of `Hebilicious/quadratique`.
 The first start of a new binary upgrades the store to that binary's schema, one commit per
 step. A binary refuses a store newer than the schema it knows. Back up the store (see "Backups") before you upgrade, so that you can go back to the older binary
 with the store as it was.
+
+### `close` is now `finish`
+
+Release 0.2 renames the command that hands finished work to review, with its evidence:
+`quadratique close` is now `quadratique finish`, the capabilities `issue.close` and `issues.close`
+are now `issue.finish` and `issues.finish`, and the refusal `NotClosed` of several issues is now
+`NotFinished`. On GitHub, closing an issue without a merge drops it; here the work is done and
+waits for review, so the new word says that.
+
+The old names still work in 0.2 and go away in the release after it. `quadratique close`,
+`quadratique issue close`, `quadratique issues close` and `quadratique call issue.close` do what
+they did and answer what they answered, `NotClosed` included; after the answer or the refusal,
+which go to standard output, they add one line on standard error:
+`` quadratique: `close` is now `finish`; `close` goes away in the release after 0.2. ``. Over
+HTTP, `issue.close` and `issues.close` answer as before. The MCP tool is `issue.finish` only: an
+MCP client reads the tools from the server at each start.
+
+Every finish now writes the history operation `issue.finish`, whichever name was called. History
+written before 0.2 keeps `issue.close`; `history query` shows both as they were written, and the
+web app reads both as "finished with evidence". An older build shows `issue.finish` as it is
+written, in `history query` and in its web app. Update each repository's skill with
+`quadratique init` (see "Update a repository's skill after an upgrade"); scripts that call
+`quadratique close` need `finish` before the release after 0.2.
 
 ### The repositories after an upgrade
 

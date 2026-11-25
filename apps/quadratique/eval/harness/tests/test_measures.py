@@ -47,7 +47,9 @@ class TrackerCalls(unittest.TestCase):
     def test_each_trackers_take_and_finish_are_read_from_the_call(self):
         cases = [
             ("quadratique", call("Bash", {"command": "cd /w && quadratique claim --issue TAL-3"}), "take", ["TAL-3"]),
-            ("quadratique", call("Bash", {"command": 'quadratique close --issue TAL-3 --evidence "ok"'}), "finish", ["TAL-3"]),
+            ("quadratique", call("Bash", {"command": 'quadratique finish --issue TAL-3 --evidence "ok"'}), "finish", ["TAL-3"]),
+            # The skill before 0.2 named the finish `close`, as the saved runs show.
+            ("quadratique", call("Bash", {"command": 'quadratique close --issue TAL-4 --evidence "ok"'}), "finish", ["TAL-4"]),
             ("beads", call("Bash", {"command": "bd update tally-x1y --claim --json"}), "take", ["tally-x1y"]),
             ("beads", call("Bash", {"command": 'bd close tally-x1y --reason "done"'}), "finish", ["tally-x1y"]),
             ("lific", call("mcp__lific__update_issue", {"identifier": "TAL-2", "status": "done"}), "finish", ["TAL-2"]),
@@ -95,12 +97,12 @@ class DoubleClaims(unittest.TestCase):
         found = agents.double_claims([], self.SESSIONS)
         self.assertEqual((found["established"], found["doubles"]), (False, []))
 
-    def test_in_the_transcripts_a_quadratique_close_leaves_the_issue_held(self):
+    def test_in_the_transcripts_a_quadratique_finish_leaves_the_issue_held(self):
         claimed = call("Bash", {"command": "quadratique claim --issue TAL-1"}, t=1)
         claimed["output"] = '{"issue": {"id": "TAL-1", "claim": {"branch": "agent-a"}}}'
-        closed = call("Bash", {"command": "quadratique close --issue TAL-1 --evidence x"}, t=2)
+        finished = call("Bash", {"command": "quadratique finish --issue TAL-1 --evidence x"}, t=2)
         second = dict(claimed, t=3)
-        sessions = {"agent-a": {"calls": [claimed, closed]}, "agent-b": {"calls": [second]}}
+        sessions = {"agent-a": {"calls": [claimed, finished]}, "agent-b": {"calls": [second]}}
         self.assertEqual([d["second"] for d in agents.double_claims_in_transcripts(sessions, quadratique)], ["agent-b"])
 
 

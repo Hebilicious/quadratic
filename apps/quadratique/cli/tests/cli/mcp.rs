@@ -83,7 +83,7 @@ impl Client {
 }
 
 #[test]
-fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_work() {
+fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_finishes_seeded_work() {
     let home = Home::new();
     let repository = Repository::new();
     let worktree = repository.worktree("tooling");
@@ -147,7 +147,7 @@ fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_
     let instructions = agent.tool("workspace.instructions", json!({}));
     assert_eq!(instructions["project"], "MCP");
     let text = instructions["text"].as_str().expect("a text");
-    for command in ["ready", "show", "claim", "close", "release"] {
+    for command in ["ready", "show", "claim", "finish", "release"] {
         assert!(
             text.contains(&format!("`quadratique {command}")),
             "the instructions do not name `quadratique {command}`: {text}"
@@ -165,7 +165,7 @@ fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_
     assert_eq!(claimed["issue"]["claim"]["holder"]["name"], "agent@tooling");
 
     agent.tool(
-        "issue.close",
+        "issue.finish",
         json!({ "issue": seeded, "evidence": "cargo test: 3 passed" }),
     );
 
@@ -254,7 +254,7 @@ fn a_session_started_in_the_main_checkout_claims_for_a_worktree_it_names_and_the
         "{again}"
     );
     let closed = agent.tool(
-        "issue.close",
+        "issue.finish",
         json!({ "issue": issue, "evidence": "cargo test: 3 passed" }),
     );
     assert_eq!(

@@ -4,9 +4,9 @@ import { computed } from "vue";
 import type { DetailActor } from "../board/detail.machine.ts";
 import { rolesOf } from "../board/issues.ts";
 import type { Assignee, Issue } from "../board/model.ts";
-import { closeChanges, explainsNotReady, notReadyShown } from "../board/lifecycle.ts";
+import { finishChanges, explainsNotReady, notReadyShown } from "../board/lifecycle.ts";
 import ChoiceField from "../edit/choice-field.vue";
-import CloseForm from "../edit/close-form.vue";
+import FinishForm from "../edit/finish-form.vue";
 import { issueEditor } from "../edit/issue-editor.ts";
 import NotesField from "../edit/notes-field.vue";
 import ReleaseButton from "../edit/release-button.vue";
@@ -31,7 +31,7 @@ import {
 
 const props = defineProps<{
   readonly detail: DetailActor;
-  readonly closing: boolean;
+  readonly finishing: boolean;
   readonly mode: "page" | "peek";
 }>();
 
@@ -213,9 +213,9 @@ function follow(event: MouseEvent): void {
       <section class="field">
         <h3 class="field-label">Evidence</h3>
         <p v-if="issue.evidence !== undefined" class="field-value" data-multiline="true"><LinkedText :text="issue.evidence" /></p>
-        <p v-else class="field-value field-empty">No evidence yet: it comes with the close.</p>
+        <p v-else class="field-value field-empty">No evidence yet: it comes with the finish.</p>
       </section>
-      <CloseForm v-if="closeChanges(issue, project)" :editor="editor" :focus="closing" />
+      <FinishForm v-if="finishChanges(issue, project)" :editor="editor" :focus="finishing" />
 
       <HistoryList :detail="detail" :status-name="statusName" />
     </div>

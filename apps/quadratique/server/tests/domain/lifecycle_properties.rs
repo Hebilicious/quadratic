@@ -121,7 +121,7 @@ fn wait() -> impl Strategy<Value = Wait> {
 enum Step {
     Claim(Vec<Wait>),
     Release,
-    Close,
+    Finish,
     Update {
         revision_offset: i8,
         status: Index,
@@ -135,7 +135,7 @@ fn step() -> impl Strategy<Value = (Step, Index)> {
     let step = prop_oneof![
         prop::collection::vec(wait(), 0..3).prop_map(Step::Claim),
         Just(Step::Release),
-        Just(Step::Close),
+        Just(Step::Finish),
         (
             -1i8..=1,
             any::<Index>(),
@@ -167,7 +167,7 @@ fn event(step: &Step, issue: &Issue, workflow: &Workflow) -> Event {
             worktree: None,
         },
         Step::Release => Event::Release,
-        Step::Close => Event::Close,
+        Step::Finish => Event::Finish,
         Step::Update {
             revision_offset,
             status,

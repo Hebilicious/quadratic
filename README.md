@@ -1,7 +1,7 @@
 # Quadratique
 
 Quadratique is a local issue tracker for one human and many AI agents that work in the same git
-repository. Agents claim issues, record what they did and close them from their own worktrees.
+repository. Agents claim issues, record what they did and finish them from their own worktrees.
 The human follows the board in a web app, answers the issues that wait on a person, and reviews
 the work. Quadratique watches the repository, so a merge moves the issue it names.
 

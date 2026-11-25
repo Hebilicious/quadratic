@@ -21,6 +21,9 @@
             "create": {
               "capability": "issue.create"
             },
+            "finish": {
+              "capability": "issues.finish"
+            },
             "instructions": {
               "capability": "workspace.instructions"
             },
@@ -531,7 +534,7 @@
           "$ref": "#/$defs/Date"
         },
         "evidence": {
-          "description": "What was checked, from `issue.close`.",
+          "description": "What was checked, from `issue.finish`.",
           "maxLength": 20000,
           "minLength": 1,
           "type": "string"
@@ -895,6 +898,22 @@
       ],
       "type": "object"
     },
+    "NotClaimed": {
+      "properties": {
+        "_tag": {
+          "const": "NotClaimed",
+          "type": "string"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueId"
+        }
+      },
+      "required": [
+        "_tag",
+        "issue"
+      ],
+      "type": "object"
+    },
     "NotFound": {
       "properties": {
         "_tag": {
@@ -1066,6 +1085,27 @@
       "required": [
         "_tag",
         "project"
+      ],
+      "type": "object"
+    },
+    "Resolved": {
+      "properties": {
+        "_tag": {
+          "const": "Resolved",
+          "type": "string"
+        },
+        "issue": {
+          "$ref": "#/$defs/IssueId"
+        },
+        "status": {
+          "$ref": "#/$defs/Status",
+          "description": "The status of the canceled category that the issue is in."
+        }
+      },
+      "required": [
+        "_tag",
+        "issue",
+        "status"
       ],
       "type": "object"
     },
@@ -1323,7 +1363,7 @@
             },
             "merge": {
               "$ref": "#/$defs/Status",
-              "description": "A status of the category started or completed. Used by `issue.close` and the ref watcher: the work is in the default branch. Completed when the project has no step after the merge."
+              "description": "A status of the category started or completed. Used by `issue.finish` and the ref watcher: the work is in the default branch. Completed when the project has no step after the merge."
             },
             "release": {
               "$ref": "#/$defs/Status",
@@ -1331,7 +1371,7 @@
             },
             "review": {
               "$ref": "#/$defs/Status",
-              "description": "A status of the category started. Used by `issue.close`: the work is finished and waits for its merge."
+              "description": "A status of the category started. Used by `issue.finish`: the work is finished and waits for its merge."
             }
           },
           "required": [
@@ -1826,11 +1866,9 @@
       }
     },
     "issue.close": {
-      "description": "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (as for `issue.claim`, from any worktree of its session), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence. In either case, when the status the move ends in is the workflow's `merge` status or a later status that is not canceled, it fails with `BaseNotMerged` while an issue it is stacked on is not merged. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "The name of `issue.finish` before 0.2: it does the same and answers the same. It goes away in the release after 0.2.",
       "audience": [
-        "cli",
-        "mcp",
-        "web"
+        "cli"
       ],
       "input": {
         "additionalProperties": false,
@@ -1866,44 +1904,13 @@
           "$ref": "#/$defs/HumanOnly"
         },
         "NotClaimed": {
-          "properties": {
-            "_tag": {
-              "const": "NotClaimed",
-              "type": "string"
-            },
-            "issue": {
-              "$ref": "#/$defs/IssueId"
-            }
-          },
-          "required": [
-            "_tag",
-            "issue"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/NotClaimed"
         },
         "NotFound": {
           "$ref": "#/$defs/NotFound"
         },
         "Resolved": {
-          "properties": {
-            "_tag": {
-              "const": "Resolved",
-              "type": "string"
-            },
-            "issue": {
-              "$ref": "#/$defs/IssueId"
-            },
-            "status": {
-              "$ref": "#/$defs/Status",
-              "description": "The status of the canceled category that the issue is in."
-            }
-          },
-          "required": [
-            "_tag",
-            "issue",
-            "status"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/Resolved"
         }
       }
     },
@@ -2034,6 +2041,57 @@
         },
         "UnknownStatus": {
           "$ref": "#/$defs/UnknownStatus"
+        }
+      }
+    },
+    "issue.finish": {
+      "description": "Finish the work on an issue, with evidence of what was checked. The first case that applies decides. An issue of the canceled category: `Resolved`. Of the completed category, or in the workflow's `merge` status: success, and nothing changes, so a repeat is safe. An agent, on an issue assigned to the human: `HumanOnly`. An agent that does not hold the issue: `Held` when someone else holds it, `NotClaimed` when nobody does. The holder (as for `issue.claim`, from any worktree of its session), when the claim's branch is not the default branch: the issue moves to the `review` status, keeps its claim and takes the evidence; in the `review` status only the evidence changes. Otherwise (the holder on the default branch, or the human): the claim ends, and the issue moves to the workflow's `merge` status and takes the evidence. In either case, when the status the move ends in is the workflow's `merge` status or a later status that is not canceled, it fails with `BaseNotMerged` while an issue it is stacked on is not merged. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli",
+        "mcp",
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "description": "What was checked, and how: commands, results, links.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "issue": {
+            "$ref": "#/$defs/IssueId"
+          }
+        },
+        "required": [
+          "issue",
+          "evidence"
+        ],
+        "title": "IssueFinishInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/IssueAnswer"
+      },
+      "failures": {
+        "BaseNotMerged": {
+          "$ref": "#/$defs/BaseNotMerged"
+        },
+        "Held": {
+          "$ref": "#/$defs/Held"
+        },
+        "HumanOnly": {
+          "$ref": "#/$defs/HumanOnly"
+        },
+        "NotClaimed": {
+          "$ref": "#/$defs/NotClaimed"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "Resolved": {
+          "$ref": "#/$defs/Resolved"
         }
       }
     },
@@ -2372,7 +2430,7 @@
       }
     },
     "issue.update": {
-      "description": "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A move into the `merge` status, or a later status that is not canceled, fails with `BaseNotMerged` while an issue it is stacked on is not merged. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.close`, which records evidence. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "Change the given fields of an issue and leave the others; `clear` empties fields; `notes` adds a note. `revision` must be the issue's current one, else `Stale` and nothing changes: read it again. `status` takes any status of the project's workflow (`UnknownStatus` otherwise), and the history records who moved it. An agent cannot change the status or the assignee of an issue assigned to the human (`HumanOnly`). Only the holder or the human can change the status of a claimed issue (`Held`). A move into the workflow's `merge` status or out of the started category ends the claim; any other move keeps it, and none starts one. A move into the `merge` status, or a later status that is not canceled, fails with `BaseNotMerged` while an issue it is stacked on is not merged. A `parent` that would make a cycle of waits fails with `Cycle`. An agent finishes its own work with `issue.finish`, which records evidence. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
       "audience": [
         "cli",
         "mcp",
@@ -2515,7 +2573,7 @@
       }
     },
     "issues.close": {
-      "description": "`issue.close` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.close`. All or nothing: when `issue.close` would fail on one issue, nothing changes and the call fails with `NotClosed`, naming that issue and giving its failure. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "description": "The name of `issues.finish` before 0.2: it does the same and answers the same, but its refusal is `NotClosed`. It goes away in the release after 0.2.",
       "audience": [
         "cli"
       ],
@@ -2529,7 +2587,7 @@
             "type": "string"
           },
           "issue": {
-            "description": "The issues to close: give the flag once per issue.",
+            "description": "The issues to finish: give the flag once per issue.",
             "items": {
               "$ref": "#/$defs/IssueId"
             },
@@ -2570,7 +2628,87 @@
               "type": "string"
             },
             "failure": {
-              "description": "The failure of `issue.close` on that issue.",
+              "description": "The failure of `issue.finish` on that issue.",
+              "properties": {
+                "_tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "_tag"
+              ],
+              "type": "object"
+            },
+            "issue": {
+              "$ref": "#/$defs/IssueId"
+            }
+          },
+          "required": [
+            "_tag",
+            "issue",
+            "failure"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "issues.finish": {
+      "description": "`issue.finish` on each issue of `issues`, in order, with the same evidence, in one database commit with the operation `issue.finish`. All or nothing: when `issue.finish` would fail on one issue, nothing changes and the call fails with `NotFinished`, naming that issue and giving its failure. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the issue to know.",
+      "audience": [
+        "cli"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "description": "What was checked, and how: commands, results, links.",
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "issue": {
+            "description": "The issues to finish: give the flag once per issue.",
+            "items": {
+              "$ref": "#/$defs/IssueId"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "issue",
+          "evidence"
+        ],
+        "title": "IssuesFinishInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "items": {
+            "description": "The issues as the call left them, in the order given.",
+            "items": {
+              "$ref": "#/$defs/IssueSummary"
+            },
+            "maxItems": 50,
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "IssuesFinishAnswer",
+        "type": "object"
+      },
+      "failures": {
+        "NotFinished": {
+          "properties": {
+            "_tag": {
+              "const": "NotFinished",
+              "type": "string"
+            },
+            "failure": {
+              "description": "The failure of `issue.finish` on that issue.",
               "properties": {
                 "_tag": {
                   "type": "string"
@@ -2677,7 +2815,7 @@
       "readOnly": true
     },
     "project.update": {
-      "description": "Change a project: the given members, and leave the others. Only the human (`HumanOnly`). With `bindRepository`, the git repository of the caller's working directory replaces the one the project had, for example after the repository moved (`NoWorkingCopy` when the caller has no working directory in a git repository, such as the web app; `RepositoryBound` when another project has it). A new repository or a new `defaultBranch` is refused while issues of the project hold a claim (`ClaimsHeld`): release or close them first. A new `workflow` is refused with `DuplicateStatus` or `InvalidMove` when it breaks a rule of `Workflow`, and with `StatusInUse` when issues are in a status that it drops or puts in another category: move those issues first. A new `workflow` is also refused with `MergedBeforeBase` when, under it, an issue would be at the `merge` status or later while an issue it is stacked on is not merged; a held landing whose bases all count as merged under it moves its issue to the `merge` status in the same write. Writes nothing into the repository. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the project with `project.list` to know.",
+      "description": "Change a project: the given members, and leave the others. Only the human (`HumanOnly`). With `bindRepository`, the git repository of the caller's working directory replaces the one the project had, for example after the repository moved (`NoWorkingCopy` when the caller has no working directory in a git repository, such as the web app; `RepositoryBound` when another project has it). A new repository or a new `defaultBranch` is refused while issues of the project hold a claim (`ClaimsHeld`): release or finish them first. A new `workflow` is refused with `DuplicateStatus` or `InvalidMove` when it breaks a rule of `Workflow`, and with `StatusInUse` when issues are in a status that it drops or puts in another category: move those issues first. A new `workflow` is also refused with `MergedBeforeBase` when, under it, an issue would be at the `merge` status or later while an issue it is stacked on is not merged; a held landing whose bases all count as merged under it moves its issue to the `merge` status in the same write. Writes nothing into the repository. One database commit per capability call that changes something; its author is the caller. A cancelled call can still be committed: read the project with `project.list` to know.",
       "audience": [
         "cli",
         "web"
