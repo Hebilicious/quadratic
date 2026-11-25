@@ -1,278 +1,401 @@
 # 0004. A socket for commands, a token for the browser, and no service
 
-Date: 2026-11-25
+Date: 2026-11-25 (revised after the design review of the same day)
 
 Status: proposed. Supersedes [0003](0003-the-caller-check-on-macos-and-windows.md), and replaces
 the Linux kernel check that 0003 kept.
 
 ## Context
 
-The server has one TCP listener on `127.0.0.1`. The command line, `quadratique mcp` and the
-browser all use it. On Linux the server asks the kernel which account owns each connection
-(`server/src/peer.rs`, `NETLINK_SOCK_DIAG`). Elsewhere it refuses to start. `install.sh` writes a
-systemd user unit. `quadratique upgrade` restarts that unit, or stops the server by sending a
-signal to its process number.
+The server has one TCP listener on `127.0.0.1`, which the command line, `quadratique mcp` and the
+browser all use. On Linux it asks the kernel which account owns each connection
+(`server/src/peer.rs`). Elsewhere it refuses to start. `install.sh` writes a systemd user unit.
+`upgrade` restarts that unit, or signals the server's process number through a pidfd.
 
-Reviews found these weaknesses in that design:
-
-| # | Weakness |
+| # | Weakness that reviews found |
 | --- | --- |
-| W1 | While the server is down, another account can bind its port. A bookmark then sends its requests to that account, and that account's page can read the web app's `localStorage` for the origin. |
-| W2 | The command line trusts whoever answers on the port, then acts on the process number that the answer gives. |
-| W3 | The kernel lookup identifies a connection by its addresses and ports, which can be reused (QUA-46). |
-| W4 | `quadratique upgrade` must find and signal the right process, and must know about systemd. |
+| W1 | While the server is down, another account can bind its port. A bookmark then reaches that account, which can read the origin's `localStorage`. |
+| W2 | The command line trusts whoever answers on the port, and acts on the process number in the answer. |
+| W3 | The kernel lookup identifies a connection by addresses and ports, which can be reused (QUA-46). |
+| W4 | `upgrade` must find and signal the right process, and must know systemd. |
 
-The owner decided on 2026-11-25 (QUA-48). These points are fixed:
+The owner's decisions (2026-11-25, QUA-48) are fixed:
 
-1. The command line and the MCP server reach the server through a Unix socket in the private
-   data folder. File permissions decide who can connect, in both directions. They use no TCP
-   port and no kernel lookup.
-2. The Linux kernel check goes too. Every system uses the same mechanism.
-3. Only the web app uses TCP. It requires a token that `quadratique ui` gives to the page. The
-   page saves the token in the browser.
-4. The systemd service is no longer part of the product. Installing means putting one binary on
-   the PATH. The documentation explains how to keep the server running after a reboot.
-5. Stop and take-over are requests on the socket. They are not signals to a process number.
+1. The command line and the MCP server reach the server through a Unix socket in the private data
+   folder. File permissions decide who connects, in both directions. They use no TCP port and no
+   kernel lookup.
+2. The Linux kernel check goes too. Every system uses one mechanism.
+3. Only the web app uses TCP. It requires a token that `quadratique ui` gives to the page, and the
+   page saves it in the browser.
+4. The service leaves the product. Installing means putting one binary on the PATH. The documentation
+   explains how to keep the server running after a reboot.
+5. Stop and take-over are requests on the socket.
 6. Windows waits for QUA-47. This record names the Windows equivalent and builds nothing for it.
 
-Facts measured for this record, on Linux 7.2 with a throwaway probe that was not committed:
+**Measured facts.** These come from a throwaway probe of the first round (Linux 7.2, not committed),
+earlier measurements, and the reviewer.
 
-| Probe | Result |
+| Fact | Result |
 | --- | --- |
-| `connect` with no socket file | `ENOENT` |
-| `connect` to a socket file whose listener closed | `ECONNREFUSED`, and the file stays |
-| A second `bind` on an existing socket file | `EADDRINUSE` |
+| `connect` with no socket file / to a stale socket file / a second `bind` | `ENOENT` / `ECONNREFUSED`, and the file stays / `EADDRINUSE` |
 | Mode of a new socket under umask 022 | `0755` |
-| Path of 107 bytes, then of 108 bytes | bound, then "AF_UNIX path too long" |
-| The account `nobody` connects. Folder `0755`, socket `0600` | `EACCES` |
-| The same. Folder `0700`, socket `0777` | `EACCES` |
-| The same. Folder `0755`, socket `0777` | connected |
-
-Facts measured earlier: a plain Claude Code shell can connect to a `0600` socket in the data
-folder. Inside `codex sandbox`, both a Unix socket and loopback TCP fail. Any account on the
-machine can reach loopback TCP.
+| Path of 107 bytes, then 108 bytes (Python's `socket`, not the Rust API) | bound, then refused |
+| `nobody` connects. Folder `0700`, socket `0777` / folder `0755`, socket `0600` / both loose | `EACCES` / `EACCES` / connected |
+| Another account that can write a non-sticky **parent** renames a `0700` folder without entering it | confirmed by the reviewer on Linux |
+| A plain Claude Code shell, then `codex sandbox` (default policy), connect to a `0600` socket in the data folder | connects, then fails (loopback TCP fails there too) |
 
 ## What AcidCat gives
 
-| Side | Finding (acid-cat-core 0.6.0, `~/.cargo/registry/src/index.crates.io-*/acid-cat-core-0.6.0/src/`) | Consequence |
+Sources: acid-cat-core 0.6.0, in `~/.cargo/registry/src/index.crates.io-*/acid-cat-core-0.6.0/src/`.
+
+| Side | Finding | Consequence |
 | --- | --- | --- |
-| Server | `remote::serve` binds `TcpListener` (`remote.rs:323-324`). But `Handler` (`remote.rs:33`) and `Routes` (`remote.rs:320`) work on `http::Request`, with no transport. Quadratique already has its own accept loop (`server/src/serve.rs`), because `remote::serve` hides the peer. | The server needs no change in AcidCat. `serve.rs` gets a `UnixListener` loop, and hyper serves a `UnixStream` through `TokioIo` in the same way. |
-| Client | `HttpClient` always dials TCP: `client::connect` calls `TcpStream::connect` (`client.rs:36`), and that function is `pub(crate)`. `CliOptions::remote` accepts only an `HttpClient` (`cli.rs:295`, `cli.rs:336`). AcidCat `main` (0.8.0, `packages/core-rust/src/client.rs:36`) is the same. | The command line cannot reach a socket without a change. |
-| Web client | `@acid-cat/core-effect` 0.13.1 sends calls and subscriptions with `fetch` and takes `headers` (`dist/internal/httpClient.d.ts`, `ClientOptions.headers`). It does not use `EventSource`. | The live channel can carry an `Authorization` header. 0003's concern about `EventSource` does not apply. |
+| Server | `remote::serve` binds TCP (`remote.rs:323-324`). But `Handler` and `Routes` (`remote.rs:33`, `:320`) take `http::Request` and do not depend on a transport. Quadratique already runs its own accept loop (`server/src/serve.rs`). | No change in AcidCat. `serve.rs` gets a `UnixListener` loop. |
+| Client | `HttpClient::new` accepts only an `http` or `https` URL with a host (`http_client.rs:52-69`). `send` builds the `Host` header from the URL and turns every dial error into one "does not answer" (`http_client.rs:186-205`). `client::connect` dials `TcpStream` (`client.rs:36`) and is `pub(crate)`. `CliOptions::remote` accepts only `HttpClient` (`cli.rs:295`, `:336`). AcidCat `main` (0.8.0) is the same. | The command line needs a change in AcidCat: a socket connector, a fixed HTTP authority (for example `http://quadratique.invalid`), Unix dialing that never falls back to TCP, and its own dial errors (QUA-51). Quadratique still does its own discovery and diagnostics before it builds the client (§2). |
+| Web client | `@acid-cat/core-effect` 0.13.1 uses `fetch` and takes `headers` (`dist/internal/httpClient.d.ts`). | The live channel can carry `Authorization`. |
 
-The two ways to give the client a socket:
+| Option for the client | Cost |
+| --- | --- |
+| **A. AcidCat: `HttpClient` gets a Unix-socket mode** (recommended, QUA-51) | The connector, the authority, the URL check and the error kinds, with tests of a generated call, capability discovery and a streaming `watch`. Then Quadratique moves from `=0.6.0` to that release: a narrow 0.6.x release if feasible, otherwise 0.8, whose size is estimated separately (QUA-52). |
+| B. Quadratique's own client below the generated command line | A second copy of `invoke`, `capabilities` and the SSE parser (`http_client.rs` is 497 lines), plus the MCP upstream. It would drift from AcidCat. |
+| C. A loopback relay | Rejected: it brings TCP back. |
 
-| Option | Size | Cost |
+## 1. The data folder and the socket
+
+**One policy, shared.** One function in `quadratique-server` validates and creates the home. The
+server and the command line both call it, before either opens a lock, touches the store or spawns a
+process. Today the command line creates the folder and opens lock files (`cli/src/background.rs:179-186`)
+before the server applies `0700`, and the server follows the path when it does (`server/src/server.rs:380`,
+`private`). Both behaviours go. The rule reuses the walk in `cli/src/upgrade/folder.rs:23-46`.
+The model is the same as that file's: the policy defends against other accounts, not against
+processes of the same account.
+
+| Step | Rule | Refused with |
 | --- | --- | --- |
-| **A. AcidCat: `HttpClient` gets a Unix-socket setting** (QUA-51) | About 60 lines in `client.rs` and `http_client.rs`, plus a test, under `cfg(unix)`. | A release of AcidCat. Quadratique moves from `=0.6.0` to that release, and that range has at least one breaking change (acidcat #215). The size of that upgrade was not measured (QUA-52). |
-| B. Quadratique: its own client below the generated command line | `CliOptions::remote` accepts only `HttpClient`. So Quadratique would have to run the command line against a local application whose every capability forwards over its own client. That means writing again `invoke`, `capabilities` and the SSE `subscribe` parser (`http_client.rs` has 497 lines), plus the MCP upstream. | A second copy of AcidCat's client, which then drifts from AcidCat. |
-| (C. A loopback relay to the socket) | — | Rejected: it brings TCP back for commands. |
+| 1. Resolve | Every component of the given path is examined with `lstat`. A symbolic link is allowed only when the link and the folder that holds it are owned by this account or root, and the folder passes step 2. System aliases such as macOS's `/var`, `/tmp` and `/etc` (root links into `/private`) pass this way. The checks below run on the resolved path, and all later work uses it. | "`<link>` is a link that another account could change" |
+| 2. Ancestors | Each ancestor is owned by this account or by root (uid 0). Group or other write is allowed only on a sticky ancestor (`/tmp`). This is `folder.rs`'s rule. | "another account can replace `<ancestor>`" |
+| 3. Effective access | Mode bits are not enough. The leaf and every non-sticky ancestor that this account owns must carry no extended ACL entry that grants write (or, for the leaf, any access) to another user or group. On Linux, read `system.posix_acl_access` and `system.posix_acl_default` with `rustix::fs::getxattr`. On macOS, the safe call that reads an ACL is still to be found: until QUA-50 finds one and tests it, an ACL on macOS counts as not verified, and the home is refused if one exists. A group-shared home is refused: the leaf's mode must be exactly `0700`. | "`<path>` gives access to another account" |
+| 4. Leaf | If the leaf is missing, it is created private from the start: `DirBuilder` with mode `0700`, and the same for any missing ancestor, which is then checked again. If the leaf exists with another mode, the home is refused with `chmod 700 <path>`. The policy never runs `chmod` through a path. | "`<path>` is not private" |
+| 5. Socket path | The raw byte length of `<leaf>/server.sock` must be at most 107 on Linux and 103 on macOS (`sun_path`, one byte for NUL). Tests exercise the Rust and tokio API at the limit and one byte over it, on both systems. | the path, its length, the limit, and "set `QUADRATIQUE_HOME` to a shorter folder" |
 
-**Recommendation: A.** If the upgrade to 0.8 is large, ask for a 0.6.x release that has only
-this setting.
+**The socket entry.** Only the holder of `server.lock`, under the verified lock, acts on the name
+`server.sock`:
 
-## Decision
+| What `lstat` finds | The server |
+| --- | --- |
+| nothing | binds |
+| a socket owned by this account | removes it, then binds |
+| anything else: a regular file, a link, a folder, or a socket of another uid | refuses to start, and names it |
 
-### 1. The socket
+After `bind`, the server sets `0600` and checks with `lstat` that the entry is a socket of its uid
+with mode `0600`. Only then does it accept connections and count as ready. It never changes the
+process-wide umask: the server has many threads. A connection queued before that check waits in
+the backlog, and the folder already keeps out other accounts. A client checks the entry the same
+way before it trusts an answer. A socket with any other mode means "not ready yet" within the
+deadline.
 
-| Question | Decision | Rejected, and why |
-| --- | --- | --- |
-| Path | `<data folder>/server.sock`. The data folder is `QUADRATIQUE_HOME` or the platform's default, as today. Its name matches `server.lock` and `server.log`. | A socket in `$XDG_RUNTIME_DIR` or `$TMPDIR`: decision 1 puts it in the data folder. |
-| Modes | The folder is `0700` and is owned by the server's account. The server already sets `0700` (`server.rs` `private`). It now also checks the owner and the mode, and refuses to start if they are wrong. After `bind`, the server sets the socket to `0600`. The probe shows that each layer alone keeps out another account on Linux. The folder is the guarantee on every system. | Relying on the socket's mode alone: the umask makes it `0755`, and macOS's rule for socket modes was not checked. |
-| Client side | Before it connects, the command line checks that the folder is owned by its own account and has no group or other bits. If the check fails, it refuses with "the data folder is not private". So only this account (or root) can have bound the socket that answers. This closes **W2**. | Peer credentials (`UnixStream::peer_cred`): decision 1 makes file permissions the rule. |
-| Stale socket file | Only the holder of `server.lock` removes `server.sock`, and it then binds right away. A client never removes it. | Removing the file on `ECONNREFUSED` from a client: it races with a server that is starting. |
-| Path too long | `sun_path` has 108 bytes on Linux (107 usable, probed) and 104 on macOS (103 usable, from `<sys/un.h>`, not probed here). If the path is longer, the server and the client refuse. The message gives the path, its length, the limit, and "set `QUADRATIQUE_HOME` to a shorter folder". The default macOS path is `/Users/<name>/Library/Application Support/quadratique/server.sock`, 59 bytes plus the name. On macOS, tests must keep temporary folder names short. | `chdir` and a relative path: the working directory belongs to the whole process, and the server has many threads. `/proc/self/fd/N/server.sock`: Linux only. The Linux abstract namespace: Linux only, and it has **no file permissions**, so any account could connect. |
-| File system without sockets | The server refuses to start. The message gives the folder and the error. | Falling back to TCP: that would open W1 and W2 again. |
-| Two servers | No change: `server.lock` (`flock`) still lets only one server own a home, and the server binds only while it holds that lock. `start.lock` still lets only one command start a server at a time. | — |
-| Home on a network file system | Not verified. Expected behaviour: the socket file exists, but `connect` reaches only a listener on the same machine. Linux NFSv4 maps `flock` to a lock that every machine sees. A second machine then sees the home held and the socket refusing, so it refuses, and the message names the other machine as possible. Today's design is worse: `server.json` points the second machine at its own loopback. | — |
+**The file-system boundary.**
 
-**How the command line reads what it finds.** `server.json` no longer helps find the server: the
-socket path is fixed.
+| Case | Decision |
+| --- | --- |
+| Namespace | Pathname sockets only, never the Linux abstract namespace, which has no permissions. |
+| Supported storage | Trusted local storage on one host. On NFS, the scope of a lock depends on mount options, and a socket file carries no connection between hosts: unsupported and untested. |
+| Container | It needs a view of the same socket (a bind mount) and a uid mapping that grants access. Documented, not tested. |
+| Sandbox | A sandbox can block the socket or hide it. Only **confirmed absence** (the leaf validated and readable, and `lstat` gives `ENOENT`) or **refusal** (`ECONNREFUSED` on a valid socket entry) allow a start. Policy denial (`EACCES` or `EPERM` on the folder, the lock or `connect`) gives `Unreachable`. A path error (`ENOTDIR`, `ELOOP`, `ENAMETOOLONG`) is reported as such. A transient failure (`EINTR`, `EAGAIN`) is tried again within the deadline. |
+| File system without sockets | `bind` fails, and the server refuses to start. No TCP fallback. |
+| Two servers | No change: `server.lock` (`flock`) gives one owner per home. |
 
-| `connect` gives | `server.lock` | Meaning | The command line |
+**Peer credentials.** tokio gives a safe `UnixStream::peer_cred()` on Linux and macOS (tokio
+1.54.1, `src/net/unix/stream.rs:981`, `src/net/unix/ucred.rs:37-60`). It would add a second fence
+that holds if the folder policy were wrong. It is not taken, because decision 1 makes file
+permissions the rule, and a second rule doubles what each platform must test.
+
+## 2. States and transitions
+
+Each server start has a **generation**: 128 random bits, reported by `GET /server`. The answer also
+carries a **control protocol version** (`control: 1`), apart from the catalog interface hash. The
+control protocol covers `GET /server` and `POST /server/stop`. Every build keeps answering every
+control version it has ever served, so a command line of any build can stop any newer server that
+still lists its version, and an older command line can stop a newer server.
+
+**Handoff rule.** Every start holds `start.lock`: an on-demand start (the spawner holds it for its
+child until the child is ready, or until the child exits), `quadratique serve`, and `serve
+--take-over`. Stop also holds it while it waits. So no successor can take `server.lock` between a
+stop and the moment its stopper sees the lock free. The generation tells a stopped server from its
+successor in what the command line reports.
+
+**Stop acknowledgement.** `POST /server/stop {generation}` answers `409` if the generation is not
+this server's. Otherwise the server closes its listeners (no new connections), writes `202
+{generation}`, and starts its shutdown only after that response has been flushed. Open connections
+get a bounded drain, then the store closes and `server.lock` is freed.
+
+One deadline per operation: `START_LIMIT` (30 s) for ensure and take-over, and `STOP_LIMIT` (30 s)
+for stop. `PROBE_LIMIT` (5 s) bounds one identity request.
+
+| Observation | `status` | ensure (every command) | `server stop` | `serve --take-over` |
+| --- | --- | --- | --- | --- |
+| No socket file, `server.lock` free | `running: false` | take `start.lock`, **observe again**, spawn, wait for ready | `NotRunning` | take `start.lock`, observe again, serve |
+| Stale socket file (`ECONNREFUSED`), lock free | `running: false` | same as above; the new server replaces the file | `NotRunning` | same as above |
+| Socket refuses or is missing, lock held, no `server.json` (a server that holds the lock and has not bound yet, or one that is stopping) | `starting: true` | wait within the one deadline for ready or for the lock to be freed. Freed: back to row 1 under `start.lock`. Deadline: `NotReady` with the log | wait within the deadline; ready: stop it; freed: `NotRunning` | as for stop, then serve |
+| Same, and a `server.json` names a TCP address | `legacy: true` and what to stop | `Legacy`: no spawn; the message names `server stop` | the legacy stop (§3), or instructions | the legacy stop, then serve |
+| Connects, no full answer within `PROBE_LIMIT` | `stalled` | `Stalled`: never spawn | `Stalled`: the person ends it | refuse |
+| Answers a malformed identity | `malformed` | `Malformed`: never spawn | refuse | refuse |
+| Names another database | `otherDatabase` | `OtherDatabase`: never spawn | refuse | refuse |
+| Same control version, other interface (another build) | `sameInterface: false` | `OtherInterface`: run `server stop` | stop the generation | stop, then serve |
+| A control version this build does not know (a newer server) | `newer` | `Newer`: upgrade this command line | stop if the server lists this build's version, otherwise refuse | refuse |
+| Answers, same database, same interface | `running: true` | use it | stop the generation | stop the generation, wait for release, serve |
+| Two starters at once | — | the second waits on `start.lock`, then observes again and finds the first one's server | — | — |
+| `EACCES`/`EPERM`, path error | `reachable: false` and the reason | `Unreachable` (MCP advice as today); never spawn | `UnreachableToStop` | refuse |
+
+**A hung server** (stalled, or one that holds the lock past the deadline) gets a bounded outcome,
+never a signal. The message names the home, the log, and the unverified pid from the last identity
+or `server.json` (for diagnosis only). It says how to recover: Ctrl-C in its terminal, the
+person's own supervisor, or ending the process after checking it. A command line may end a child
+**it spawned itself** through its own `Child` handle, because that handle cannot point at a reused
+pid.
+
+`server.json` stays written until the cutover (QUA-58) and is then dropped. After the cutover it is
+only a hint that a 0.1 or 0.2 server may be running. A stale or malformed `server.json` changes
+nothing in the table except the legacy row.
+
+## 3. Lifecycle and upgrade
+
+| Question | Decision |
+| --- | --- |
+| Start | On demand, by any command, as today. `quadratique serve` stays as the way to run the server in the foreground (a terminal, or a supervisor the person sets up). |
+| Stop when idle | No. An idle stop would cost the web app its live updates and its bearer, and the git watcher its looks. One idle process costs little. |
+| Git watcher | No change: it looks every 2 s, and a read asks for a look. After a reboot, the next command's server catches up. |
+| Signals | The server still stops on SIGTERM and SIGINT. The command line sends none, except the proven legacy stop below. |
+
+**`upgrade`.** It keeps every check it has today: refusal inside a git working tree, `folder::check`,
+the schema check (`store_opens`), the downgrade refusal, and the install lock that records the
+replaced file for an interrupted upgrade (`cli/src/upgrade/mod.rs:166-200`, `upgrade/folder.rs:57-95`).
+What changes is how it identifies the server:
+
+| Step | Rule |
+| --- | --- |
+| Before the replacement | It reads `GET /server` on the socket: the generation G and the **executable identity** E. E is the device, inode and path of the running file, which the server captures at its start from `std::env::current_exe` and its metadata. The answer comes over the verified socket, so it is as trusted as the account. |
+| Decide | E equals the file being replaced: stop G after the rename. E is another file (another install): leave it running, and say so. No answer: nothing to stop. |
+| Stop | `POST /server/stop {generation: G}`. A `409` means another generation now serves: nothing more is stopped. |
+| Interrupted upgrade | A later run reads the replaced file recorded under the install lock, and stops the server whose E is that file, as `upgrade/server.rs:168-190` does today with `/proc`. |
+| Started with `serve` | The identity says `started: serve`. The upgrade stops it and says: "restart it the way you started it (your supervisor, your terminal)". |
+
+**Legacy TCP server (0.1, 0.2).** Its `GET /server` answer (pid, database) is untrusted: any account
+could answer on that port. A pidfd pins a process only after it was selected. So an automatic stop
+needs **independent evidence**, on Linux only (the only system those releases served on):
+
+1. `pidfd_open(pid)`;
+2. through `/proc/<pid>`, read while the pidfd pins the process: `exe` has the device and inode of
+   the replaced file recorded by the install lock, or of the old installed binary;
+3. `fd/` holds a descriptor to this home's `server.lock` (same device and inode);
+4. `pidfd_send_signal(SIGTERM)`, then wait for `server.lock` to be freed.
+
+Without all of it (another system, no pidfds, a skipped release whose file was never recorded), the
+command line stops nothing and tells the person what to stop: `systemctl --user stop
+quadratique.service` if the unit runs it, otherwise the process (pid given as unverified, with
+`ps -p <pid> -o args`). Detection (lock held, no socket, `server.json` present) stays permanently
+because it is cheap. The automatic stop is deleted once the documented manual recovery covers
+every case, and no earlier than two minor releases after the cutover (QUA-55).
+
+## 4. The web app on TCP
+
+**Routes on TCP.** Every request needs the exact numeric `Host: 127.0.0.1:<port>`. Anything else
+gets `403`, which closes the `localhost` → `[::1]` squat (`web.rs` `Origin::hosts` accepts
+`localhost` today).
+
+| Path | Methods | Auth | Answer |
 | --- | --- | --- | --- |
-| `ENOENT` or `ECONNREFUSED` | free | no server | starts one, under `start.lock`, as today |
-| `ENOENT` or `ECONNREFUSED` | held, no `server.json` | a server is starting or stopping | waits on the lock and the socket, up to `START_LIMIT`, then reports `NoAnswer` |
-| `ENOENT` or `ECONNREFUSED` | held, and a `server.json` exists | a server of release 0.1 or 0.2, on TCP | uses the path in §5 |
-| connected, `GET /server` answers in time | — | the server of this home (interface and schema as today) | uses it |
-| connected, no answer within `PROBE_LIMIT` | — | a server that does not answer | reports it, and acts on no process |
-| `EACCES` or `EPERM` | — | a sandbox, or another account | `Unreachable`, with the MCP advice as today |
+| `/`, `/now`, `/all[/board\|/history]`, `/projects/<key>[/board\|/history]`, `/issues/<id>` (the deep links of `web/src/route.ts:36-38`, `:177-192`) | `GET`, `HEAD` | none | the app shell |
+| files that exist in the built tree (`/assets/*`, `index.html`, …) | `GET`, `HEAD` | none | the file |
+| `/cli`, `/server`, and everything below them | all | — | `404`, matched **before** the single-page fallback (today the fallback answers `200` with HTML for unknown paths without an extension: `web.rs:246-255`) |
+| any other path | all | — | `404` |
+| `/session` | `POST` | the one-time code | the bearer |
+| `/web/*`, `/webmcp/*`, including the event stream | as the binding | `Authorization: Bearer` | `401` without a valid bearer |
 
-`server.json`: new servers do not write it. A new server deletes a stale one while it holds the
-lock. Only the path for earlier releases reads it (§5). `GET /server` on the socket returns
-`pid` (for diagnosis only), `database`, `interface`, `schema`, the web address or `null`, and
-`started` (`on-demand` or `serve`).
+**Pairing contract.**
 
-### 2. The lifecycle with no service
-
-| Question | Decision | Rejected, and why |
-| --- | --- | --- |
-| Start | Any command that needs the server starts it, as today. `quadratique serve` stays as the way to run the server in the foreground, for a terminal or for a service manager that the person sets up. | — |
-| Stop when idle | **No.** The server runs until `server stop`, a signal, logout or reboot. | An idle timeout: the web app would lose its live updates and its token (§3) after each idle period. Merges would be seen only when the next command starts the server. One idle process costs little. |
-| Git watcher | No change: it looks every 2 s while the server runs, and a read asks for a look. After a reboot, merges are seen when the next command starts the server, as today on a machine without the service. | — |
-| Stop | `POST /server/stop`, on the socket only. The server answers, then closes its listeners and its store and frees `server.lock`. `server stop` waits on that lock. A file lock is a state, not a timer. The limit only stops a hang. This closes **W4** for stopping. | A signal to the process number that `server.json` gives: that was W2 and W4. |
-| Take-over | `serve --take-over` sends the stop request, waits for the lock, then serves. | — |
-| Signals | The server still stops on SIGTERM and SIGINT (Ctrl-C, service managers). Only the command line stops sending signals. | — |
-| `quadratique upgrade` | It replaces the binary as today, then sends the stop request. The next command starts the new build. If `started` is `serve`, it says: "this server was started with `quadratique serve`; restart it the way you started it." It no longer runs `systemctl`, no longer reads `/proc/<pid>/exe`, and no longer uses a pidfd. | Restarting a service: decision 4. |
-
-### 3. The web app on TCP
-
-| Question | Decision | Rejected, and why |
-| --- | --- | --- |
-| Routes | TCP serves `/`, the static files, `/session`, `/web` and `/webmcp`. The `cli` target and `/server` are served only on the socket. | — |
-| When the listener exists | From the first pairing request (`quadratique ui`) until the server stops. A machine where only agents use Quadratique has no TCP port. | Always on: it opens a port that nobody uses. Under a per-start token, a bookmark needs `ui` after each start anyway. |
-| Port | Any free port, unless the person turns on the kept-port setting of pull request 30 (QUA-43). With it, the server asks for the last port first and falls back to any free port. The setting applies to this listener only. | — |
-| Host | Only `127.0.0.1:<port>`. A `Host: localhost:<port>` request is refused, and the server gives out only `127.0.0.1` URLs. Reason: a browser can resolve `localhost` to `::1`, and another account can bind `[::1]:<port>` **while the real server runs**. That account would then get a page at an origin that the person thinks is theirs. Today `web.rs` (`Origin::hosts`) accepts `localhost`. | Binding `::1` as well: it adds a second listener only to support a name that nobody needs. |
-| Token | 32 random bytes in base64url. The server makes it at start, keeps it in memory, and never writes it to disk. It ends when the server stops. See the threat analysis below. | A token stored in the data folder: see below. |
-| Handover | `quadratique ui` asks the server, over the socket, for a **one-time code** (single use, valid 60 s, in memory). With `--open`, the server writes `<data folder>/open-<random>.html` (mode `0600`) with `<meta http-equiv="refresh" content="0;url=http://127.0.0.1:<port>/#pair=<code>">`, and opens that file. Only the file path appears in process arguments, which `ps` shows to every account. The server deletes the file when the code is used or expires. Without `--open`, `ui` prints the link with the code, for browsers that cannot read the data folder (snap or flatpak confinement) and for remote terminals. | A token or a code in the URL given to `xdg-open` or `open`: another account can read it with `ps` and use it first. A `file://` page that posts the code itself: its origin is `null`, and it cannot write the storage of `http://127.0.0.1:<port>`. |
-| History and `Referer` | The code is in the fragment, which the browser sends neither to the server nor in `Referer`. The page posts the code to `/session`, receives the token, and removes the fragment with `history.replaceState`. If a browser's global history still keeps the first URL, the code in it is already used. | — |
-| Storage in the browser | `localStorage` at the origin, as the owner asked. The origin includes the port, so a new port means a new pairing. | A cookie: browsers send it to every port of `127.0.0.1` (0003). `sessionStorage`: it is lost when the tab closes, against the owner's "save the token". |
-| Every request | `Authorization: Bearer <token>` on `/web`, `/webmcp` and the live channel, through the core-effect client's `headers` option (`web/src/core/server.ts`). | — |
-| Without the token | The static files are served (they hold no data). `/web` and `/webmcp` answer `401` with "Run `quadratique ui --open`", and the page shows that message. | — |
-| WebMCP and `web` | No change in who the caller is: `web` is the human, and `/webmcp` is the agent `browser`. Both need the token. | — |
-
-**Threat analysis.** Here another account B on the same machine wants the person's issues. Every
-attack below needs B. A machine with a single account has no B.
-
-| While the person's server is down, B binds the web port and serves a page. The person opens a bookmark, and B's page reads that origin's `localStorage`. | What B gets | What B can then do |
-| --- | --- | --- |
-| Token stored in the data folder, so it survives restarts | a valid token | Use it with `curl` against the real server, on whatever port that server has later, as the human, until the token is revoked. **Rejected.** Without a kept port this still happens: B sees with `ss` which ports the server listened on, and binds an old one that a bookmark still names. |
-| **Token per server start (recommended)** | a token that no longer works | Nothing with the token. B can still show a fake board, read what the person types into it, and read the saved views (`web/src/main.ts`). |
-| Token bound to the browser: a non-extractable WebCrypto key in IndexedDB, and a challenge from the server bound to the server's current origin | a key that B can use only inside the person's browser, at an origin where the real server is not | Nothing with the key. The fake board stays possible. Cost: a key registry in the data folder, a challenge route, IndexedDB code, and revocation, about 300 to 500 lines. This is the only option whose pairing survives server restarts safely. Do it later if pairing again after a restart annoys the owner. |
-
-| Port choice | Effect on the fake-board attack | Cost |
-| --- | --- | --- |
-| New port at each start (default) | B must bind the specific old port that a bookmark names. | Bookmarks and open tabs stop working at each restart. |
-| Kept port (opt-in) | Every bookmark names the one port that B can take while the server is down. | None for the person while no other account exists. |
-
-**Recommendation.** On a machine with a single account, use a per-start token with the kept port
-turned on. On a shared machine, use a per-start token and leave the kept port off, which is the
-default. With either choice, the person runs `quadratique ui` once after each server start.
-Because the server no longer stops when idle (§2), starts happen at reboot, upgrade, or
-`server stop`.
-
-What this closes: **W1** for the token, but not the fake board (that stays open and is
-documented). **W2** and **W3**: TCP no longer carries the `cli` target, and no lookup exists.
-
-### 4. Remote access (PRD §6 and M7)
-
-The plan does not change, and one rule becomes clearer. "On the machine that runs the server"
-now means "over the socket". `token.*`, `session.approve`, `session.list`, `session.revoke` and
-`issue.advance` stay on the `cli` target, which only the socket serves. The tailnet board and
-MCP on the internet each keep their own backend and their own credential (a tailnet session, an
-agent token). The local web token is not valid there. The tailnet pairing can use the same
-one-time code, approved over the socket.
-
-### 5. What is deleted, and what stays for an upgrade from 0.1 or 0.2
-
-| Deleted | Where |
+| Part | Rule |
 | --- | --- |
-| The kernel lookup, the admission, the refusal drain, `CallersUnknown`, the refusal to start on macOS, and the `rustix` `net` dependency | `server/src/peer.rs`, `server.rs` (`callers`), `serve.rs`, `server/Cargo.toml` |
-| Signals and process numbers in the command line (`ask_to_stop`, `alive`, pidfd) | `cli/src/process.rs`, `cli/src/background.rs`, `cli/src/upgrade/server.rs` |
-| The service: the unit that `install.sh` writes, `uninstall.sh`, the fake `systemctl` in `install/test.sh`, the `systemctl` code in `upgrade`, and the service hint for copies installed by mise | `install/`, `cli/src/upgrade/{server.rs,mod.rs}` |
-| `server.json` for new servers | `server.rs`, `server/closing.rs` |
+| Order | On `ui`'s request (over the socket), the server first binds the TCP listener and installs the guarded routes, then makes the code. It returns the real address and the code together, so `ui` never hands a code to a listener that is not its own server. |
+| Code | 32 random bytes, single use, valid 60 s (an injected clock in tests). At most 16 codes are pending; beyond that, the request is refused and `ui` says so. |
+| `POST /session` | Requires `Origin` exactly equal to `http://127.0.0.1:<port>`. Sends no CORS headers at all. The body is at most 1 KiB of JSON. Redemption is atomic: the code is checked and deleted in one step under one lock. The answer carries `Cache-Control: no-store`. |
+| Bearer | 32 random bytes, made per server start, kept in memory only, compared in constant time. `web` and `webmcp` keep their audiences (the human, and the agent `browser`) but share it. |
+| Bootstrap file | The server creates `<home>/open-<random>.html` with `create_new` and mode `0600`. It holds a meta refresh to `http://127.0.0.1:<port>/#pair=<code>` and never lies in the static tree: the server refuses to start if `QUADRATIQUE_WEB` or the built tree is inside the data folder, or the reverse. `ui --open` opens the file **in the caller's desktop session** (the server, which an agent or a supervisor may have started, opens nothing). The server deletes the file when the code is used, when it expires, and at its next start (files left after a crash). Process arguments show only the path. |
+| Without `--open` | `ui` prints the link with the code, for confined browsers and remote terminals. The 60 s expiry bounds a code left in a terminal log, in history or in a restored tab. A used code is dead. |
+| Page start | Before the app mounts, the first module (`web/src/main.ts`) reads `#pair`, clears it with `history.replaceState`, and redeems it. Subscriptions and the WebMCP registration start only after pairing has succeeded. |
+| Storage | The bearer goes in `localStorage` at the origin, for the life of that server start (the owner's "save the token"). |
+| `401` and stale credentials | On a `401` from any target, the page drops the stored bearer, empties its per-target client cache (`web/src/core/server.ts:12`), ends its subscriptions, unregisters its WebMCP tools, and shows "Run `quadratique ui --open`". Another tab that pairs fires a `storage` event, and open tabs rebuild their clients with the new bearer. |
 
-| Kept for an existing machine | Why, and until when |
+**Port policy.** The default is a **freshly bound origin**: the server binds a port its home has
+never served. It records the ports it served in the data folder, and binds again (a bounded number
+of times) if the system gives one from the list. The kept port (pull request 30's idea) is an
+explicit opt-in, as is `serve --port <port>`.
+
+**Threat analysis.** B is another account on the same machine. A machine with a single account has
+no B.
+
+| What B can do | Default (per-start bearer, fresh origin) | With the kept port |
+| --- | --- | --- |
+| Bind the port while the server is down, and serve a page to a bookmark | possible only on an old port that no future server will use | possible on **the** port that every bookmark and every future pairing uses |
+| Read the stored bearer | a bearer that no longer works | the same |
+| Read or change data kept in that origin's browser storage (saved views today) | yes, for the old origin | yes, for the origin in use. Saved views therefore move to the server (QUA-67). |
+| Leave a **service worker** that controls later navigations to that origin, even after the real server holds the port again, and intercept the next pairing and the live bearer | no future pairing uses that origin | **yes**. Neither a health check nor a `Host` guard can tell what code the browser runs. |
+| Run a script in a paired origin | (any such script can read the live bearer, as any same-origin script can) | the same |
+
+A non-extractable WebCrypto key does **not** make a pairing that survives restarts safe on its own:
+code in the same origin, such as B's service worker, can ask the browser to use the key. The record
+no longer offers it as a fix.
+
+In plain words, the residual risk of the kept port is this: if another account ever served a page
+on that port while your server was down and you opened it, that account may keep control of the
+Quadratique tab in that browser from then on, and read your issues through your next pairing. The
+fix is to clear the site data for that origin in the browser, or to turn the kept port off.
+
+Recommendation: the default everywhere. On a machine with a single account, the kept port is
+acceptable to whoever turns it on.
+
+## 5. Remote access (PRD §6, M7)
+
+The plan does not change, and one rule becomes clearer: "on the machine that runs the server" means
+"over the socket". `token.*`, `session.*` and `issue.advance` stay on the `cli` target, which only
+the socket serves. The tailnet board and MCP on the internet keep their own backends and
+credentials. The local bearer is not valid there.
+
+## 6. Deleted, kept, and direct upgrades
+
+| Deleted (in the cutover) | Where |
 | --- | --- |
-| The `server status` fields `running`, `sameInterface` and `pid` | The `install.sh` and `upgrade` of 0.1 and 0.2 run the **new** binary's `server status` and check these fields after they replace the binary. Keep them permanently: they are cheap. |
-| `quadratique serve --take-over` | The installed 0.1 or 0.2 unit runs `"<bin>" serve --take-over`. It keeps working with the new binary and becomes the documented recipe. |
-| One module that finds a 0.1 or 0.2 server (`server.lock` held, no socket, a `server.json` with an address and a pid), asks for its identity over TCP, and stops it with SIGTERM through a pidfd. This is today's code. Linux only, because those releases served only there. | Without it, a server of an earlier release would hold the home with nothing that can stop it. It still trusts the port, as W2 describes. Delete it two minor releases later (QUA-55). |
+| The kernel lookup, the admission, the refusal drain, `CallersUnknown`, the refusal to start on macOS | `server/src/peer.rs`, `server.rs` `callers`, `serve.rs` |
+| Signals and pids in the command line, except the legacy module | `cli/src/process.rs`, `background.rs`, `upgrade/server.rs` |
+| The unit written by the installer, `uninstall.sh`, the fake `systemctl`, the `systemctl` code in `upgrade` | `install/`, `cli/src/upgrade/` |
+| `server.json` written by new servers; the TCP routes of `cli` and `/server` | `server.rs`, `server/closing.rs`, `web.rs` |
 
-**The installed unit.** The product no longer removes it, because that would mean knowing about
-systemd again. The upgrade notes and the README say: the unit still works and now runs the new
-binary, and `systemctl --user disable --now quadratique.service` followed by deleting the file
-removes it. Under `Restart=on-failure`, a stop request gives exit status 0, so systemd does not
-start the server again. The next command starts it on demand.
+Kept: `rustix`'s `net` feature. `serve.rs:75` shuts down the listener for every inherited descriptor
+(a child holds one between `fork` and `exec`). That protection applies to the Unix listener too, so
+it is extended, not dropped. Windows stays **explicitly refused** at start (QUA-61) when the
+`callers` guard goes.
 
-### 6. Platforms
+**What the new binary must answer for a 0.1 or 0.2 upgrader.** That upgrader keeps running after it
+replaced the file. If the unit is active and its `MainPID` runs the replaced file, it runs
+`systemctl --user restart quadratique.service`. The unit starts `"<bin>" serve --take-over`, now
+the new binary. The upgrader then runs the **new** `server status` until it reports
+`running: true`, `sameInterface: true` and `pid` equal to the unit's `MainPID`, within 60 s
+(`upgrade/server.rs:194-215`, `:280-300`). So:
+
+| Requirement on the new binary | Why |
+| --- | --- |
+| `serve --take-over` exists, and works with no server running | the unit runs it |
+| the server runs as the unit's main process (no fork into the background) | `pid` must equal `MainPID` |
+| `server status` keeps `running`, `sameInterface` and `pid` (the server's own pid), permanently | the old upgrader and the old `install.sh` (`install/install.sh:84-92`) check them |
+
+That evidence is from v0.1.0's code on `main`. Only v0.1.0 is published. The 0.2 path needs
+evidence from the real 0.2 artifact once it exists (QUA-55).
+
+| Leftover on an existing machine | What the person reads (README, upgrade notes) |
+| --- | --- |
+| An enabled unit | Find what it runs and its data home: `systemctl --user cat quadratique.service` (`ExecStart`, `Environment=XDG_DATA_HOME`). Stop and disable it: `systemctl --user disable --now quadratique.service`. Remove the file and reload: `rm ~/.config/systemd/user/quadratique.service`, then `systemctl --user daemon-reload`. The store in `<data home>/quadratique` stays. |
+| A copy installed by mise beside the one the unit runs | The same steps. After them, the mise copy is the only one. |
+| From the new release on, the unit after a graceful stop | `Restart=on-failure` does not restart after exit 0. The unit stays inactive but enabled, and starts at the next login. That is harmless: it runs the new binary's `serve --take-over`. |
+| The reboot recipe (documentation only) | A systemd user unit that runs `quadratique serve` starts at login. With `loginctl enable-linger`, it starts before login. On macOS, a LaunchAgent runs at login. |
+| A release that was skipped, or a kernel without pidfds | The manual recovery of §3. |
+
+## 7. Platforms
 
 | | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Commands and MCP | `server.sock` | `server.sock`, same code (std and tokio `UnixListener` and `UnixStream`, `PermissionsExt`) | Named only, waits for QUA-47 (QUA-61): a named pipe `\\.\pipe\quadratique-<hash of the data folder>` with a security descriptor that admits only the owner's SID, and `PIPE_REJECT_REMOTE_CLIENTS`. tokio's `ServerOptions` accepts security attributes only through an `unsafe` raw pointer, so QUA-61 needs a safe crate or an owner's decision about `unsafe`. AF_UNIX on Windows stays rejected until its permission check on `connect` is verified (0003). |
-| Web | token on `127.0.0.1` | same | same, later |
-| Release binaries (QUA-36) | as today | arm64 and x86-64, now useful because the server serves on macOS | waits for QUA-47 |
-| Install (QUA-37, QUA-39) | download, check, put the binary on the PATH; no unit | same | QUA-38, waits for QUA-47 |
-| CI exceptions removed | none | "Web journeys (expected to fail until QUA-33, QUA-34)" when QUA-59 lands; the macOS part of "Install test (expected to fail …)" when QUA-60 and QUA-36 land | all stay until QUA-47 |
+| Commands and MCP | `server.sock` | the same code. Not yet verified: the ACL check (§1, step 3) | named only (QUA-61): a named pipe `\\.\pipe\quadratique-<hash of the data folder>` whose security descriptor admits only the owner's SID, with `PIPE_REJECT_REMOTE_CLIENTS`. tokio's `ServerOptions` sets security attributes only through an `unsafe` pointer, so it needs a safe crate or an owner's decision. Refused at start until then. |
+| Web | bearer on `127.0.0.1` | the same | later |
+| A Windows browser on a server in WSL | not verified. The bearer no longer depends on the kernel, so the WSL relay is no obstacle in principle. QUA-58 measures it. | — | — |
+| Release and install (QUA-36, -37, -39) | binary only | arm64 and x86-64 binaries, now useful | waits for QUA-47 |
+| CI exceptions removed | — | the web journeys (QUA-59), the install test (QUA-60 with QUA-36) | all stay until QUA-47 |
 
-`unsafe`: Linux and macOS need none. Every call goes through std or tokio.
+No `unsafe` on Linux or macOS: std, tokio and rustix give every call.
 
-### 7. Tests
+## 8. Tests
 
 | What | How |
 | --- | --- |
-| Another account cannot connect | A test runs `connect` to `server.sock` as `nobody` (`sudo -n -u nobody`, which is passwordless on the GitHub Ubuntu and macOS runners) and expects `EACCES`. It runs in CI on both systems and is not an ignored test (QUA-50, QUA-59). A second case loosens the folder and the socket to `0755` and `0777` and expects a connection, which shows that the test can fail. |
-| The folder must be private | Unit tests: the server refuses to start, and the client refuses to connect, when the folder has group or other bits. |
-| The token is required | Integration tests: `/web` and `/webmcp` and the live channel without a token, with a wrong token, and with the token give 401, 401 and 200. `/cli/*` and `/server` on TCP give 404. `Host: localhost` is refused (QUA-58). |
-| The code works only once | Tests: a second use of the code, and a use after 60 s, are refused. The 60 s run on an injected clock (QUA-57). |
-| Nothing depends on timing | Readiness is the result of `connect` together with the state of `server.lock`. The stop waits on the lock. Code expiry uses an injected clock. No test sleeps to wait for a state. Limits only stop hangs. |
-| Upgrade from an earlier release | A fake 0.2 server (a TCP listener that answers `GET /server`, holds `server.lock` and has a `server.json`): a command reports it, and `server stop` ends it (QUA-55). |
+| Another account | As `nobody` (`sudo -n -u nobody`, passwordless on the GitHub Ubuntu and macOS runners), `connect` to `server.sock` gives `EACCES`. The test home lies under traversable ancestors (for example `/tmp/q-<random>` with mode `0755`), so the control case, with the leaf `0755` and the socket `0777`, really connects. That proves the test can fail. |
+| Folder policy | A writable non-sticky parent, a link owned by another account (simulated with modes where root is needed), a group-shared leaf, an ACL (Linux), a regular file or a foreign socket at `server.sock`: each is refused before any lock file exists. |
+| Path limits | The Rust/tokio API at 107/108 bytes (Linux) and 103/104 (macOS). |
+| States | Each row of §2 has a test that reaches it without sleeping: readiness is a `connect` plus the state of the lock, the stop waits on the lock, a stall is a test listener that never answers, the generation decides `409`. |
+| Browser | Every row of the route table. A code used twice, a code after 60 s (injected clock), more than 16 pending codes, a cross-origin `POST /session`, `Host: localhost`, a `401` on each data target and on the event stream, a 404 (not the shell) for `/cli/x`. |
+| Upgrade | Before and after: E equal, E other, and a `409`. A fake legacy server, with and without the `/proc` evidence. The old upgrader's `server status` contract. |
 
-### 8. Costs
+## 9. Costs
 
-| Part | Change (estimates, not measured) |
+| Part | Change (estimates) |
 | --- | --- |
-| `quadratique-server` | It loses `peer.rs` (321 lines), the `callers` modules and the refusal drain. It gains the socket loop, the folder check, the routes split between socket and TCP, the stop route, pairing, the token check and the bootstrap file. The net size is about the same. |
-| `quadratique` (command line) | `background.rs` gets simpler (the `connect` result replaces the TCP probes and the pid handling). `process.rs` keeps only `detach`. `upgrade/server.rs` loses most of its 347 lines. The legacy module is about 100 lines. The net size is clearly smaller. |
-| `install/` | `install.sh` copies a binary. `uninstall.sh` goes away. `test.sh` shrinks. |
-| web app | Pairing, storage, the header and the 401 screen: about 150 lines plus tests. |
-| AcidCat | About 60 lines and a release. Quadratique moves from 0.6 to 0.8 (size unknown, QUA-52). |
-| Risk | The highest risk is the web pairing (new security code: one-time code, bootstrap file, token check). It lands as an addition while the kernel check still guards TCP (QUA-57), and the token becomes required only in QUA-58. The kernel check is deleted last (QUA-59). |
+| `quadratique-server` | Removes `peer.rs` (321 lines) and the admission. Adds the home policy, the socket loop, the generation and control protocol, stop, pairing, the route table, the bearer and the bootstrap files. Roughly the same size. |
+| `quadratique` (command line) | `background.rs` is rebuilt around §2. `process.rs` keeps `detach`. `upgrade/server.rs` loses `systemctl` and keeps the legacy module (about 150 lines). |
+| `install/`, web app | `install.sh` copies a binary. The page gets pairing, `401` handling and the bearer header, and saved views move to the server. |
+| Tests and tools to rewrite | The Rust test helpers call over TCP (`server/tests/server/support.rs:117-118`). The browser journeys read `server.json` (`web/e2e/workspace.ts:193`), and their URL helper drops a fragment (`:123-129`). The eval adapter ignores stop errors (`eval/harness/qeval/adapters/quadratique.py:225-226`) and needs short isolated homes. |
+| AcidCat | The socket mode, and a narrow release or the move to 0.8. |
+| Risk | The pairing and the home policy are new security code. They land as additions while the kernel check still guards TCP, and the cutover is one release. |
 
 | What users lose | |
 | --- | --- |
-| A tool that called `/cli` on the TCP port | It must use `curl --unix-socket <data folder>/server.sock http://localhost/cli/...`. |
-| Bookmarks and open tabs | They need `quadratique ui` once after each server start, and after each port change when the kept port is off. |
-| `codex` with `network_access = true` | Not measured for a Unix socket. QUA-53 measures it and updates "Agents in a sandbox". |
-| The service that kept the server running after a reboot | It becomes a recipe in the README (QUA-60). A 0.1 or 0.2 unit keeps working. |
+| A tool that called `/cli` on TCP | It uses `curl --unix-socket <home>/server.sock http://quadratique.invalid/cli/...`. |
+| Bookmarks | They need `ui` after each server start. With the default fresh origin, an old bookmark's port is dead. The deep link still works after `ui`, on the new origin. |
+| `ui` over SSH | It prints the remote loopback address. Make a same-port forward before you redeem the code: run `ui` (no `--open`) remotely, then `ssh -L <port>:127.0.0.1:<port> <host>`, then open the link locally within 60 s. A forward of the socket (`ssh -L ./q.sock:<home>/server.sock`) acts as you: README "Who can talk to the server" (`README.md:235-249`) says so. |
+| Codex with `network_access = true` | Not measured for a socket (QUA-53). |
+| The installed service | It becomes documentation. A 0.1 unit keeps working. |
 
-**Compatibility.** QUA-58 (TCP stops carrying `/cli` and requires a token) and QUA-60 (the
-installer writes no unit) are breaking changes, so their pull request titles take `!`
-(`feat!:`). Before 1.0.0, a breaking change makes a minor release.
+Breaking changes, released together as one minor release: QUA-58 (`feat!`) and QUA-60 (`feat!`).
 
 ## Order of work
 
-QUA-50 comes first. It is the end-to-end proof, needs no AcidCat change, and deletes nothing.
+**Additive, before the AcidCat release.** These use the hand-written identity probe
+(`server.rs` `ask_identity`), not `HttpClient`.
 
 | Issue | Outcome | Blocked by | Deletes |
 | --- | --- | --- | --- |
-| QUA-50 | The server also listens on `server.sock`, and `server status` uses it | — | nothing |
-| QUA-51 | AcidCat's `HttpClient` can reach a Unix socket (in the AcidCat repository) | — | nothing |
-| QUA-52 | Quadratique depends on that AcidCat release | QUA-51 | nothing |
-| QUA-53 | Every command and `quadratique mcp` use the socket | QUA-50, QUA-52 | the TCP client path of commands |
-| QUA-54 | Stop and take-over are requests on the socket | QUA-50 | signals and pids in the command line |
-| QUA-55 | The command line finds and stops a 0.1 or 0.2 server | QUA-54 | nothing (a module to delete later) |
-| QUA-56 | `upgrade` asks the server to stop and knows no service | QUA-54, QUA-55 | `systemctl`, `/proc/<pid>/exe` and pidfd in `upgrade` |
-| QUA-57 | `quadratique ui` pairs the page, and the page sends the token (not yet required) | QUA-50 | nothing |
-| QUA-58 | TCP serves only the web app, with the token (`feat!`) | QUA-53, QUA-54, QUA-57 | the `cli` target and `/server` on TCP, `localhost` |
-| QUA-59 | The kernel check and the macOS refusal are deleted | QUA-58 | `peer.rs`, admission, drain, `CallersUnknown`, a CI exception |
-| QUA-60 | The installer puts only the binary on the PATH, and the README has the reboot recipe (`feat!`) | QUA-56 | the unit, `uninstall.sh`, the fake `systemctl` |
-| QUA-61 | Windows: a named pipe for the owner only (named, not built) | QUA-47 | — |
-| QUA-62 | The PRD describes this design | QUA-59, QUA-60 | the old text in §6 and §15 |
+| QUA-50 | The home policy. The socket beside TCP, with the generation and the control version. `server status` over the socket | — | the `chmod` through a path |
+| QUA-54 | Stop and take-over over the socket, with the generation and the `start.lock` handoff. The old SIGTERM path stays for servers without a socket | QUA-50 | nothing |
+| QUA-57 | Pairing and the bearer, additive (the kernel check still guards TCP) | QUA-50 | nothing |
+| QUA-55 | Legacy detection, and the proven legacy stop | QUA-54 | nothing |
+| QUA-56 | `upgrade` identifies the server by generation and executable identity. `systemctl` stays until the cutover | QUA-54, QUA-55 | `/proc` matching for new servers |
+| QUA-67 | Saved views live in the server | — | the `localStorage` views |
 
-Existing issues that this plan affects. Their state is left for the lead to change:
+**After AcidCat.**
 
-| Issue | Becomes |
+| Issue | Outcome | Blocked by | Deletes |
+| --- | --- | --- | --- |
+| QUA-51 | AcidCat: `HttpClient` in Unix-socket mode (AcidCat repository) | — | — |
+| QUA-52 | Quadratique moves to that release (narrow 0.6.x if feasible) | QUA-51 | — |
+| QUA-53 | Every command, MCP, `init` and `upgrade --skills` use the socket | QUA-50, QUA-52 | the TCP client path |
+
+**The cutover: one release.** QUA-59 is stacked on QUA-58, and QUA-60 on QUA-59. The release
+pull request is merged only after all three have landed.
+
+| Issue | Outcome | Blocked by | Deletes |
+| --- | --- | --- | --- |
+| QUA-58 | TCP serves only the web app, with the bearer (`feat!`). No `server.json`. Fresh origins, and the kept port as an opt-in (carried over from pull request 30) | QUA-53, QUA-54, QUA-55, QUA-56, QUA-57, QUA-67 | the `cli` target and `/server` on TCP, `localhost`, `server.json` |
+| QUA-59 | The kernel check is deleted. macOS serves. Windows is refused explicitly | stacked on QUA-58 | `peer.rs`, the admission, the pid paths outside the legacy module, a CI exception |
+| QUA-60 | The installer is the binary only. `upgrade` loses `systemctl`. The README covers the unit and the reboot recipe (`feat!`) | stacked on QUA-59 | the unit, `uninstall.sh`, the fake `systemctl`, `systemctl` in `upgrade` |
+
+**Afterwards.** QUA-62: the PRD (§6, §15, M7, M8), blocked by QUA-59 and QUA-60. QUA-61: Windows,
+blocked by QUA-47.
+
+**Pull request 30.** It makes the port of today's listener persistent, and that listener still
+carries the `cli` routes. GitHub reported it `MERGEABLE` at head `3a4634d` when this revision was
+written; the review's statement that it conflicts with `main` no longer holds. Decision: carry the
+kept port into QUA-58 as an opt-in on the web-only listener, and close pull request 30 unmerged.
+Its `bind → publish → accept` ordering fix exists for `server.json`, which the cutover removes.
+
+| Existing issue | Becomes (state left to the lead) |
 | --- | --- |
-| QUA-33 macOS caller check | replaced by QUA-50 to QUA-59 (pull request 28 is already closed) |
-| QUA-34 Windows caller check | replaced by QUA-61 |
-| QUA-46 the decision outlives the connection | closed by QUA-59 (no lookup remains) |
-| QUA-6 install on every platform | stays as the umbrella. Its service part is replaced by QUA-60 |
-| QUA-36 release binaries | stays. It is useful for macOS after QUA-59. Windows waits for QUA-47 |
-| QUA-37 one-command install | stays, simpler: binary only, after QUA-60 |
-| QUA-38 Windows install | stays, waits for QUA-47 |
-| QUA-39 README per platform | stays. The reboot recipe is in QUA-60 |
-| QUA-43 kept port (pull request 30) | stays as an opt-in setting that applies to the web listener only. It can land before or after QUA-58. If it lands before, QUA-58 moves its listener |
+| QUA-33, QUA-34 | replaced by QUA-50 … QUA-59, and by QUA-61 |
+| QUA-46 | ended by QUA-59 |
+| QUA-63 (W2: the command line trusts the port and its pid) | ended by QUA-53 (commands over the verified socket), QUA-54 and QUA-55 (no unproven signal), and the cutover |
+| QUA-43 | carried by QUA-58. Pull request 30 is closed |
+| QUA-6, QUA-36, QUA-37, QUA-38, QUA-39 | stay, simpler (binary only). Windows waits for QUA-47 |
 
 ## Open questions for the owner
 
-Each question has a safe default, which applies until the owner decides.
-
-1. **How long the token lasts.** Recommendation: per server start, so a stolen token stops
-   working. The page pairs again after a restart. Confirm, or ask for the browser-bound key
-   (about 300 to 500 lines, and the pairing survives restarts) as a later issue. A token stored
-   in the data folder is not offered.
-2. **The kept port.** Recommendation: keep it opt-in and off by default, and turn it on for a
-   machine with a single account. Confirm the default.
-3. **The change in AcidCat.** Recommendation: option A (QUA-51), about 60 lines in your AcidCat
-   repository and a release, rather than a second client in Quadratique. Confirm, and say
-   whether a 0.6.x release is acceptable if moving Quadratique to 0.8 turns out large.
+1. **Bearer lifetime.** One bearer per server start, saved in the browser for that run; after a
+   restart the page pairs again with `quadratique ui`. Yes or no?
+2. **Kept port.** Opt-in and off by default; the default binds a fresh origin at each start. Yes
+   or no?
+3. **AcidCat.** A native Unix-socket mode in AcidCat's Rust `HttpClient`, released from the 0.6
+   line if feasible (otherwise Quadratique moves to 0.8). Yes or no?
