@@ -878,15 +878,12 @@ fn a_lock_path_that_cannot_be_used_is_unreachable_and_named() {
 fn the_legacy_stop_signals_no_server_that_answers_with_a_control_version() {
     let home = Home::new();
     let held = hold_the_home(&home);
-    let elsewhere = outside();
-    let signaled = elsewhere.path().join("signaled");
-    let mut process = std::process::Command::new("sh")
-        .args([
-            "-c",
-            "trap 'touch \"$0\"; exit 0' TERM; while :; do tail -f /dev/null & wait $!; done",
-            &signaled.display().to_string(),
-        ])
-        .stdin(std::process::Stdio::null())
+    // `cat` waits on the pipe the test holds and starts no process of its own, and its output goes nowhere: a signal
+    // ends it, and it leaves nothing behind that keeps the test's output open.
+    let mut process = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .expect("a process for the server's pid");
     let mut answer = this_build(&home);
@@ -923,10 +920,11 @@ fn the_legacy_stop_signals_no_server_that_answers_with_a_control_version() {
     let stopped = stop.finish().ok();
 
     assert_eq!(stopped["stopped"], false, "{stopped}");
+    let still_running = process.try_wait().expect("the process's state").is_none();
     let _ = process.kill();
     let _ = process.wait();
     assert!(
-        !signaled.exists(),
+        still_running,
         "the stop signalled a server that answers with a control version"
     );
 }
