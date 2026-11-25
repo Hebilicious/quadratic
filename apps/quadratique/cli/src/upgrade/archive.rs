@@ -1,13 +1,45 @@
 //! Takes the binary out of a release archive, in memory. Nothing of the archive is written to
 //! disk, so no entry and no link in it can reach a file outside the folder of the binary. An
 //! archive with an entry that names an absolute path or `..`, or with a link that does, is
-//! refused as a whole.
+//! refused as a whole. The decoder stops after `decoded` bytes, whatever they hold: skipped
+//! entries and the long-name and PAX records that the tar reader buffers count too.
 
 use std::io::Read;
 use std::path::{Component, Path};
 
-pub fn binary(archive: &[u8], wanted: &str, limit: u64) -> Result<Vec<u8>, String> {
-    let mut entries = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+struct Capped<R> {
+    inner: R,
+    left: u64,
+    limit: u64,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::other(format!(
+                    "it decompresses to more than {} bytes",
+                    self.limit
+                ))),
+            };
+        }
+        let most = buffer
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let read = self.inner.read(&mut buffer[..most])?;
+        self.left -= read as u64;
+        Ok(read)
+    }
+}
+
+pub fn binary(archive: &[u8], wanted: &str, limit: u64, decoded: u64) -> Result<Vec<u8>, String> {
+    let mut entries = tar::Archive::new(Capped {
+        inner: flate2::read::GzDecoder::new(archive),
+        left: decoded,
+        limit: decoded,
+    });
     let mut found = None;
     for entry in entries
         .entries()
@@ -111,7 +143,10 @@ pub mod tests {
                 None,
             ),
         ]);
-        assert_eq!(binary(&bytes, WANTED, 1 << 20).unwrap(), b"the binary");
+        assert_eq!(
+            binary(&bytes, WANTED, 1 << 20, 4 << 20).unwrap(),
+            b"the binary"
+        );
     }
 
     #[test]
@@ -143,7 +178,7 @@ pub mod tests {
             if entries[0].0 != WANTED {
                 all.push((WANTED, tar::EntryType::Regular, b"the binary", None));
             }
-            let error = binary(&archive(&all), WANTED, 1 << 20).unwrap_err();
+            let error = binary(&archive(&all), WANTED, 1 << 20, 4 << 20).unwrap_err();
             assert!(error.contains(refusal), "{error}");
         }
     }
@@ -151,9 +186,37 @@ pub mod tests {
     #[test]
     fn an_archive_without_the_binary_or_with_a_binary_over_the_limit_is_refused() {
         let empty = archive(&[("README.md", tar::EntryType::Regular, b"x", None)]);
-        assert!(binary(&empty, WANTED, 10).unwrap_err().contains("holds no"));
+        assert!(
+            binary(&empty, WANTED, 10, 1 << 20)
+                .unwrap_err()
+                .contains("holds no")
+        );
         let large = archive(&[(WANTED, tar::EntryType::Regular, b"0123456789a", None)]);
-        assert!(binary(&large, WANTED, 10).unwrap_err().contains("larger"));
-        assert!(binary(b"not gzip", WANTED, 10).is_err());
+        assert!(
+            binary(&large, WANTED, 10, 1 << 20)
+                .unwrap_err()
+                .contains("larger")
+        );
+        assert!(binary(b"not gzip", WANTED, 10, 1 << 20).is_err());
+    }
+
+    #[test]
+    fn a_long_name_record_or_a_skipped_entry_past_the_decoded_limit_is_refused() {
+        let huge = vec![b'a'; 2 << 20];
+        for kind in [
+            tar::EntryType::GNULongName,
+            tar::EntryType::XHeader,
+            tar::EntryType::Regular,
+        ] {
+            let bytes = archive(&[
+                ("quadratique-1.0.0-t/README.md", kind, &huge, None),
+                (WANTED, tar::EntryType::Regular, b"the binary", None),
+            ]);
+            let error = binary(&bytes, WANTED, 1 << 20, 1 << 20).unwrap_err();
+            assert!(
+                error.contains("decompresses to more than"),
+                "{kind:?}: {error}"
+            );
+        }
     }
 }

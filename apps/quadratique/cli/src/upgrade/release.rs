@@ -7,31 +7,42 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde_json::Value;
 
-use super::http::{self, Limits, PlainOrigin};
+use super::http::{self, Hosts, Limits, PlainOrigin};
 
 const GITHUB_API: &str = "https://api.github.com";
 const REPOSITORY: &str = "Hebilicious/quadratique";
+const API_HOSTS: &[&str] = &["api.github.com"];
+/// github.com serves a release asset by redirecting to one of these hosts. GitHub lists
+/// `release-assets.githubusercontent.com` for "downloading release assets", and
+/// `objects.githubusercontent.com` and `github-releases.githubusercontent.com`, which served them
+/// before, in the network requirements of its runners:
+/// https://docs.github.com/en/actions/reference/runners/self-hosted-runners
+const ASSET_HOSTS: &[&str] = &[
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+];
 
 const DESCRIPTION_LIMITS: Limits = Limits {
     bytes: 1 << 20,
     time: Duration::from_secs(60),
 };
-const CHECKSUM_LIMITS: Limits = Limits {
-    bytes: 4 << 10,
-    time: Duration::from_secs(60),
-};
+/// A release archive is about 8 MiB.
 const ARCHIVE_LIMITS: Limits = Limits {
-    bytes: 256 << 20,
+    bytes: 64 << 20,
     time: Duration::from_secs(15 * 60),
 };
 
-/// Where the releases are described. A release build always asks GitHub over HTTPS. A debug
-/// build, which the tests run, takes another source from `QUADRATIQUE_UPGRADE_SOURCE`, and
-/// reaches it over plain HTTP only on the loopback interface. No release build reads that
-/// variable, so neither a repository's files nor a tool's output can point a released binary at
-/// another source.
+/// Where the releases are described. A release build always asks api.github.com over HTTPS, and
+/// downloads the archive only from github.com and the hosts it redirects release assets to. A
+/// debug build, which the tests run, takes another source from `QUADRATIQUE_UPGRADE_SOURCE`: a
+/// plain HTTP origin on the loopback interface, which every request may then reach and nothing
+/// else. No release build reads that variable, so neither a repository's files nor a tool's
+/// output can point a released binary at another source.
 pub struct Source {
     api: String,
+    downloads: String,
     plain: Option<PlainOrigin>,
 }
 
@@ -49,6 +60,7 @@ impl Source {
         }
         Ok(Source {
             api: GITHUB_API.to_owned(),
+            downloads: format!("https://github.com/{REPOSITORY}/releases/download/"),
             plain: None,
         })
     }
@@ -58,35 +70,40 @@ impl Source {
         let uri: ::http::Uri = api
             .parse()
             .map_err(|error| format!("{SOURCE_VARIABLE} is not a URL: {error}"))?;
-        let plain = match (uri.scheme_str(), uri.host(), uri.port_u16()) {
-            (Some("https"), _, _) => None,
-            (Some("http"), Some(host @ ("127.0.0.1" | "localhost")), Some(port)) => {
-                Some(PlainOrigin {
-                    host: host.to_owned(),
-                    port,
-                })
-            }
-            _ => {
-                return Err(format!(
-                    "{SOURCE_VARIABLE} is an HTTPS URL, or plain HTTP on 127.0.0.1 with a port"
-                ));
-            }
+        let (Some("http"), Some(host @ ("127.0.0.1" | "localhost")), Some(port)) =
+            (uri.scheme_str(), uri.host(), uri.port_u16())
+        else {
+            return Err(format!(
+                "{SOURCE_VARIABLE} is plain HTTP on 127.0.0.1 or localhost with a port"
+            ));
         };
+        let api = api.trim_end_matches('/').to_owned();
         Ok(Source {
-            api: api.trim_end_matches('/').to_owned(),
-            plain,
+            downloads: format!("{api}/"),
+            api,
+            plain: Some(PlainOrigin {
+                host: host.to_owned(),
+                port,
+            }),
         })
     }
 
-    async fn get(&self, url: &str, accept: &str, limits: &Limits) -> Result<Bytes, String> {
-        http::get(url, accept, limits, self.plain.as_ref()).await
+    fn hosts<'a>(&'a self, https: &'a [&'a str]) -> Hosts<'a> {
+        match &self.plain {
+            Some(origin) => Hosts::Plain(origin),
+            None => Hosts::Https(https),
+        }
     }
 
     pub async fn latest(&self) -> Result<Release, String> {
         let url = format!("{}/repos/{REPOSITORY}/releases/latest", self.api);
-        let body = self
-            .get(&url, "application/vnd.github+json", &DESCRIPTION_LIMITS)
-            .await?;
+        let body = http::get(
+            &url,
+            "application/vnd.github+json",
+            &DESCRIPTION_LIMITS,
+            &self.hosts(API_HOSTS),
+        )
+        .await?;
         let description: Value =
             serde_json::from_slice(&body).map_err(|error| format!("{url} is not JSON: {error}"))?;
         Release::from_description(&description).ok_or_else(|| {
@@ -94,21 +111,33 @@ impl Source {
         })
     }
 
-    pub async fn checksum(&self, url: &str) -> Result<Bytes, String> {
-        self.get(url, "application/octet-stream", &CHECKSUM_LIMITS)
-            .await
+    /// Downloads an asset of this repository's releases.
+    pub async fn archive(&self, asset: &Asset) -> Result<Bytes, String> {
+        if !asset.url.starts_with(&self.downloads) {
+            return Err(format!(
+                "{} is not a release download of {REPOSITORY}: refused",
+                asset.url
+            ));
+        }
+        http::get(
+            &asset.url,
+            "application/octet-stream",
+            &ARCHIVE_LIMITS,
+            &self.hosts(ASSET_HOSTS),
+        )
+        .await
     }
+}
 
-    pub async fn archive(&self, url: &str) -> Result<Bytes, String> {
-        self.get(url, "application/octet-stream", &ARCHIVE_LIMITS)
-            .await
-    }
+pub struct Asset {
+    pub url: String,
+    /// The SHA-256 that GitHub computed when the asset was uploaded (`digest: "sha256:…"`).
+    pub sha256: Option<String>,
 }
 
 pub struct Release {
     pub version: Version,
-    /// The download address of each asset, by its name.
-    pub assets: BTreeMap<String, String>,
+    pub assets: BTreeMap<String, Asset>,
 }
 
 impl Release {
@@ -119,9 +148,19 @@ impl Release {
             .as_array()?
             .iter()
             .filter_map(|asset| {
+                let sha256 = asset["digest"]
+                    .as_str()
+                    .and_then(|digest| digest.strip_prefix("sha256:"))
+                    .filter(|hex| {
+                        hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .map(str::to_ascii_lowercase);
                 Some((
                     asset["name"].as_str()?.to_owned(),
-                    asset["browser_download_url"].as_str()?.to_owned(),
+                    Asset {
+                        url: asset["browser_download_url"].as_str()?.to_owned(),
+                        sha256,
+                    },
                 ))
             })
             .collect();

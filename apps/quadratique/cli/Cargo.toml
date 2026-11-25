@@ -29,7 +29,7 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util.workspace = true
 quadratique-server.workspace = true
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "rand"] }
 rustls.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

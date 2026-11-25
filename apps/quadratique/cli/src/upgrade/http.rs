@@ -1,6 +1,6 @@
-//! A GET over HTTPS that follows redirects only to HTTPS and stops at a size and a time limit.
-//! The limits guard against a server that hangs or sends without end; a failed GET is not
-//! tried again.
+//! A GET over HTTPS to the hosts a request allows, which follows redirects only to those hosts
+//! and stops at a size and a time limit. The limits guard against a server that hangs or sends
+//! without end; a failed GET is not tried again.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +21,12 @@ pub struct PlainOrigin {
     pub port: u16,
 }
 
+/// The hosts one request, its redirects included, may reach.
+pub enum Hosts<'a> {
+    Https(&'a [&'a str]),
+    Plain(&'a PlainOrigin),
+}
+
 pub struct Limits {
     pub bytes: usize,
     pub time: Duration,
@@ -30,9 +36,9 @@ pub async fn get(
     url: &str,
     accept: &str,
     limits: &Limits,
-    plain: Option<&PlainOrigin>,
+    hosts: &Hosts<'_>,
 ) -> Result<Bytes, String> {
-    match tokio::time::timeout(limits.time, follow(url, accept, limits.bytes, plain)).await {
+    match tokio::time::timeout(limits.time, follow(url, accept, limits.bytes, hosts)).await {
         Ok(result) => result,
         Err(_) => Err(format!(
             "{url} did not finish within {} seconds",
@@ -41,17 +47,12 @@ pub async fn get(
     }
 }
 
-async fn follow(
-    url: &str,
-    accept: &str,
-    limit: usize,
-    plain: Option<&PlainOrigin>,
-) -> Result<Bytes, String> {
+async fn follow(url: &str, accept: &str, limit: usize, hosts: &Hosts<'_>) -> Result<Bytes, String> {
     let mut uri: Uri = url
         .parse()
         .map_err(|error| format!("{url} is not a URL: {error}"))?;
     for _ in 0..=REDIRECTS {
-        let response = request(&uri, accept, plain).await?;
+        let response = request(&uri, accept, hosts).await?;
         let status = response.status();
         if status.is_redirection() {
             let location = response
@@ -106,25 +107,15 @@ fn resolve(from: &Uri, location: &str) -> Result<Uri, String> {
 async fn request(
     uri: &Uri,
     accept: &str,
-    plain: Option<&PlainOrigin>,
+    hosts: &Hosts<'_>,
 ) -> Result<http::Response<hyper::body::Incoming>, String> {
     let host = uri
         .host()
         .ok_or_else(|| format!("{uri} names no host"))?
         .trim_start_matches('[')
         .trim_end_matches(']')
-        .to_owned();
-    let secure = match uri.scheme_str() {
-        Some("https") => true,
-        Some("http")
-            if plain.is_some_and(|origin| {
-                origin.host == host && Some(origin.port) == uri.port_u16()
-            }) =>
-        {
-            false
-        }
-        _ => return Err(format!("{uri} is not HTTPS: refused")),
-    };
+        .to_ascii_lowercase();
+    let secure = allowed(uri, &host, hosts)?;
     let port = uri.port_u16().unwrap_or(443);
     let stream = TcpStream::connect((host.as_str(), port))
         .await
@@ -161,6 +152,27 @@ async fn request(
     sender.send_request(request).await.map_err(failed)
 }
 
+/// Whether the request may go to `uri`, and over TLS.
+fn allowed(uri: &Uri, host: &str, hosts: &Hosts<'_>) -> Result<bool, String> {
+    match (uri.scheme_str(), hosts) {
+        (Some("https"), Hosts::Https(allowed)) if allowed.contains(&host) => Ok(true),
+        (Some("http"), Hosts::Plain(origin))
+            if origin.host == host && Some(origin.port) == uri.port_u16() =>
+        {
+            Ok(false)
+        }
+        (Some("https"), Hosts::Https(allowed)) => Err(format!(
+            "{uri} is refused: this request may reach only {}",
+            allowed.join(", ")
+        )),
+        (_, Hosts::Https(_)) => Err(format!("{uri} is not HTTPS: refused")),
+        (_, Hosts::Plain(origin)) => Err(format!(
+            "{uri} is refused: this request may reach only http://{}:{}",
+            origin.host, origin.port
+        )),
+    }
+}
+
 /// Certificates are checked against the Mozilla roots that the binary carries.
 fn tls_config() -> Arc<rustls::ClientConfig> {
     let roots = rustls::RootCertStore {
@@ -177,7 +189,27 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve;
+    use super::{Hosts, allowed, resolve};
+
+    #[test]
+    fn a_request_reaches_only_its_hosts_over_https() {
+        let hosts = Hosts::Https(&["github.com"]);
+        let check = |url: &str| {
+            let uri: http::Uri = url.parse().unwrap();
+            allowed(&uri, uri.host().unwrap(), &hosts)
+        };
+        assert!(check("https://github.com/a").unwrap());
+        assert!(
+            check("https://example.com/a")
+                .unwrap_err()
+                .contains("only github.com")
+        );
+        assert!(
+            check("http://github.com/a")
+                .unwrap_err()
+                .contains("not HTTPS")
+        );
+    }
 
     #[test]
     fn a_redirect_to_a_path_stays_on_the_origin_and_an_absolute_one_is_taken_as_given() {

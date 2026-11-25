@@ -30,7 +30,6 @@ pub fn described() -> String {
 
 pub struct Files {
     pub archive: String,
-    pub checksum: String,
     /// The binary's path inside the archive.
     pub binary: String,
 }
@@ -39,7 +38,6 @@ pub fn files(version: &str, target: &str) -> Files {
     let folder = format!("quadratique-{version}-{target}");
     let archive = format!("{folder}.tar.gz");
     Files {
-        checksum: format!("{archive}.sha256"),
         archive,
         binary: format!("{folder}/bin/quadratique"),
     }

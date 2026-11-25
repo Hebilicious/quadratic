@@ -1,32 +1,41 @@
-//! `quadratique upgrade`: installs the latest release over the running binary, restarts the
-//! server, and says which repositories hold an older skill. The command makes the network
-//! requests itself; the server makes none.
+//! `quadratique upgrade`: installs the latest release over the running binary, brings the
+//! server of this home to it, and says which repositories hold an older skill. The command makes
+//! the network requests itself; the server makes none.
 
 mod archive;
+mod folder;
 mod http;
 mod install;
 mod release;
 mod route;
+mod server;
 mod skills;
 mod target;
 
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::process::Stdio;
 
 use acid_cat_core::Kind;
 use acid_cat_core::cli::{CliIo, exit};
+use quadratique_server::store::{SCHEMA_VERSION, read_recorded, refuse_git_work_tree};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::background::Home;
 use crate::commands::{self, print_json, report};
-use install::Staged;
 use release::{Release, Source, Version};
 use route::Route;
+use server::Runs;
 
-pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release on GitHub, downloads this platform's archive and its SHA-256 file over HTTPS, checks the archive against it, runs the new binary with --version, renames it over this one, and restarts the server (the systemd user service quadratique.service where install.sh set it up, else stops the server so that the next command starts the new build). Any failure before the rename leaves this binary in place. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade, and refuses to run as root. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network.";
+pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and restarts the server of this home (through quadratique.service when systemd runs it, waiting until the new build serves; else it stops the server, so that the next command starts the new build). Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server.";
 
-const BINARY_LIMIT: u64 = 256 << 20;
+/// A release binary is about 23 MiB.
+const BINARY_LIMIT: u64 = 128 << 20;
+const DECODED_LIMIT: u64 = BINARY_LIMIT + (1 << 20);
 const REPORT_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+/// The store schema that every release knows: release 0.1.0 shipped it.
+const FIRST_RELEASE_SCHEMA: i64 = 1;
 
 #[derive(Default)]
 struct Request {
@@ -64,8 +73,7 @@ pub async fn upgrade(words: &[&str], io: &mut CliIo) -> i32 {
         );
     }
     if request.skills {
-        let answer = json!({ "skills": skill_report().await });
-        print_json(io, &answer);
+        print_json(io, &json!({ "skills": skills::report() }));
         return exit::VALUE;
     }
     match run(&request).await {
@@ -77,39 +85,51 @@ pub async fn upgrade(words: &[&str], io: &mut CliIo) -> i32 {
     }
 }
 
-/// The report of the repositories, or why it could not be made and how to make it later.
-async fn skill_report() -> Value {
-    match skills::report().await {
-        Ok(report) => report,
-        Err(problem) => json!({
-            "error": format!("the repositories could not be read: {problem}"),
-            "run": "quadratique upgrade --skills",
-        }),
-    }
+/// The file as it was when this upgrade started, to tell whether another upgrade replaced it.
+fn identity(binary: &Path) -> Result<(u64, u64, u64, i64, i64), String> {
+    let meta = std::fs::metadata(binary)
+        .map_err(|error| format!("{} cannot be read: {error}", binary.display()))?;
+    Ok((
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+    ))
 }
 
 async fn run(request: &Request) -> Result<Value, String> {
+    let unchanged = |what: String| format!("{what}. Nothing was changed.");
     let running = Version::parse(env!("CARGO_PKG_VERSION"))
         .ok_or("this build's version is not a release version")?;
     let binary = std::env::current_exe()
         .and_then(|path| path.canonicalize())
-        .map_err(|error| format!("this binary's file cannot be found: {error}"))?;
+        .map_err(|error| unchanged(format!("this binary's file cannot be found: {error}")))?;
+    let started_as = identity(&binary)?;
+    let home = commands::home().map_err(unchanged)?;
     let route = Route::of(&binary);
+    if let Route::Unclear(why) = &route {
+        return Err(unchanged(why.clone()));
+    }
     let source = Source::chosen()?;
-    let release = source.latest().await.map_err(|error| {
-        format!("The latest release could not be found: {error}. Nothing was changed.")
-    })?;
-    let latest = &release.version;
+    let release = source
+        .latest()
+        .await
+        .map_err(|error| unchanged(format!("The latest release could not be found: {error}")))?;
+    let latest = release.version.clone();
 
-    if *latest == running || (*latest < running && !request.allow_downgrade) {
+    if latest == running || (latest < running && !request.allow_downgrade) {
         let mut answer = json!({ "upToDate": true, "installed": running.to_string() });
-        if *latest < running {
+        if latest < running {
             answer["latest"] = json!(latest.to_string());
             answer["note"] = json!(format!(
                 "This build is newer than the latest release; --allow-downgrade installs {latest}."
             ));
         }
-        answer["skills"] = skill_report().await;
+        if route.manager().is_none() {
+            finish_an_earlier_upgrade(&home, &binary, &running, request.check, &mut answer).await;
+        }
+        answer["skills"] = skills::report();
         return Ok(answer);
     }
     let mut answer = json!({
@@ -121,24 +141,43 @@ async fn run(request: &Request) -> Result<Value, String> {
         if let Some(manager) = route.manager() {
             answer["managedBy"] = json!(manager);
             answer["binary"] = json!(binary);
+            answer["then"] = json!(after_the_manager(&route, &binary).await);
         }
         answer["run"] = json!(route.command());
-        if route.manager().is_some() {
-            answer["then"] = json!(after_the_manager(&route, &binary));
-        }
-        answer["skills"] = skill_report().await;
+        answer["skills"] = skills::report();
         return Ok(answer);
     }
 
-    replace(&source, &release, &binary).await?;
+    let folder = binary.parent().unwrap_or(Path::new("/"));
+    refuse_git_work_tree(folder).map_err(|_| {
+        unchanged(format!(
+            "{} is inside a git working tree, and quadratique upgrade writes into no repository; install a release outside it",
+            binary.display()
+        ))
+    })?;
+    folder::check(folder).map_err(unchanged)?;
+    store_opens(&home, &latest, &running).map_err(unchanged)?;
+    let lock = folder::Lock::take(folder).map_err(unchanged)?;
+    let removed = folder::remove_leftovers(folder, &lock);
+    if identity(&binary)? != started_as {
+        return Err(unchanged(format!(
+            "{} changed while this upgrade ran, by another upgrade or install; run quadratique upgrade again",
+            binary.display()
+        )));
+    }
+    replace(&source, &release, &binary, folder).await?;
+    drop(lock);
+
     let mut answer = json!({
         "from": running.to_string(),
         "to": latest.to_string(),
         "binary": binary,
-        "checksum": "verified",
+        "sha256": "verified against the GitHub API",
     });
-    let home = commands::home()?;
-    match install::restart(&home, &binary).await {
+    if !removed.is_empty() {
+        answer["removedLeftovers"] = json!(removed);
+    }
+    match server::bring_up(&home, &binary, &latest.to_string()).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
@@ -146,16 +185,74 @@ async fn run(request: &Request) -> Result<Value, String> {
     Ok(answer)
 }
 
-/// What to run after the manager's upgrade: the service's binary is a copy that `install.sh`
-/// made, which the manager does not upgrade.
-fn after_the_manager(route: &Route, binary: &Path) -> Vec<String> {
+/// After a run that was stopped between the rename and the restart, the binary is current while
+/// the server of this home still runs the earlier build: restart it now.
+async fn finish_an_earlier_upgrade(
+    home: &Home,
+    binary: &Path,
+    running: &Version,
+    check: bool,
+    answer: &mut Value,
+) {
+    let Some(pid) = server::home_server(home).await else {
+        return;
+    };
+    if server::what_runs(pid, binary) != Runs::EarlierBuild {
+        return;
+    }
+    if check {
+        answer["server"] = json!(format!(
+            "the server of this home (pid {pid}) runs an earlier build of {}; quadratique upgrade restarts it",
+            binary.display()
+        ));
+        return;
+    }
+    match server::bring_up(home, binary, &running.to_string()).await {
+        Ok(done) => answer["server"] = json!(done),
+        Err(problem) => answer["warnings"] = json!([problem]),
+    }
+}
+
+/// The highest store schema that release `version` is known to open. Schemas only grow, so a
+/// release at least as new as this build opens every schema this build knows; an older release
+/// is known to open only the schema of the first release.
+fn known_schema(version: &Version, running: &Version) -> i64 {
+    if version >= running {
+        SCHEMA_VERSION
+    } else {
+        FIRST_RELEASE_SCHEMA
+    }
+}
+
+/// Refuses a release that could not open the store, before anything changes.
+fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result<(), String> {
+    let database = &home.paths.database;
+    let recorded = read_recorded(database)
+        .map_err(|error| format!("the store {} cannot be read: {error}", database.display()))?;
+    let known = known_schema(latest, running);
+    match recorded {
+        Some(recorded) if recorded.schema > known => Err(format!(
+            "the store {} has schema {}, and release {latest} is known to open schema {known} at most: its server could not start",
+            database.display(),
+            recorded.schema
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// What to run after the manager's upgrade: a service that runs a copy that `install.sh` made is
+/// not upgraded by the manager.
+async fn after_the_manager(route: &Route, binary: &Path) -> Vec<String> {
     let mut then = Vec::new();
-    if let Some(service) = install::service_binary().filter(|service| service != binary) {
+    if let Some(service) = server::service_binary()
+        .await
+        .filter(|service| service != binary)
+    {
         then.push(match route {
             Route::Mise { tool } => format!(
                 "sh \"$(mise where {tool})/install.sh\" \"$(mise which quadratique)\""
             ),
-            Route::Cargo | Route::File => format!(
+            _ => format!(
                 "The service quadratique.service runs {}, a copy that install.sh made: run the install.sh of the new release with {}",
                 service.display(),
                 binary.display()
@@ -167,69 +264,61 @@ fn after_the_manager(route: &Route, binary: &Path) -> Vec<String> {
 }
 
 /// Downloads, checks and installs the release's binary over `binary`. On an error, `binary` is
-/// as it was.
-async fn replace(source: &Source, release: &Release, binary: &Path) -> Result<(), String> {
+/// as it was and no staging folder is left.
+async fn replace(
+    source: &Source,
+    release: &Release,
+    binary: &Path,
+    folder: &Path,
+) -> Result<(), String> {
+    let unchanged = |what: String| format!("{what}. Nothing was changed.");
     let latest = release.version.to_string();
     let Some(target) = target::THIS else {
-        return Err(format!(
-            "The releases carry no archive for this platform ({}). Nothing was changed.",
+        return Err(unchanged(format!(
+            "The releases carry no archive for this platform ({})",
             target::described()
-        ));
+        )));
     };
     let files = target::files(&latest, target);
-    let asset = |name: &str| {
-        release.assets.get(name).ok_or_else(|| {
-            format!("Release {latest} has no {name} for this platform. Nothing was changed.")
-        })
-    };
-    let (archive_url, checksum_url) = (asset(&files.archive)?, asset(&files.checksum)?);
-    let unchanged = |what: String| format!("{what}. Nothing was changed.");
-    let checksum = source.checksum(checksum_url).await.map_err(|error| {
+    let asset = release.assets.get(&files.archive).ok_or_else(|| {
         unchanged(format!(
-            "The download of {} failed: {error}",
-            files.checksum
+            "Release {latest} has no {} for this platform",
+            files.archive
         ))
     })?;
-    let expected = expected_digest(&checksum, &files.archive).map_err(unchanged)?;
+    let expected = asset.sha256.as_deref().ok_or_else(|| {
+        unchanged(format!(
+            "The GitHub API gives no SHA-256 digest for {}",
+            files.archive
+        ))
+    })?;
     let archive = source
-        .archive(archive_url)
+        .archive(asset)
         .await
         .map_err(|error| unchanged(format!("The download of {} failed: {error}", files.archive)))?;
     let digest = hex(&Sha256::digest(&archive));
     if digest != expected {
         return Err(unchanged(format!(
-            "{} does not match its checksum: its SHA-256 is {digest}, {} says {expected}",
-            files.archive, files.checksum
+            "{} does not match the SHA-256 that the GitHub API gives for it: it is {digest}, not {expected}",
+            files.archive
         )));
     }
-    let bytes = archive::binary(&archive, &files.binary, BINARY_LIMIT)
+    let bytes = archive::binary(&archive, &files.binary, BINARY_LIMIT, DECODED_LIMIT)
         .map_err(|error| unchanged(format!("{} is refused: {error}", files.archive)))?;
-    let staged = Staged::write(&bytes, binary).map_err(unchanged)?;
-    staged.runs_as(&latest).await.map_err(unchanged)?;
-    staged.install().map_err(unchanged)
-}
-
-/// The SHA-256 that a `sha256sum` line gives for `archive`.
-fn expected_digest(checksum: &[u8], archive: &str) -> Result<String, String> {
-    let text = std::str::from_utf8(checksum).unwrap_or_default();
-    let mut words = text.split_whitespace();
-    let digest = words.next().unwrap_or_default().to_ascii_lowercase();
-    let named = words.next().map(|name| name.trim_start_matches('*'));
-    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("The checksum file of {archive} holds no SHA-256"));
-    }
-    if named.is_some_and(|name| name != archive) {
-        return Err(format!("The checksum file of {archive} names another file"));
-    }
-    Ok(digest)
+    let staging = folder::Staging::create(folder, &bytes).map_err(unchanged)?;
+    install::runs_as(&staging.binary, &latest)
+        .await
+        .map_err(unchanged)?;
+    staging.install(binary).map_err(unchanged)
 }
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// The new build knows its own skill text, so the new binary makes the report.
-async fn new_build_report(binary: &PathBuf) -> Value {
+/// The new build knows its own skill text, so the new binary makes the report. It reads the
+/// store and starts no server.
+async fn new_build_report(binary: &Path) -> Value {
     let mut command = tokio::process::Command::new(binary);
     command
         .args(["upgrade", "--skills"])
@@ -266,17 +355,16 @@ async fn new_build_report(binary: &PathBuf) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_digest, request};
+    use super::{FIRST_RELEASE_SCHEMA, SCHEMA_VERSION, Version, known_schema, request};
 
     #[test]
-    fn a_checksum_line_gives_the_digest_of_the_archive_it_names() {
-        let digest = "ab".repeat(32);
-        assert_eq!(
-            expected_digest(format!("{digest}  a.tar.gz\n").as_bytes(), "a.tar.gz").unwrap(),
-            digest
-        );
-        assert!(expected_digest(format!("{digest}  b.tar.gz\n").as_bytes(), "a.tar.gz").is_err());
-        assert!(expected_digest(b"<html>not found</html>", "a.tar.gz").is_err());
+    fn a_newer_release_opens_this_build_s_schema_and_an_older_one_only_the_first_release_s() {
+        let running = Version::parse("1.4.0").unwrap();
+        let newer = Version::parse("1.5.0").unwrap();
+        let older = Version::parse("1.3.9").unwrap();
+        assert_eq!(known_schema(&newer, &running), SCHEMA_VERSION);
+        assert_eq!(known_schema(&running, &running), SCHEMA_VERSION);
+        assert_eq!(known_schema(&older, &running), FIRST_RELEASE_SCHEMA);
     }
 
     #[test]
