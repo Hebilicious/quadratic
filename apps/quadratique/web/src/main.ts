@@ -99,7 +99,7 @@ const keys = createActor(
     },
   }),
 );
-/** Where the browser kept saved views before the server kept them; read once to import them. */
+/** Where the browser kept saved views before the server kept them; read to import them, then removed. */
 const LEGACY_SAVED_VIEWS = "quadratique.saved-views";
 const savedViews = createActor(
   savedViewsMachine({
@@ -107,20 +107,21 @@ const savedViews = createActor(
     legacy: {
       read: () => {
         try {
-          // BOUNDARY: what this browser stored; the machine decodes it.
-          return JSON.parse(localStorage.getItem(LEGACY_SAVED_VIEWS) ?? "null");
+          return localStorage.getItem(LEGACY_SAVED_VIEWS);
         } catch {
           return null;
         }
       },
-      clear: () => {
-        try {
+      write: (value) => {
+        localStorage.setItem(LEGACY_SAVED_VIEWS, value);
+      },
+      removeIf: (value) => {
+        if (localStorage.getItem(LEGACY_SAVED_VIEWS) === value) {
           localStorage.removeItem(LEGACY_SAVED_VIEWS);
-        } catch {
-          // A browser that keeps no site data kept no views either.
         }
       },
     },
+    newSource: () => crypto.randomUUID(),
   }),
 );
 

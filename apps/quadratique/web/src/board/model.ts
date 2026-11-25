@@ -187,15 +187,22 @@ export type Project = typeof ProjectSchema.Type;
 
 export const ProjectListSchema = Schema.Struct({ items: Schema.Array(ProjectSchema) });
 
+const SavedViewSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  project: Schema.optionalKey(Schema.String),
+  filter: Schema.String,
+});
+
 export const SavedViewsSchema = Schema.Struct({
-  items: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      name: Schema.String,
-      project: Schema.optionalKey(Schema.String),
-      filter: Schema.String,
-    }),
-  ),
+  revision: Schema.Int,
+  items: Schema.Array(SavedViewSchema),
+});
+
+export const ViewsImportedSchema = Schema.Struct({
+  revision: Schema.Int,
+  items: Schema.Array(SavedViewSchema),
+  full: Schema.Array(Schema.String),
 });
 
 export const IssueChangedSchema = Schema.Struct({

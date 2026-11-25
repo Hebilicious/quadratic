@@ -4,6 +4,7 @@ import { computed, nextTick, ref, watchEffect } from "vue";
 import type { Category, WorkflowStatus } from "../board/model.ts";
 import {
   nameProblem,
+  refusalOf,
   savedViewOf,
   writeState,
   type SavedView,
@@ -21,7 +22,7 @@ import { GROUPING_NAMES } from "../keys/menu.ts";
 import { firstCharacters, LIMITS, withQuery, type Route } from "../route.ts";
 import { useSnapshot } from "../use-actor.ts";
 import { useWorkspace } from "../workspace.ts";
-import { priorityLabel } from "./present.ts";
+import { priorityLabel, viewProblemText } from "./present.ts";
 
 const props = defineProps<{
   readonly route: Extract<Route, { view: "list" | "board" }>;
@@ -153,7 +154,9 @@ const replacing = computed(() => {
 });
 
 const saveState = computed(() => writeState(savedSnapshot.value, SAVE_FORM));
-const notSaved = computed(() => saving.value.kind === "naming" && saveState.value === "refused");
+const notSaved = computed(() =>
+  saving.value.kind === "naming" ? refusalOf(savedSnapshot.value, SAVE_FORM) : undefined,
+);
 const submitted = ref(false);
 watchEffect(() => {
   if (!submitted.value || saveState.value === "pending") {
@@ -185,6 +188,7 @@ function save(event: Event): void {
     name: saving.value.name,
     scope: props.route.scope,
     filter: filter.value,
+    replace: replacing.value?.id,
   });
   submitted.value = true;
 }
@@ -350,8 +354,8 @@ function cancelSaving(event: KeyboardEvent): void {
           @input="nameInput"
         />
       </label>
-      <p v-if="notSaved" class="field-error" role="alert">
-        The view could not be saved: the server did not keep it. Try again.
+      <p v-if="notSaved !== undefined" class="field-error" role="alert">
+        {{ viewProblemText(notSaved, "saved") }}
       </p>
       <button
         class="primary-button"

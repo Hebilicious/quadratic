@@ -15,23 +15,34 @@ const viewNames = (page: Page) =>
     .filter({ has: page.locator(".nav-key", { hasText: "≡" }) })
     .locator(".nav-name");
 
-/** A port that the system gives now and that no server of this test holds. */
-async function freePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const probe = createServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const address = probe.address();
-      probe.close(() => {
-        if (typeof address === "object" && address !== null) {
-          resolve(address.port);
-        } else {
-          reject(new Error("the probe had no port"));
-        }
-      });
+/**
+ * Holds `port` on the loopback interface so that the system cannot give it to the next server. When another process
+ * already holds it, that process keeps it from the next server just as well.
+ */
+async function hold(port: number): Promise<{ readonly release: () => Promise<void> }> {
+  const holder = createServer();
+  const held = await new Promise<boolean>((resolve) => {
+    holder.once("error", () => {
+      resolve(false);
+    });
+    holder.listen(port, "127.0.0.1", () => {
+      resolve(true);
     });
   });
+  return {
+    release: async () => {
+      if (held) {
+        await new Promise<void>((resolve) => {
+          holder.close(() => {
+            resolve();
+          });
+        });
+      }
+    },
+  };
 }
+
+const portOf = (address: string): number => Number(address.split(":").at(-1));
 
 test("saved views live in the server: one page's view shows in another, survives a restart on another port, and a browser's old views are imported once", async ({
   context,
@@ -103,12 +114,17 @@ test("saved views live in the server: one page's view shows in another, survives
   });
 
   await test.step("after a restart of the server on another port, a page of the new address shows the same views", async () => {
-    const before = workspace.address.split(":").at(-1);
-    const port = await freePort();
-    expect(String(port)).not.toBe(before);
+    const before = portOf(workspace.address);
     await other.close();
     await workspace.stop();
-    await workspace.start(port);
+    const old = await hold(before);
+    try {
+      await workspace.start();
+    } finally {
+      await old.release();
+    }
+    const port = portOf(workspace.address);
+    expect(port).not.toBe(before);
     await page.goto(workspace.url("/projects/DEM"));
     await expect(page).toHaveURL(new RegExp(`^http://[^/]+:${String(port)}/`, "u"));
     await expect(page.getByRole("status")).toHaveText("Live");

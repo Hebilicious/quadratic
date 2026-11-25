@@ -1,7 +1,14 @@
-import { Option, Schema } from "effect";
 import { createCallbackLogic, setup, types } from "xstate";
 
 import { filterEntries, filterOf } from "../route.ts";
+import {
+  batches,
+  planLegacy,
+  withSource,
+  type Kept,
+  type OldView,
+  type Shortened,
+} from "./legacy-views.ts";
 import { ALL, projectScope, sameScope, type Filter, type Scope } from "./view.ts";
 
 export interface SavedView {
@@ -21,49 +28,67 @@ export interface StoredView {
 
 export type NewView = Omit<StoredView, "id">;
 
-/** What the server answers to a write, and what the live channel sends: every saved view. */
-export type Views = readonly StoredView[];
+/**
+ * Every saved view at one revision of the list, as a list answer, a write answer or the live channel gives it. The
+ * revision only grows, so of two snapshots the page keeps the one with the higher revision, whatever order they come in.
+ */
+export interface Snapshot {
+  readonly revision: number;
+  readonly items: readonly StoredView[];
+}
+
+export interface Imported extends Snapshot {
+  /** The old ids that were not imported because the server holds the most views. */
+  readonly full: readonly string[];
+}
 
 export interface SavedViewPorts {
-  readonly list: (signal: AbortSignal) => Promise<Views>;
-  readonly save: (view: NewView) => Promise<Views>;
-  readonly rename: (id: string, name: string) => Promise<Views>;
-  readonly remove: (id: string) => Promise<Views>;
-  readonly import: (views: readonly NewView[]) => Promise<Views>;
-  /** Resolves once the subscription is open; each item is every saved view after a change. */
-  readonly changes: (signal: AbortSignal) => Promise<AsyncIterable<Views>>;
-  /** The views that this browser kept before the server kept them. */
-  readonly legacy: { readonly read: () => unknown; readonly clear: () => void };
+  readonly list: (signal: AbortSignal) => Promise<Snapshot>;
+  /** Without `replace`, creates; with it, replaces the filters of that view, which must still have `name`. */
+  readonly save: (view: NewView & { readonly replace?: string }) => Promise<Snapshot>;
+  readonly rename: (id: string, name: string) => Promise<Snapshot>;
+  readonly remove: (id: string) => Promise<Snapshot>;
+  readonly import: (source: string, views: readonly OldView[]) => Promise<Imported>;
+  /** Resolves once the subscription is open; each item is the snapshot after a change. */
+  readonly changes: (signal: AbortSignal) => Promise<AsyncIterable<Snapshot>>;
+  /** The value under the key where this browser kept views before the server kept them. */
+  readonly legacy: {
+    readonly read: () => string | null;
+    readonly write: (value: string) => void;
+    /** Removes the value only when it is still exactly `value`. */
+    readonly removeIf: (value: string) => void;
+  };
+  /** A new id for this browser's old views. */
+  readonly newSource: () => string;
 }
 
-const LegacySchema = Schema.Struct({
-  version: Schema.Literal(1),
-  views: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      name: Schema.String,
-      project: Schema.optionalKey(Schema.String),
-      filter: Schema.String,
-    }),
-  ),
-});
+/** Why a write was not kept: a failure the server named, or no answer. */
+export type Problem = "NameTaken" | "Renamed" | "NotFound" | "TooManyViews" | "unavailable";
 
-const decodeLegacy = Schema.decodeUnknownOption(LegacySchema);
+const NAMED_PROBLEMS: readonly Problem[] = ["NameTaken", "Renamed", "NotFound", "TooManyViews"];
 
-/** The views that a browser kept under the old key, in their order; none for any other shape. */
-export function legacyViews(stored: unknown): readonly NewView[] {
-  const decoded = decodeLegacy(stored);
-  if (Option.isNone(decoded)) {
-    return [];
-  }
-  return decoded.value.views
-    .filter((view) => view.name.trim().length > 0)
-    .map((view) => ({
-      name: view.name.trim().slice(0, 100),
-      ...(view.project === undefined ? {} : { project: view.project }),
-      filter: view.filter,
-    }));
+export function problemOf(error: unknown): Problem {
+  const tag =
+    typeof error === "object" &&
+    error !== null &&
+    "failure" in error &&
+    typeof error.failure === "object" &&
+    error.failure !== null &&
+    "_tag" in error.failure
+      ? error.failure._tag
+      : undefined;
+  return NAMED_PROBLEMS.find((problem) => problem === tag) ?? "unavailable";
 }
+
+/** What the import of this browser's old views did, for the page to say. */
+export interface ImportReport {
+  readonly shortened: readonly Shortened[];
+  readonly kept: readonly Kept[];
+  /** The import stopped because the server did not answer; the next page goes on from where it stopped. */
+  readonly interrupted: boolean;
+}
+
+const NO_REPORT: ImportReport = { shortened: [], kept: [], interrupted: false };
 
 export const storedFilter = (filter: Filter): string =>
   new URLSearchParams(filterEntries(filter).map(([name, value]) => [name, value])).toString();
@@ -114,28 +139,46 @@ export function savedViewOf(
 
 export type WriteState = "idle" | "pending" | "refused";
 
-/** Where the last write of a form is: none or stored (`idle`), sent (`pending`) or not stored. */
-export function writeState(
-  snapshot: {
-    readonly context: { readonly pending: readonly string[]; readonly refused: readonly string[] };
-  },
-  form: string,
-): WriteState {
+interface Writes {
+  readonly pending: readonly string[];
+  readonly refused: Readonly<Record<string, Problem>>;
+}
+
+/** Where the last write of a form is: none or kept (`idle`), sent (`pending`) or not kept. */
+export function writeState(snapshot: { readonly context: Writes }, form: string): WriteState {
   if (snapshot.context.pending.includes(form)) {
     return "pending";
   }
-  return snapshot.context.refused.includes(form) ? "refused" : "idle";
+  return form in snapshot.context.refused ? "refused" : "idle";
+}
+
+/** Why the last write of a form was not kept, if it was not. */
+export function refusalOf(
+  snapshot: { readonly context: Writes },
+  form: string,
+): Problem | undefined {
+  return snapshot.context.refused[form];
 }
 
 const MAX_RETRY_MS = 10_000;
 
 type Write =
-  | { readonly kind: "save"; readonly view: NewView }
+  | { readonly kind: "save"; readonly view: NewView & { readonly replace?: string } }
   | { readonly kind: "rename"; readonly id: string; readonly name: string }
   | { readonly kind: "remove"; readonly id: string };
 
+type WriteNews =
+  | { type: "stored"; form: string; snapshot: Snapshot }
+  | { type: "notStored"; form: string; problem: Problem };
+
+const without = (
+  refused: Readonly<Record<string, Problem>>,
+  form: string,
+): Readonly<Record<string, Problem>> =>
+  Object.fromEntries(Object.entries(refused).filter(([each]) => each !== form));
+
 export function savedViewsMachine(ports: SavedViewPorts) {
-  const send = (write: Write): Promise<Views> => {
+  const send = (write: Write): Promise<Snapshot> => {
     switch (write.kind) {
       case "save":
         return ports.save(write.view);
@@ -145,94 +188,127 @@ export function savedViewsMachine(ports: SavedViewPorts) {
         return ports.remove(write.id);
     }
   };
-  const written = (
-    self: {
-      send: (
-        event: { type: "stored"; form: string; views: Views } | { type: "notStored"; form: string },
-      ) => void;
-    },
-    form: string,
-    write: Write,
-  ) => {
+  const written = (self: { send: (event: WriteNews) => void }, form: string, write: Write) => {
     send(write).then(
-      (views) => {
-        self.send({ type: "stored", form, views });
+      (snapshot) => {
+        self.send({ type: "stored", form, snapshot });
       },
-      () => {
-        self.send({ type: "notStored", form });
+      (error: unknown) => {
+        self.send({ type: "notStored", form, problem: problemOf(error) });
       },
     );
   };
 
-  /** Imports the views this browser kept, once: the browser forgets them only after the server kept them. */
+  /**
+   * Imports the views this browser kept, in bounded calls. The server keeps a receipt per old view, so an import that
+   * stops goes on at the next page without making any view twice. The browser forgets its views only once every one is
+   * in the server, and only when its value is still the one imported.
+   */
   const importLegacy = createCallbackLogic<{ type: "never" }>(({ sendBack }) => {
-    const views = (() => {
-      const stored = ports.legacy.read();
-      return stored === null || stored === undefined ? undefined : legacyViews(stored);
-    })();
-    const forget = () => {
-      ports.legacy.clear();
-      sendBack({ type: "imported" });
+    const done = (report: ImportReport) => {
+      sendBack({ type: "imported", report });
     };
-    if (views === undefined) {
-      sendBack({ type: "imported" });
-    } else if (views.length === 0) {
-      forget();
-    } else {
-      ports.import(views).then(forget, () => {
-        sendBack({ type: "imported" });
-      });
-    }
+    const run = async (): Promise<ImportReport> => {
+      const plan = planLegacy(ports.legacy.read());
+      if (plan.kind !== "import") {
+        return NO_REPORT;
+      }
+      let raw = plan.raw;
+      let source = plan.source;
+      if (source === undefined) {
+        source = ports.newSource();
+        raw = withSource(raw, source);
+        ports.legacy.write(raw);
+      }
+      const full = new Set<string>();
+      for (const batch of batches(plan.rows)) {
+        const answer = await ports.import(source, batch);
+        for (const old of answer.full) {
+          full.add(old);
+        }
+        sendBack({ type: "snapshot", snapshot: answer });
+      }
+      const kept = [
+        ...plan.kept,
+        ...plan.rows
+          .filter((row) => full.has(row.old))
+          .map((row) => ({ name: row.name, reason: "the server holds the most views, 100" })),
+      ];
+      if (kept.length === 0) {
+        ports.legacy.removeIf(raw);
+      }
+      return { shortened: plan.shortened, kept, interrupted: false };
+    };
+    run().then(done, () => {
+      done({ ...NO_REPORT, interrupted: true });
+    });
   });
 
+  /**
+   * Opens the live channel, then reads the list. The views come from both; the revision decides which is newer. A list
+   * that fails, or a channel that ends, ends this actor: the machine reconnects and reads the list again.
+   */
   const follow = createCallbackLogic<{ type: "never" }>(({ sendBack }) => {
     const abort = new AbortController();
-    const forwardEveryChange = async () => {
+    const run = async () => {
       const changes = await ports.changes(abort.signal);
       sendBack({ type: "opened" });
-      const listed = ports.list(abort.signal).then((views) => {
-        sendBack({ type: "loaded", views });
+      const listed = ports.list(abort.signal).then((snapshot) => {
+        sendBack({ type: "listed", snapshot });
       });
-      for await (const views of changes) {
-        sendBack({ type: "loaded", views });
-      }
-      await listed;
+      const forwarded = (async () => {
+        for await (const snapshot of changes) {
+          sendBack({ type: "snapshot", snapshot });
+        }
+      })();
+      await Promise.all([listed, forwarded]);
     };
     const lost = () => {
       if (!abort.signal.aborted) {
+        abort.abort();
         sendBack({ type: "lost" });
       }
     };
-    void forwardEveryChange().then(lost, lost);
+    void run().then(lost, lost);
     return () => {
       abort.abort();
     };
   });
 
-  const writeEvents = {
-    save: types<{ form: string; name: string; scope: Scope; filter: Filter }>(),
-    rename: types<{ form: string; id: string; name: string }>(),
-    remove: types<{ form: string; id: string }>(),
-  };
+  /** Keeps the snapshot when it is newer than the views shown. */
+  const newer = (context: { readonly revision: number }, snapshot: Snapshot) =>
+    snapshot.revision > context.revision
+      ? { revision: snapshot.revision, views: snapshot.items.map(viewOf) }
+      : {};
 
   return setup({
     schemas: {
       context: types<{
         readonly views: readonly SavedView[];
+        /** The revision of the views shown; -1 before the first snapshot. */
+        readonly revision: number;
         readonly pending: readonly string[];
-        readonly refused: readonly string[];
+        readonly refused: Readonly<Record<string, Problem>>;
         readonly attempts: number;
-        /** While the live channel is open it brings every change, the page's own included, in order. */
-        readonly live: boolean;
+        readonly report: ImportReport;
       }>(),
       events: {
-        ...writeEvents,
-        imported: types<void>(),
+        save: types<{
+          form: string;
+          name: string;
+          scope: Scope;
+          filter: Filter;
+          replace: string | undefined;
+        }>(),
+        rename: types<{ form: string; id: string; name: string }>(),
+        remove: types<{ form: string; id: string }>(),
+        imported: types<{ report: ImportReport }>(),
         opened: types<void>(),
-        loaded: types<{ views: Views }>(),
+        listed: types<{ snapshot: Snapshot }>(),
+        snapshot: types<{ snapshot: Snapshot }>(),
         lost: types<void>(),
-        stored: types<{ form: string; views: Views }>(),
-        notStored: types<{ form: string }>(),
+        stored: types<{ form: string; snapshot: Snapshot }>(),
+        notStored: types<{ form: string; problem: Problem }>(),
         forget: types<{ form: string }>(),
       },
     },
@@ -242,7 +318,14 @@ export function savedViewsMachine(ports: SavedViewPorts) {
     },
   }).createMachine({
     id: "savedViews",
-    context: { views: [], pending: [], refused: [], attempts: 0, live: false },
+    context: {
+      views: [],
+      revision: -1,
+      pending: [],
+      refused: {},
+      attempts: 0,
+      report: NO_REPORT,
+    },
     initial: "importing",
     on: {
       save: ({ context, event, self }, enq) => {
@@ -250,10 +333,11 @@ export function savedViewsMachine(ports: SavedViewPorts) {
         if (name.length === 0) {
           return undefined;
         }
-        const view: NewView = {
+        const view = {
           name,
           ...(event.scope.kind === "project" ? { project: event.scope.key } : {}),
           filter: storedFilter(event.filter),
+          ...(event.replace === undefined ? {} : { replace: event.replace }),
         };
         enq(written, self, event.form, { kind: "save", view });
         return { context: sent(context, event.form) };
@@ -272,35 +356,49 @@ export function savedViewsMachine(ports: SavedViewPorts) {
       stored: ({ context, event }) => ({
         context: {
           pending: context.pending.filter((form) => form !== event.form),
-          refused: context.refused.filter((form) => form !== event.form),
-          ...(context.live ? {} : { views: event.views.map(viewOf) }),
+          refused: without(context.refused, event.form),
+          ...newer(context, event.snapshot),
         },
       }),
       notStored: ({ context, event }) => ({
         context: {
           pending: context.pending.filter((form) => form !== event.form),
-          refused: context.refused.includes(event.form)
-            ? context.refused
-            : [...context.refused, event.form],
+          refused: { ...context.refused, [event.form]: event.problem },
         },
       }),
       forget: ({ context, event }) => ({
-        context: { refused: context.refused.filter((form) => form !== event.form) },
+        context: { refused: without(context.refused, event.form) },
       }),
-      loaded: ({ event }) => ({ context: { views: event.views.map(viewOf) } }),
+      snapshot: ({ context, event }) => ({ context: newer(context, event.snapshot) }),
     },
     states: {
       importing: {
         invoke: { src: "importLegacy" },
-        on: { imported: { target: "following" } },
+        on: {
+          imported: ({ event }) => ({ target: "following", context: { report: event.report } }),
+        },
       },
       following: {
         invoke: { src: "follow" },
+        initial: "connecting",
+        states: {
+          connecting: {
+            on: { opened: { target: "listing" } },
+          },
+          listing: {
+            on: {
+              listed: ({ context, event }) => ({
+                target: "live",
+                context: { attempts: 0, ...newer(context, event.snapshot) },
+              }),
+            },
+          },
+          live: {},
+        },
         on: {
-          opened: () => ({ context: { attempts: 0, live: true } }),
           lost: ({ context }) => ({
             target: "reconnecting",
-            context: { attempts: context.attempts + 1, live: false },
+            context: { attempts: context.attempts + 1 },
           }),
         },
       },
@@ -311,14 +409,15 @@ export function savedViewsMachine(ports: SavedViewPorts) {
   });
 }
 
-function sent(
-  context: { readonly pending: readonly string[]; readonly refused: readonly string[] },
-  form: string,
-) {
+function sent(context: Writes, form: string): Writes {
   return {
     pending: context.pending.includes(form) ? context.pending : [...context.pending, form],
-    refused: context.refused.filter((each) => each !== form),
+    refused: without(context.refused, form),
   };
 }
+
+/** True once the page shows the server's list: the live channel is open and its first list is in. */
+export const viewsReady = (snapshot: { matches: (state: { following: "live" }) => boolean }) =>
+  snapshot.matches({ following: "live" });
 
 export type SavedViewsMachine = ReturnType<typeof savedViewsMachine>;

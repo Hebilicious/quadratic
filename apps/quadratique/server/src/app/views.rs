@@ -19,6 +19,8 @@ use crate::store::{AsOf, Commit, Kind, SavedViewRecord, Tx, View};
 
 const IMPORTED: &str = "imported";
 const MOST_NAME_CHARACTERS: usize = 100;
+/// The catalog's maximum of saved views: every write and every `view.changed` carries all of them.
+const MOST_VIEWS: usize = 100;
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub(super) struct SavedView {
@@ -42,22 +44,29 @@ impl From<SavedViewRecord> for SavedView {
 
 #[derive(Serialize)]
 pub(super) struct SavedViews {
+    revision: i64,
     items: Vec<SavedView>,
 }
 
 fn saved_views(view: &View<'_>) -> Result<SavedViews, Refused> {
+    let list = view.saved_views()?;
     Ok(SavedViews {
-        items: view
-            .saved_views()?
-            .into_iter()
-            .map(SavedView::from)
-            .collect(),
+        revision: list.revision,
+        items: list.views.into_iter().map(SavedView::from).collect(),
     })
 }
 
 /// Names are the same when they are once trimmed and lowercased.
 fn same_name(left: &str, right: &str) -> bool {
     left.trim().to_lowercase() == right.trim().to_lowercase()
+}
+
+fn name_taken(view: &SavedViewRecord) -> Refused {
+    Refused::Failure(json!({ "_tag": "NameTaken", "view": view.id }))
+}
+
+fn too_many_views() -> Refused {
+    Refused::Failure(json!({ "_tag": "TooManyViews", "most": MOST_VIEWS }))
 }
 
 pub(super) fn list() -> CapabilityDefinition<Context, NoInput, SavedViews, Value> {
@@ -70,6 +79,7 @@ pub(super) struct SaveInput {
     name: String,
     project: Option<String>,
     filter: String,
+    replace: Option<String>,
 }
 
 pub(super) fn save() -> CapabilityDefinition<Context, SaveInput, SavedViews, Value> {
@@ -78,20 +88,38 @@ pub(super) fn save() -> CapabilityDefinition<Context, SaveInput, SavedViews, Val
     })
 }
 
+/// Creates a view, or replaces the filters of the view the page named: never a view the page did
+/// not mean, since both are checked against the list in this transaction.
 fn save_view(tx: &mut Tx<'_>, input: SaveInput) -> Result<(), Refused> {
-    let mut views = tx.saved_views()?;
+    let mut views = tx.saved_views()?.views;
     let name = input.name.trim().to_owned();
-    match views.iter_mut().find(|view| same_name(&view.name, &name)) {
-        Some(named) => {
-            named.project = input.project;
-            named.filter = input.filter;
+    match input.replace {
+        Some(id) => {
+            let Some(replaced) = views.iter_mut().find(|view| view.id == id) else {
+                return Err(Refused::not_found(Kind::View, &id));
+            };
+            if !same_name(&replaced.name, &name) {
+                return Err(Refused::Failure(
+                    json!({ "_tag": "Renamed", "view": id, "name": replaced.name }),
+                ));
+            }
+            replaced.project = input.project;
+            replaced.filter = input.filter;
         }
-        None => views.push(SavedViewRecord {
-            id: tx.new_saved_view_id()?,
-            name,
-            project: input.project,
-            filter: input.filter,
-        }),
+        None => {
+            if let Some(named) = views.iter().find(|view| same_name(&view.name, &name)) {
+                return Err(name_taken(named));
+            }
+            if views.len() >= MOST_VIEWS {
+                return Err(too_many_views());
+            }
+            views.push(SavedViewRecord {
+                id: tx.new_saved_view_id()?,
+                name,
+                project: input.project,
+                filter: input.filter,
+            });
+        }
     }
     Ok(tx.replace_saved_views(&views)?)
 }
@@ -114,20 +142,20 @@ pub(super) fn rename() -> CapabilityDefinition<Context, RenameInput, SavedViews,
 }
 
 fn rename_view(tx: &mut Tx<'_>, input: RenameInput) -> Result<(), Refused> {
-    let mut views = tx.saved_views()?;
+    let mut views = tx.saved_views()?.views;
+    if !views.iter().any(|view| view.id == input.view) {
+        return Err(Refused::not_found(Kind::View, &input.view));
+    }
     let name = input.name.trim();
     if let Some(taken) = views
         .iter()
         .find(|view| view.id != input.view && same_name(&view.name, name))
     {
-        return Err(Refused::Failure(
-            json!({ "_tag": "NameTaken", "view": taken.id }),
-        ));
+        return Err(name_taken(taken));
     }
-    let Some(renamed) = views.iter_mut().find(|view| view.id == input.view) else {
-        return Err(Refused::not_found(Kind::View, &input.view));
-    };
-    name.clone_into(&mut renamed.name);
+    for view in views.iter_mut().filter(|view| view.id == input.view) {
+        name.clone_into(&mut view.name);
+    }
     Ok(tx.replace_saved_views(&views)?)
 }
 
@@ -140,7 +168,7 @@ pub(super) fn delete() -> CapabilityDefinition<Context, DeleteInput, SavedViews,
     capability::<DeleteInput, SavedViews>("view.delete").run(|input, call| async move {
         finish(
             written(call.context(), "view.delete", move |tx| {
-                let mut views = tx.saved_views()?;
+                let mut views = tx.saved_views()?.views;
                 views.retain(|view| view.id != input.view);
                 Ok(tx.replace_saved_views(&views)?)
             })
@@ -151,52 +179,80 @@ pub(super) fn delete() -> CapabilityDefinition<Context, DeleteInput, SavedViews,
 
 #[derive(Deserialize)]
 pub(super) struct ImportInput {
-    views: Vec<SaveInput>,
+    source: String,
+    views: Vec<OldView>,
 }
 
-pub(super) fn import() -> CapabilityDefinition<Context, ImportInput, SavedViews, Value> {
-    capability::<ImportInput, SavedViews>("views.import").run(|input, call| async move {
-        finish(
-            written(call.context(), "views.import", move |tx| {
-                import_views(tx, input)
+#[derive(Deserialize)]
+pub(super) struct OldView {
+    old: String,
+    name: String,
+    project: Option<String>,
+    filter: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct Imported {
+    revision: i64,
+    items: Vec<SavedView>,
+    full: Vec<String>,
+}
+
+pub(super) fn import() -> CapabilityDefinition<Context, ImportInput, Imported, Value> {
+    capability::<ImportInput, Imported>("views.import").run(|input, call| async move {
+        let imported = call
+            .context()
+            .write("views.import", None, move |tx| {
+                let full = import_views(tx, input)?;
+                let SavedViews { revision, items } = saved_views(tx)?;
+                Ok(Imported {
+                    revision,
+                    items,
+                    full,
+                })
             })
-            .await,
-        )
+            .await
+            .map(|written| written.value);
+        finish(imported)
     })
 }
 
-fn import_views(tx: &mut Tx<'_>, input: ImportInput) -> Result<(), Refused> {
-    let mut views = tx.saved_views()?;
-    for imported in input.views {
-        let name = imported.name.trim();
-        let already_there = views.iter().any(|view| {
-            view.project == imported.project
-                && view.filter == imported.filter
-                && import_names(name, views.len())
-                    .any(|candidate| same_name(&view.name, &candidate))
-        });
-        if already_there {
+/// Imports each old view that has no receipt of an earlier import, and answers the old ids that
+/// did not fit under the maximum.
+fn import_views(tx: &mut Tx<'_>, input: ImportInput) -> Result<Vec<String>, Refused> {
+    let mut views = tx.saved_views()?.views;
+    let mut full = Vec::new();
+    for old in input.views {
+        if tx.saved_view_import(&input.source, &old.old)?.is_some() {
             continue;
         }
+        if views.len() >= MOST_VIEWS {
+            full.push(old.old);
+            continue;
+        }
+        let name = old.name.trim();
         let taken = |candidate: &str| views.iter().any(|view| same_name(&view.name, candidate));
         let Some(name) = import_names(name, views.len()).find(|candidate| !taken(candidate)) else {
             return Err(Refused::defect(
                 "every name an imported view may take is taken",
             ));
         };
+        let id = tx.new_saved_view_id()?;
+        tx.record_saved_view_import(&input.source, &old.old, &id)?;
         views.push(SavedViewRecord {
-            id: tx.new_saved_view_id()?,
+            id,
             name,
-            project: imported.project,
-            filter: imported.filter,
+            project: old.project,
+            filter: old.filter,
         });
     }
-    Ok(tx.replace_saved_views(&views)?)
+    tx.replace_saved_views(&views)?;
+    Ok(full)
 }
 
 /// The names an imported view may take, in order: `name`, `<name> (imported)`, `<name> (imported
-/// 2)` and so on, cut to fit the longest name. With `saved` views, one of the first `saved + 1` is
-/// free; a view imported earlier has one of them, so a repeated import finds it.
+/// 2)` and so on, cut on a character boundary to fit the longest name. With `saved` views, one of
+/// the first `saved + 1` is free.
 fn import_names(name: &str, saved: usize) -> impl Iterator<Item = String> + '_ {
     std::iter::once(name.to_owned()).chain((1..=saved).map(move |number| {
         let suffix = match number {
@@ -236,6 +292,7 @@ pub(super) struct ChangedPayload {
     at: String,
     author: Actor,
     operation: String,
+    revision: i64,
     items: Vec<SavedView>,
 }
 
@@ -289,6 +346,7 @@ async fn occurrence(
         commit: commit.hash.clone(),
         at: commit.at.clone(),
         operation: commit.operation,
+        revision: views.revision,
         items: views.items,
     };
     Ok(Emitted::new(payload)

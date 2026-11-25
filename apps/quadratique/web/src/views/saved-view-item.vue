@@ -1,9 +1,15 @@
 <script setup lang="ts" vapor>
 import { computed, nextTick, ref, watchEffect } from "vue";
 
-import { nameProblem, writeState, type SavedView } from "../board/saved-views.machine.ts";
+import {
+  nameProblem,
+  refusalOf,
+  writeState,
+  type SavedView,
+} from "../board/saved-views.machine.ts";
 import { useSnapshot } from "../use-actor.ts";
 import { useWorkspace } from "../workspace.ts";
+import { viewProblemText } from "./present.ts";
 
 const props = defineProps<{
   readonly view: SavedView;
@@ -86,10 +92,10 @@ function remove(): void {
 
 const notSaved = computed(() => {
   const current = editing.value;
-  return (
-    (current.kind === "renaming" && renameState.value === "refused") ||
-    (current.kind === "deleting" && removeState.value === "refused")
-  );
+  if (current.kind === "renaming") {
+    return refusalOf(savedSnapshot.value, renameForm.value);
+  }
+  return current.kind === "deleting" ? refusalOf(savedSnapshot.value, removeForm.value) : undefined;
 });
 
 function typed(event: Event): void {
@@ -145,8 +151,8 @@ function cancel(event: KeyboardEvent): void {
         />
       </label>
       <p v-if="problem !== undefined" class="field-error" role="alert">{{ problem }}</p>
-      <p v-else-if="notSaved" class="field-error" role="alert">
-        The view could not be renamed: the server did not keep the new name. Try again.
+      <p v-else-if="notSaved !== undefined" class="field-error" role="alert">
+        {{ viewProblemText(notSaved, "renamed") }}
       </p>
       <div class="saved-view-actions">
         <button
@@ -160,8 +166,8 @@ function cancel(event: KeyboardEvent): void {
     </form>
     <div v-else class="saved-view-form" role="group" :aria-label="`Delete the view ${view.name}`">
       <p class="nav-note">Delete the view {{ view.name }}? Its issues stay as they are.</p>
-      <p v-if="notSaved" class="field-error" role="alert">
-        The view could not be deleted: the server did not answer. Try again.
+      <p v-if="notSaved !== undefined" class="field-error" role="alert">
+        {{ viewProblemText(notSaved, "deleted") }}
       </p>
       <div class="saved-view-actions">
         <button

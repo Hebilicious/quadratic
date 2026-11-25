@@ -18,7 +18,7 @@ pub use engine::{canonical_folder, refuse_git_work_tree};
 pub use error::{Kind, StoreError};
 pub use git::{ClaimStart, ClaimedWork, GitLanding, GitWatch, GitWork};
 pub use recorded::{Recorded, SCHEMA_VERSION, read_recorded};
-pub use saved_views::SavedViewRecord;
+pub use saved_views::{SavedViewList, SavedViewRecord};
 pub use tx::Tx;
 pub use types::{
     AsOf, Author, Call, Change, Claim, ClaimFilter, Commit, Direction, FieldChange, FindingLink,

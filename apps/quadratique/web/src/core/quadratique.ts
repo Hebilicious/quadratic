@@ -12,6 +12,7 @@ import {
   HistoryPageSchema,
   ProjectListSchema,
   SavedViewsSchema,
+  ViewsImportedSchema,
   type Assignee,
   type HistoryPage,
   type Issue,
@@ -21,7 +22,7 @@ import {
   type Relation,
   type RelationKind,
 } from "../board/model.ts";
-import type { SavedViewPorts, Views } from "../board/saved-views.machine.ts";
+import type { SavedViewPorts, Snapshot } from "../board/saved-views.machine.ts";
 import { app, sharedCatalog } from "./catalog.ts";
 import { serverLayer } from "./server.ts";
 
@@ -97,7 +98,7 @@ export interface Quadratique {
     cursor: string | undefined,
     signal: AbortSignal,
   ) => Promise<AsyncIterable<Change>>;
-  readonly views: Omit<SavedViewPorts, "legacy">;
+  readonly views: Omit<SavedViewPorts, "legacy" | "newSource">;
   readonly dispose: () => Promise<void>;
 }
 
@@ -130,6 +131,7 @@ const decodeSummary = Schema.decodeUnknownSync(IssueSummaryAnswerSchema);
 const decodeRelations = Schema.decodeUnknownSync(IssueRelationsSchema);
 const decodeHistory = Schema.decodeUnknownSync(HistoryPageSchema);
 const decodeViews = Schema.decodeUnknownSync(SavedViewsSchema);
+const decodeImported = Schema.decodeUnknownSync(ViewsImportedSchema);
 
 export async function openQuadratique(options: {
   readonly origin: string;
@@ -242,27 +244,29 @@ export async function openQuadratique(options: {
     return (async function* () {
       for await (const occurrence of occurrences) {
         // BOUNDARY: the payload of the server, already checked by the core against the catalog.
-        yield decodeViews(occurrence.data).items;
+        yield decodeViews(occurrence.data);
       }
     })();
   };
 
   /** Saved views belong to the human, not to a moment: they are written while the page shows the past too. */
-  const viewCall = async (id: string, input: object, signal?: AbortSignal): Promise<Views> => {
+  const viewCall = async (id: string, input: object, signal?: AbortSignal): Promise<unknown> => {
     const result = await handle(id).invokeExternal(input, signal === undefined ? {} : { signal });
     if (!result.ok) {
       throw new Refused(id, result.error);
     }
     // BOUNDARY: the answer of the server, already checked by the core against the catalog.
-    return decodeViews(result.value).items;
+    return result.value;
   };
 
+  const snapshot = (value: unknown): Snapshot => decodeViews(value);
   const views: Quadratique["views"] = {
-    list: async (signal) => await viewCall("view.list", {}, signal),
-    save: async (view) => await viewCall("view.save", view),
-    rename: async (id, name) => await viewCall("view.rename", { view: id, name }),
-    remove: async (id) => await viewCall("view.delete", { view: id }),
-    import: async (imported) => await viewCall("views.import", { views: imported }),
+    list: async (signal) => snapshot(await viewCall("view.list", {}, signal)),
+    save: async (view) => snapshot(await viewCall("view.save", view)),
+    rename: async (id, name) => snapshot(await viewCall("view.rename", { view: id, name })),
+    remove: async (id) => snapshot(await viewCall("view.delete", { view: id })),
+    import: async (source, imported) =>
+      decodeImported(await viewCall("views.import", { source, views: imported })),
     changes: viewChanges,
   };
 
