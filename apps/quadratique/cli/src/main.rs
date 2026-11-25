@@ -6,6 +6,7 @@ mod init;
 mod mcp;
 mod route;
 mod shipped;
+mod upgrade;
 
 use std::sync::Arc;
 

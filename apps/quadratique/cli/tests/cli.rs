@@ -35,5 +35,7 @@ mod traces;
 mod ui;
 #[path = "cli/unreachable.rs"]
 mod unreachable;
+#[path = "cli/upgrade.rs"]
+mod upgrade;
 #[path = "cli/watch.rs"]
 mod watch;

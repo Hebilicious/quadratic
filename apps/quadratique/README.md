@@ -108,7 +108,7 @@ tar -xzf "$archive.tar.gz"
 sh "$archive/install.sh" "$archive/bin/quadratique"
 ```
 
-To upgrade, do the same with the new release. To uninstall, run `sh "$archive/uninstall.sh"`
+To upgrade, run `quadratique upgrade` (see "Upgrade"). To uninstall, run `sh "$archive/uninstall.sh"`
 from any release: it removes the binary and the unit that the unit names.
 
 ### With mise
@@ -130,7 +130,8 @@ sh "$(mise where github:Hebilicious/quadratique)/install.sh" "$(mise which quadr
 ```
 
 The install copies the binary to `~/.local/bin/quadratique`, so the service keeps the version you
-installed until you run `install.sh` again after `mise upgrade`. By default mise does not install a
+installed until you run `install.sh` again after `mise upgrade`. `quadratique upgrade` prints that
+mise command instead of replacing the binary. By default mise does not install a
 release published less than 24 hours ago (its setting `minimum_release_age`); name the version to
 install it earlier (`mise use -g github:Hebilicious/quadratique@0.1.0`).
 
@@ -421,23 +422,59 @@ app can import findings; the MCP server of agents does not offer it.
 
 ## Upgrade
 
-Run the same command from the root of an up-to-date checkout:
-
 ```sh
-moon run quadratique-install:install
+quadratique upgrade
 ```
 
-The install replaces the binary and restarts the service. The new server first stops any other
-Quadratique server of the home, even one of an older build. While it does, no `quadratique`
-command can start another, so the new server is the one that answers.
+`upgrade` asks GitHub for the latest release and compares it with the running binary. When the
+release is newer, it downloads the archive for this platform and its SHA-256 file over HTTPS,
+checks the archive against that file, runs the new binary with `--version`, and renames it over the
+running binary. Then it restarts the systemd user service that `install.sh` set up, or, without
+one, stops the server, so that the next command starts the new build. Its answer says the version
+it left (`from`) and the one it reached (`to`). Run again, it answers `"upToDate": true` and
+changes nothing. `quadratique upgrade --check` says the installed and the latest version and
+changes nothing.
+
+When the download fails, the checksum does not match, the release has no archive for this
+platform, the archive holds an entry outside its folder, or the new binary does not run, the
+running binary stays in place and the error ends with "Nothing was changed.". `upgrade` never
+installs an older release than the running one unless you pass `--allow-downgrade`, and does not
+run as root.
+
+When mise or cargo installed the binary, `upgrade` replaces nothing. It answers that manager's
+command in `run` (`mise upgrade --bump github:Hebilicious/quadratique`, or
+`cargo install quadratique`) and, after it, `quadratique upgrade --skills`. It tells them from
+where the binary is: inside a mise `installs/<tool>/` folder that has the `.mise.backend.toml` of
+mise, or in a `bin/` folder beside a `.crates2.json` that lists the `quadratique` package of cargo.
+
+The checksum protects against a damaged or cut download. It does not protect against a release
+replaced at its source: the archive and its checksum come from the same place.
 
 The first start of a new binary upgrades the store to that binary's schema, one commit per
 step. A binary refuses a store newer than the schema it knows. Back up the store (see "Backups") before you upgrade, so that you can go back to the older binary
 with the store as it was.
 
-The install does not change the repositories that use Quadratique. Run `quadratique init` in each
-of them to bring its skill to the new build's text (see "Update a repository's skill after an
-upgrade").
+### The repositories after an upgrade
+
+`upgrade` writes into no repository, because a repository may take changes only through a branch
+and a pull request. Its answer has a `skills` report, which the new binary makes: it reads the main
+checkout of each project's repository on this machine, as `quadratique init --dry-run` does, and
+lists
+
+- `current`: the repositories whose skill is this build's;
+- `older`: each repository whose skill holds an earlier build's text, with the command to run
+  there (`cd <repository> && quadratique init`, see "Update a repository's skill after an
+  upgrade");
+- `kept`: each repository with a skill file that a person changed, with a warning that names the
+  file and the command that prints this build's text of it (`quadratique init --print SKILL.md`),
+  for an agent to merge with the custom instructions;
+- `noSkill`: the repositories whose main checkout holds no skill. When a worktree or another
+  branch holds it, run `quadratique init --dry-run` there.
+
+`quadratique upgrade --skills` makes the same report, without the network.
+
+To build from an up-to-date checkout instead, run `moon run quadratique-install:install` from its
+root: it replaces the binary and restarts the service in the same way.
 
 ## Uninstall
 

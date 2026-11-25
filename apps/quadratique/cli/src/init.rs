@@ -386,7 +386,7 @@ fn indexed_as(root: &Path, path: &str, digests: &[&str]) -> bool {
         .is_ok_and(|output| output.status.success() && shipped::is_listed(&output.stdout, digests))
 }
 
-fn shell_word(path: &str) -> String {
+pub fn shell_word(path: &str) -> String {
     if path
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
@@ -1094,6 +1094,63 @@ fn add_agents_line(plan: &Plan, progress: &mut Progress) -> Result<String, StepF
         AGENTS_PATH,
         progress,
     ))
+}
+
+/// A repository's setup as `init --dry-run` classifies it, read without writing: whether `init`
+/// would bring it to this build's text, and the warnings for the files it would keep.
+pub struct Setup {
+    /// It holds a skill file of Quadratique, or of Quadratic before the rename.
+    pub present: bool,
+    /// `init` would write or remove a file: one holds an earlier build's text, or one of the
+    /// skill files is missing beside another.
+    pub older: bool,
+    pub warnings: Vec<String>,
+}
+
+pub fn setup_of(root: &Path) -> Result<Setup, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", root.display()))?;
+    let mut setup = Setup {
+        present: false,
+        older: false,
+        warnings: Vec::new(),
+    };
+    let mut missing = false;
+    for file in &SKILL_FILES {
+        match File::plan(&root, file.path, &skill_content(file))?.content {
+            Content::Absent => missing = true,
+            Content::Same(_) => setup.present = true,
+            Content::Earlier(_) => {
+                setup.present = true;
+                setup.older = true;
+            }
+            Content::Different(_) => {
+                setup.present = true;
+                setup.warnings.push(kept_warning(file.path));
+            }
+        }
+    }
+    for (path, digests) in shipped::QUADRATIC_SKILL_FILES {
+        match Retired::plan(&root, path, digests).map_err(|error| format!("{path}: {error}"))? {
+            Retired::Remove { .. } => {
+                setup.present = true;
+                setup.older = true;
+            }
+            Retired::Keep { shown, what } => {
+                setup.present = true;
+                setup.warnings.push(Retired::kept_warning(shown, &what));
+            }
+            Retired::Absent { .. } => {}
+        }
+    }
+    if setup.present && missing {
+        setup.older = true;
+    }
+    if let Content::Earlier(_) = File::plan(&root, AGENTS_PATH, &agents_content)?.content {
+        setup.older = true;
+    }
+    Ok(setup)
 }
 
 #[cfg(test)]
