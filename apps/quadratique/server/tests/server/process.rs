@@ -249,10 +249,49 @@ async fn a_server_dropped_without_a_shutdown_frees_its_home_and_its_port() {
     );
 }
 
+/// A child process holds a copy of every descriptor of its parent from its `fork` to its `exec`, and other tests of this
+/// binary start children all the time. Closing the server's descriptor of its listener then leaves the socket listening
+/// until the child's `exec`, which also lets go of the home's lock, and in an order of the kernel's choosing. The test
+/// holds the copy itself, through `pidfd_getfd`, for as long as it needs.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_server_stops_listening_while_another_copy_of_its_listener_is_open() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let running = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts");
+    let address = running.address();
+    let listener = kernel_sockets::listening_on(address).expect("the server's listening socket");
+    let copy = kernel_sockets::copy_of_own(listener);
+
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .open(paths.lock())
+        .expect("the home's lock file");
+
+    drop(running);
+
+    within(
+        "the home's lock",
+        tokio::task::spawn_blocking(move || lock.lock().expect("the lock, once free")),
+    )
+    .await
+    .expect("the waiting thread");
+    assert!(
+        !kernel_sockets::exists(listener),
+        "the dropped server still listens on {address} through another copy of its descriptor"
+    );
+    drop(copy);
+}
+
 /// The IPv4 TCP sockets of this network namespace, as `/proc/net/tcp` lists them.
 #[cfg(target_os = "linux")]
 mod kernel_sockets {
     use std::net::SocketAddr;
+    use std::os::fd::OwnedFd;
+
+    use rustix::process::{PidfdFlags, PidfdGetfdFlags, getpid, pidfd_getfd, pidfd_open};
 
     const LISTEN: &str = "0A";
 
@@ -298,6 +337,24 @@ mod kernel_sockets {
 
     pub fn exists(inode: u64) -> bool {
         rows().iter().any(|row| row.inode == inode)
+    }
+
+    /// A new descriptor of this process's socket `inode`, as a child between its `fork` and its `exec` holds one.
+    pub fn copy_of_own(inode: u64) -> OwnedFd {
+        let socket = format!("socket:[{inode}]");
+        let descriptor = std::fs::read_dir("/proc/self/fd")
+            .expect("this process's descriptors")
+            .flatten()
+            .find(|entry| {
+                std::fs::read_link(entry.path())
+                    .is_ok_and(|target| target.as_os_str() == socket.as_str())
+            })
+            .and_then(|entry| entry.file_name().to_str()?.parse().ok())
+            .expect("a descriptor of the socket in this process");
+        let this_process =
+            pidfd_open(getpid(), PidfdFlags::empty()).expect("a pidfd of this process");
+        pidfd_getfd(this_process, descriptor, PidfdGetfdFlags::empty())
+            .expect("a copy of the descriptor")
     }
 }
 
