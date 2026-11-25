@@ -78,15 +78,15 @@ impl Caller {
     }
 
     /// The holder is the same actor name in the same worktree, or, from any worktree, an actor
-    /// with the holder's harness and session: the match of `issue.list --claim mine`.
+    /// with the holder's harness and session, both agents: the match of `issue.list --claim mine`.
     pub fn holds(&self, claim: &Claim) -> bool {
         self.holder_key() == claim.holder_key() || self.in_session_of(&claim.holder)
     }
 
     fn in_session_of(&self, holder: &Actor) -> bool {
         self.actor
-            .harness_session()
-            .is_some_and(|session| holder.harness_session() == Some(session))
+            .agent_session()
+            .is_some_and(|session| holder.agent_session() == Some(session))
     }
 
     pub fn is_human(&self) -> bool {

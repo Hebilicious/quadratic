@@ -257,6 +257,30 @@ async fn a_session_id_without_a_harness_is_no_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn claim_mine_of_a_human_is_its_own_name_in_this_worktree_whatever_session_it_declares() {
+    let board = start().await;
+    board.project("DEM").await;
+    let theirs = board.issue("Theirs").await;
+    board
+        .ok(
+            &in_session(board.agent("audit"), "claude-code", "session-1"),
+            "issue.claim",
+            json!({ "issue": theirs }),
+        )
+        .await;
+
+    let mine = board
+        .ok(
+            &in_session(board.human(), "claude-code", "session-1"),
+            "issue.list",
+            json!({ "claim": "mine" }),
+        )
+        .await;
+
+    assert_eq!(mine["items"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_claim_gives_the_issues_description_and_acceptance() {
     let board = start().await;
     board.project("DEM").await;

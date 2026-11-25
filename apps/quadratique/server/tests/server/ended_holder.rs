@@ -358,6 +358,39 @@ async fn the_holders_name_without_a_session_in_another_worktree_gets_held() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_human_with_the_holders_harness_and_session_is_the_human_not_the_holder() {
+    let board = start().await;
+    let holder = in_session(board.agent("audit"), "session-1");
+    let issue = left_in_progress(&board, &holder).await;
+    let mut human = board.human();
+    let actor = human.actor.as_mut().expect("an actor");
+    actor["harness"] = json!("claude-code");
+    actor["session"] = json!("session-1");
+
+    let closed = board
+        .ok(
+            &human,
+            "issue.close",
+            json!({ "issue": issue, "evidence": "checked by the human" }),
+        )
+        .await;
+
+    assert_eq!(closed["issue"]["status"], "merged", "{closed}");
+    assert!(closed["issue"].get("claim").is_none(), "{closed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blank_session_in_another_worktree_gets_held() {
+    let board = start().await;
+    let holder = in_session(board.agent("audit"), " ");
+    let issue = left_in_progress(&board, &holder).await;
+
+    let answers = every_move(&board, &in_session(board.agent("lead"), " "), &issue).await;
+
+    assert_held_for_every_move(&answers, &holder);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_holders_session_in_another_worktree_gets_human_only_on_an_issue_assigned_to_the_human()
 {
     let board = start().await;

@@ -52,11 +52,21 @@ still alive: a claim records no liveness.
      merges gets `BaseNotMerged`, because the human's close moves the issue to the `merge`
      status.
 
-   The holder is the same actor name in the same worktree, or, from any worktree, an actor
-   with the holder's `harness` and `session`, both given: the match that
-   `issue.list --claim mine` uses (`Actor::harness_session`). A caller with no session, with
-   a session but no harness, with another session, or with the holder's session id under
-   another harness is not the holder outside the claim's worktree. `HumanOnly` and
+   The holder is the same actor name in the same worktree, or, from any worktree, an agent
+   with the holder's `harness` and `session`, both given and not blank, when the holder is an
+   agent too: the match that `issue.list --claim mine` uses (`Actor::agent_session`). A caller
+   with no session, with a blank one, with a session but no harness, with another session, or
+   with the holder's session id under another harness is not the holder outside the claim's
+   worktree. A blank `harness` or `session` (empty after trimming) counts as absent wherever
+   an actor comes in (`Actor::detect`, the actor header); other values compare exactly.
+
+   A human is never the holder's session, whatever fields it declares. The first version of
+   this rule ignored the actor's kind, to stay the exact match of `--claim mine` at the time.
+   A review showed what that opened: a human that declared an agent's harness and session took
+   the agent's `close` path, moved the issue to review with the claim kept, and skipped the
+   `BaseNotMerged` check of the human's close. The match is now between agents, in the rule
+   and in `--claim mine`: a human's `--claim mine` lists the claims of its own name in this
+   worktree, as it did for a human without declared session fields. `HumanOnly` and
    `BaseNotMerged` keep their place in the order above for the holder's session too.
 
    A move by the holder's session from another worktree changes nothing in the claim: it

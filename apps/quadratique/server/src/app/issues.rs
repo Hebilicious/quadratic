@@ -130,7 +130,7 @@ async fn list_issues(context: &Context, input: ListInput) -> Result<IssuePage, R
         key: caller.holder_key().as_str().to_owned(),
         session: caller
             .actor
-            .harness_session()
+            .agent_session()
             .map(|(harness, session)| HolderSession {
                 harness: harness.to_owned(),
                 session: session.to_owned(),
