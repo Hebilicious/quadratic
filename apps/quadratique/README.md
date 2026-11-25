@@ -566,9 +566,10 @@ Then it stops the server of this home if that server ran the replaced file, so t
 command starts the new build. It finds the server on the home's socket, as every command does,
 never over TCP, and it signals no process:
 
-1. Before the rename, it reads the server's identity on the socket (see "The control protocol"):
-   its `generation` and its `executable`, the device, inode and path of the file it was started
-   from.
+1. Before the rename, it takes `start.lock` and reads the server's identity on the socket (see
+   "The control protocol"): its `generation` and its `executable`, the device, inode and path of
+   the file it was started from. It holds `start.lock` through the rename and the stop, so no
+   server starts in between unseen.
 2. After the rename, a server whose `executable` is the replaced file is asked to stop that
    generation (`POST /server/stop`). If the answer is `409`, another generation serves now, and
    nothing is stopped: the answer says so. A server that runs another file (another install) is
@@ -576,11 +577,14 @@ never over TCP, and it signals no process:
 3. A server started with `quadratique serve` is stopped too, and the answer (in `warnings`) says to
    restart it the way you started it: your supervisor or your terminal.
 4. When `quadratique.service` runs that server (its main process is the generation's process), the
-   upgrade stops the generation the same way, waits until systemd sees the process leave, and
-   starts the unit again: the unit runs `serve --take-over` of the new binary. It then waits until
-   the server on the socket is the unit's main process and says it runs the installed file. If the
-   unit changed on disk since systemd loaded it, or `systemctl` fails, nothing is stopped and the
-   answer says what to run.
+   upgrade stops the generation the same way, gives up `start.lock` (the unit's own start takes
+   it), waits until systemd sees the process leave, and starts the unit again: the unit runs
+   `serve --take-over` of the new binary. It then waits until the server on the socket is the
+   unit's main process and says it runs the installed file. The stop, the unit's start and that
+   wait share one deadline of 60 seconds. A command that starts a server between the stop and the
+   unit's start gets a server that the unit's take-over then replaces: the answer names each such
+   generation that the upgrade saw. If the unit changed on disk since systemd loaded it, or
+   `systemctl` fails, nothing is stopped and the answer says what to run.
 5. A server from before the socket (release 0.1) is never stopped by `upgrade`. The answer says
    what serves and what stops it: `quadratique server stop` when that command has its proof (see
    "A server of release 0.1"), otherwise the steps to stop it yourself. A file that `upgrade` replaced never counts as
@@ -593,11 +597,19 @@ nothing. When an earlier run was stopped between the rename and the stop, the ne
 it: the lock file holds the device and inode of the file that run replaced, and the next run stops
 the server that says, on the socket, that it was started from the binary's path and from that file
 while the path now holds another. It reads that record only when no other account can change the
-install folder. `quadratique upgrade --check` says the installed and the latest version and changes
-nothing.
+install folder. If an earlier run stopped the service's server and was stopped before it started
+the unit again, no server runs and the unit is inactive. The next run then starts nothing, because
+you may have stopped the unit on purpose. When the unit is loaded, not active, and starts this
+binary, the answer says so and gives the command: `systemctl --user start quadratique.service`.
+`quadratique upgrade --check` says the installed and the latest version and changes nothing: it
+creates neither a missing data folder nor the install lock.
 
-Any failure before the rename leaves the running binary in place and the error ends with "Nothing
-was changed.": a download that fails, an archive that does not match its digest, a release without
+A refusal before the upgrade takes its lock ends with "Nothing was changed.". From the lock on, the
+lock file exists and leftovers of an earlier run may be removed, so a refusal ends with "The
+installed binary was not changed.".
+
+Any failure before the rename leaves the running binary in place, and the error says so (see above
+for its two endings): a download that fails, an archive that does not match its digest, a release without
 an archive for this platform, an archive with an entry outside its folder, a new binary that does
 not run or says another version. `upgrade` never installs an older release than the running one
 unless you pass `--allow-downgrade`, and does not run as root.
