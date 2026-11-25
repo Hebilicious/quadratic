@@ -622,3 +622,57 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
         "the runtime file outlived its server"
     );
 }
+
+/// A client that sends part of a request, its head or its body, is cut off within the socket's request limit, and the
+/// server stops nothing and goes on answering.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_control_request_is_cut_off_within_the_limit_and_stops_nothing() {
+    use futures::FutureExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let home = crate::support::private_home();
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let running = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts");
+    let prepared = prepared_at(home.path());
+    let generation = server::identity_over_socket(&prepared)
+        .await
+        .expect("the server answers")
+        .generation
+        .expect("a generation");
+    let partial_head = "POST /server/stop HTTP/1.1\r\nHost: quadratique.invalid\r\n".to_owned();
+    let partial_body = format!(
+        "POST /server/stop HTTP/1.1\r\nHost: quadratique.invalid\r\nContent-Length: 200\r\n\r\n{{\"generation\":\"{generation}\""
+    );
+
+    for partial in [partial_head, partial_body] {
+        let mut stream = tokio::net::UnixStream::connect(prepared.socket())
+            .await
+            .expect("a connection");
+        stream
+            .write_all(partial.as_bytes())
+            .await
+            .expect("part of a request");
+        let started = std::time::Instant::now();
+        let mut rest = Vec::new();
+        within(
+            "the end of a partial request's connection",
+            stream.read_to_end(&mut rest),
+        )
+        .await
+        .expect("the server closes the connection");
+        assert!(
+            started.elapsed() < serve::SOCKET_REQUEST_LIMIT * 2,
+            "{partial:?}: closed after {:?}",
+            started.elapsed()
+        );
+    }
+
+    assert!(running.stop_requested().now_or_never().is_none());
+    let still = server::identity_over_socket(&prepared)
+        .await
+        .expect("the socket still answers");
+    assert_eq!(still.generation, Some(generation));
+    running.shutdown().await;
+}

@@ -334,10 +334,10 @@ async fn read_bounded(mut body: RequestBody, limit: usize) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     while let Some(frame) = body.frame().await {
         if let Ok(data) = frame.ok()?.into_data() {
-            bytes.extend_from_slice(&data);
-            if bytes.len() > limit {
+            if data.len() > limit - bytes.len() {
                 return None;
             }
+            bytes.extend_from_slice(&data);
         }
     }
     Some(bytes)

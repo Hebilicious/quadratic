@@ -40,6 +40,12 @@ pub struct Connection {
 
 pub type Admit = Arc<dyn Fn(Connection) -> bool + Send + Sync>;
 
+/// How long one connection to the Unix socket may last, from the first byte of its request to the end of its answer.
+/// The socket serves only the control requests, which a client sends whole and with `Connection: close`; a client that
+/// sends part of a request, or keeps the connection idle, is cut off here. QUA-53, which moves the commands and their
+/// event streams to the socket, gives those routes their own bounds.
+pub const SOCKET_REQUEST_LIMIT: Duration = Duration::from_secs(5);
+
 /// The listeners of one server, as its stop request sees them: [`Gate::close`] takes every registered listener out of
 /// the listening state at once, and [`Gate::request_stop`] tells the server to shut down.
 #[derive(Clone, Default)]
@@ -372,8 +378,9 @@ pub fn serve_socket(
                 gate: gate.clone(),
             };
             tokio::spawn(async move {
+                let answering = answer(stream, routes, Some(when_answered.after.clone()));
                 tokio::select! {
-                    () = answer(stream, routes, Some(when_answered.after.clone())) => {}
+                    _ = tokio::time::timeout(SOCKET_REQUEST_LIMIT, answering) => {}
                     () = stopped.cancelled() => {}
                 }
                 drop(when_answered);
