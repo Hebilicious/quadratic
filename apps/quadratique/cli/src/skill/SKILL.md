@@ -1,0 +1,1 @@
+../../../skill/quadratique/SKILL.md

@@ -134,6 +134,20 @@ installed until you run `install.sh` again after `mise upgrade`. By default mise
 release published less than 24 hours ago (its setting `minimum_release_age`); name the version to
 install it earlier (`mise use -g github:Hebilicious/quadratique@0.1.0`).
 
+### With cargo
+
+From the first publication to crates.io on (not before), cargo builds and installs the binary,
+with the web app inside it:
+
+```sh
+cargo install quadratique
+```
+
+This builds from source, so it needs Rust, a C compiler and the zlib development files (the store
+engine is compiled from C; on Debian or Ubuntu: `sudo apt install build-essential zlib1g-dev`).
+Then run the `install.sh` of the release of the same version, with `~/.cargo/bin/quadratique`, to
+set up the service.
+
 ## Set up a repository
 
 From inside a git repository:
@@ -427,6 +441,7 @@ Run every task through moon, for example `moon run quadratique-server:test`:
 | `quadratique-web:typecheck`, `quadratique-web:lint`, `quadratique-web:format-check` | Static checks of the web app |
 | `quadratique-install:test` | Installs on a temporary home with no systemd, and checks the service's cases and the uninstall |
 | `quadratique-eval:test` | The evaluation harness's own tests |
+| `quadratique-server:package-test` | The packaging preflight's cases, and how `build.rs` embeds the web app in the repository and in a packaged crate (see "The crates") |
 
 ### Continuous integration
 
@@ -538,6 +553,34 @@ failure never leaves a public release without its archives.
      list exactly the four files, each with `sha256:` and the hash that `sha256sum` prints for it.
   6. Only then: `gh release edit v<version> --draft=false`.
 
+### The crates
+
+The command line and the server are the crates `quadratique` and `quadratique-server`. Both
+inherit `publish = false` from `[workspace.package]` until the first publication. Each crate
+carries the files it reads at build time: the catalog JSON, the skill and the license are links in
+the crate to the files of the repository, and `cargo package` copies their content.
+
+The web app is embedded in every binary that people install, and in none that you build in the
+repository without asking:
+
+- A packaged crate, as crates.io serves it, embeds the copy of the built web app it carries in
+  `server/web-dist` (ignored by git), which `moon run quadratique-server:stage-web` writes. Its
+  `build.rs` fails, and says to stage it, when that copy is missing, and ignores
+  `QUADRATIQUE_WEB_DIST`. It tells a package from the repository by `server/moon.yml`, which the
+  package leaves out.
+- In the repository, the release build (`install/build.sh`) asks for it with the feature
+  `embedded-web`, which embeds the folder that `QUADRATIQUE_WEB_DIST` names, else `web/dist`.
+- Any other build in the repository embeds nothing and reads `web/dist` at each request, as "See a
+  change in the web app" describes.
+
+`moon run quadratique-server:preflight` first builds the web app and stages it (it depends on
+`stage-web`), then fails when a crate lacks the staged web app (or it is not the current build of
+`web/dist`), the catalog JSON, a skill file or the licence. It also catches a checkout without
+symbolic links, where git writes each link as a plain file holding a path.
+`moon run quadratique-server:package-test` checks the preflight's cases and each case of
+`build.rs`, on a copy of the crates that it stages and packages itself: it leaves this checkout's
+`server/web-dist` as it was.
+
 ## Releasing
 
 What a maintainer does for a release, and what happens on its own:
@@ -550,6 +593,21 @@ What a maintainer does for a release, and what happens on its own:
 3. After the first release (0.1.0) only: delete the line `"release-as": "0.1.0",` from
    `release-please-config.json`, in a `chore:` pull request. While it is there, every later
    release pull request proposes 0.1.0 again.
+
+To publish a release to crates.io (by hand: no workflow does it yet):
+
+1. Once, before the first publication: set `publish = true` in `[workspace.package]` of
+   `apps/quadratique/Cargo.toml`, in a `build:` pull request, merged before the release pull
+   request so that the tagged commit can be published. Do not delete the key: both crates
+   inherit it (`publish.workspace = true`).
+2. Check out the tag: `git checkout refs/tags/v<version>`, then `pnpm install --frozen-lockfile`.
+3. Stage the web app and check both crates: `moon run quadratique-server:preflight` (it stages
+   the web app first, then checks).
+4. From `apps/quadratique`, with a crates.io API token in `CARGO_REGISTRY_TOKEN`:
+   `cargo publish --workspace --allow-dirty`. Cargo publishes `quadratique-server` first, then
+   `quadratique`, which depends on it. (`--allow-dirty`: the staged `web-dist` is not in git.)
+5. After the first publication, trusted publishing on crates.io (with
+   `rust-lang/crates-io-auth-action` in a workflow) can replace the token.
 
 ## License
 
