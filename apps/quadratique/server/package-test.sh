@@ -137,7 +137,8 @@ QUADRATIQUE_WEB_DIST=$other expect_embedding "$other" "a build in the repository
 workspace=$scratch/workspace
 mkdir -p "$workspace/apps/quadratique"
 cp "$repository/LICENSE" "$workspace/LICENSE"
-for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md server cli catalog skill; do
+# The targets of the crates' links first: Git's bash on Windows copies a link's target, which must exist by then.
+for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md catalog skill server cli; do
   cp -a "$root/$path" "$workspace/apps/quadratique/$path"
 done
 rm -rf "$workspace/apps/quadratique/server/web-dist"
