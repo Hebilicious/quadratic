@@ -9,7 +9,11 @@ pub mod domain;
 pub mod git;
 #[cfg(target_os = "linux")]
 pub mod peer;
+#[cfg(target_os = "macos")]
+pub mod peer_macos;
 pub mod serve;
 pub mod server;
+#[cfg(any(test, target_os = "macos"))]
+pub mod socket_fdinfo;
 pub mod store;
 pub mod web;

@@ -1,7 +1,7 @@
 //! Where the server cannot tell which account connects to its local listener, it refuses to start instead of serving
-//! every account of the machine: macOS until QUA-33, Windows until QUA-34. On Linux, tests/server/process.rs shows
-//! the check itself.
-#![cfg(not(target_os = "linux"))]
+//! every account of the machine: Windows until QUA-34. On Linux and macOS, tests/server/process.rs shows the check
+//! itself, and tests/callers_macos.rs the lookup on macOS.
+#![cfg(not(any(target_os = "linux", target_os = "macos")))]
 
 use quadratique_server::server::{self, Paths, ServerError};
 

@@ -27,6 +27,7 @@ http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+libproc = "=0.15.0"
 libz-sys = { version = "1", default-features = false, features = ["static"] }
 jsonschema = { version = "0.58", default-features = false }
 jiff = "0.2"

@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +10,9 @@ use quadratique_server::git::watcher::{LookFailed, Watcher};
 use quadratique_server::store::{
     AsOf, Author, Call, NewIssue, Project, Store, Workflow, WorkflowStatus,
 };
+#[cfg(target_os = "linux")]
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
+#[cfg(target_os = "linux")]
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 use serde_json::json;
 use tempfile::TempDir;
@@ -224,6 +227,8 @@ async fn confirmations_asked_during_a_look_are_answered_by_the_next_look_each_wi
     within("the watcher's stop", watcher.stop()).await;
 }
 
+/// Watches git through Linux's pidfd and /proc.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stop_during_a_look_ends_it_without_waiting_for_git() {
     let board = Board::open();
@@ -255,17 +260,21 @@ async fn a_stop_during_a_look_ends_it_without_waiting_for_git() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn pidfd(pid: &str) -> Option<OwnedFd> {
     let pid = Pid::from_raw(pid.parse().ok()?)?;
     pidfd_open(pid, PidfdFlags::empty()).ok()
 }
 
+#[cfg(target_os = "linux")]
 fn ended_within(process: &OwnedFd, limit: Duration) -> bool {
     let limit = Timespec::try_from(limit).expect("a limit poll can take");
     let mut fds = [PollFd::new(process, PollFlags::IN)];
     poll(&mut fds, Some(&limit)).expect("the process can be waited on") == 1
 }
 
+/// Watches git through Linux's pidfd and /proc.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_of_a_started_issue_asks_for_a_look_and_answers_while_git_still_stalls() {
     let board = Board::open();
@@ -312,6 +321,7 @@ async fn a_read_of_a_started_issue_asks_for_a_look_and_answers_while_git_still_s
     within("the watcher's stop", watcher.stop()).await;
 }
 
+#[cfg(target_os = "linux")]
 fn git_running_on(repository: &str) -> Vec<String> {
     let wanted = format!("--git-dir={repository}");
     std::fs::read_dir("/proc")

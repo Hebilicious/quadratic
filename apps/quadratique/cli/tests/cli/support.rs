@@ -5,9 +5,12 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::Errno;
-use rustix::process::{Pid, PidfdFlags, Signal, kill_process, pidfd_open};
+use rustix::process::{Pid, Signal, kill_process};
+#[cfg(target_os = "linux")]
+use rustix::process::{PidfdFlags, pidfd_open};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -28,6 +31,7 @@ pub fn kill(pid: u32) {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn await_exit(pid: u32) {
     let pid = i32::try_from(pid)
         .ok()
@@ -50,6 +54,37 @@ pub fn await_exit(pid: u32) {
     );
 }
 
+/// macOS has no pidfd: the process has ended once `ps` no longer lists it, or lists it as a zombie.
+#[cfg(target_os = "macos")]
+pub fn await_exit(pid: u32) {
+    await_until(&format!("the exit of process {pid}"), || {
+        let state = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps runs");
+        let state = String::from_utf8_lossy(&state.stdout);
+        state.trim().is_empty() || state.trim_start().starts_with('Z')
+    });
+}
+
+/// The processes of this account with their command line, the environment of each as words after it (`ps -E`).
+#[cfg(target_os = "macos")]
+fn process_table() -> Vec<(u32, Vec<String>)> {
+    let table = Command::new("ps")
+        .args(["-E", "-ww", "-x", "-o", "pid=", "-o", "command="])
+        .output()
+        .expect("ps runs");
+    String::from_utf8_lossy(&table.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace().map(str::to_owned);
+            let pid = words.next()?.parse().ok()?;
+            Some((pid, words.collect()))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn proc_entries() -> Vec<u32> {
     std::fs::read_dir("/proc")
         .expect("/proc lists the processes")
@@ -58,6 +93,7 @@ fn proc_entries() -> Vec<u32> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn words(bytes: &[u8]) -> Vec<&[u8]> {
     bytes.split(|byte| *byte == 0).collect()
 }
@@ -103,6 +139,32 @@ impl Home {
         Quadratique { command }
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn processes(&self) -> Vec<u32> {
+        let marker = format!("HOME={}", self.path().display());
+        process_table()
+            .into_iter()
+            .filter(|(_, words)| words.contains(&marker))
+            .map(|(pid, _)| pid)
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn servers(&self) -> Vec<u32> {
+        let marker = format!("HOME={}", self.path().display());
+        process_table()
+            .into_iter()
+            .filter(|(_, words)| {
+                words.contains(&marker)
+                    && words.len() >= 2
+                    && words[0].ends_with("quadratique")
+                    && words[1] == "serve"
+            })
+            .map(|(pid, _)| pid)
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn processes(&self) -> Vec<u32> {
         let marker = format!("HOME={}", self.path().display());
         proc_entries()
@@ -114,6 +176,7 @@ impl Home {
             .collect()
     }
 
+    #[cfg(target_os = "linux")]
     pub fn servers(&self) -> Vec<u32> {
         self.processes()
             .into_iter()

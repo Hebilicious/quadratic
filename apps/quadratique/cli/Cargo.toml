@@ -36,6 +36,9 @@ tempfile.workspace = true
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { workspace = true, features = ["event"] }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 # Lets `cargo binstall` download the archive of a GitHub release instead of building.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/quadratique-{ version }-{ target }{ archive-suffix }"

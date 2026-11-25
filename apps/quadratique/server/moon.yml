@@ -33,6 +33,12 @@ tasks:
     inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
     options:
       cache: false
+  test-callers-macos:
+    description: "macOS only. Needs `sudo -n -u nobody` to work without a password: runs the ignored tests of tests/callers_macos.rs, in which a process of the account nobody holds a connection that the caller check must refuse and whose socket the kernel must hide, and the measure of what the check costs. Not part of `test`."
+    command: "cargo test -p quadratique-server --test callers_macos -- --ignored --nocapture --test-threads=1"
+    inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
+    options:
+      cache: false
   stage-web:
     description: "Copy the built web app into web-dist, which cargo package takes into the crate, so that a build of the published crate embeds it."
     script: |

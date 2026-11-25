@@ -342,9 +342,30 @@ mod callers {
     }
 }
 
-/// Only Linux tells this server which account owns the other end of a loopback connection. Elsewhere it refuses to
-/// start rather than answer another account of the machine: docs/decisions/0003-the-caller-check-on-macos-and-windows.md.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod callers {
+    use super::ServerError;
+    use crate::peer_macos;
+    use crate::serve::Admit;
+
+    pub fn own_account() -> Result<u32, ServerError> {
+        Ok(peer_macos::own_account())
+    }
+
+    pub fn owner_only(own_uid: u32) -> Admit {
+        peer_macos::owner_only(own_uid)
+    }
+
+    pub fn check_own_connection(own_uid: &u32) -> Result<(), ServerError> {
+        peer_macos::check_own_connection(*own_uid)
+            .map_err(|error| ServerError::CallersUnknown(error.to_string()))
+    }
+}
+
+/// Only Linux and macOS tell this server which account owns the other end of a loopback connection. Elsewhere it
+/// refuses to start rather than answer another account of the machine:
+/// docs/decisions/0003-the-caller-check-on-macos-and-windows.md.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod callers {
     use std::sync::Arc;
 
@@ -356,7 +377,7 @@ mod callers {
 
     pub fn own_account() -> Result<NoAccount, ServerError> {
         Err(ServerError::CallersUnknown(format!(
-            "Quadratique cannot yet tell which account connects to its local listener on {}, so it does not serve there: another account of this machine could read and change your issues. Linux is supported; macOS is QUA-33, Windows QUA-34",
+            "Quadratique cannot yet tell which account connects to its local listener on {}, so it does not serve there: another account of this machine could read and change your issues. Linux and macOS are supported; Windows is QUA-34",
             std::env::consts::OS
         )))
     }

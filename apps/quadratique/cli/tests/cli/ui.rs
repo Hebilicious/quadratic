@@ -10,6 +10,13 @@ use tokio::net::TcpStream;
 
 use crate::support::{HANG_GUARD, Home, outside};
 
+/// The program that `quadratique ui --open` runs, which the tests replace with a script.
+const OPENER: &str = if cfg!(target_os = "macos") {
+    "open"
+} else {
+    "xdg-open"
+};
+
 fn within<F: Future>(what: &str, future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -60,7 +67,7 @@ fn ok(client: &HttpClient, id: &str, input: Value) -> Value {
 }
 
 fn fake_opener(directory: &Path, opened: &Path) {
-    let script = directory.join("xdg-open");
+    let script = directory.join(OPENER);
     let opened = opened.display();
     std::fs::write(
         &script,
@@ -179,7 +186,7 @@ fn ui_open_reports_an_opener_that_fails_with_its_exit_code() {
     let elsewhere = outside();
     let bin = elsewhere.path().join("bin");
     std::fs::create_dir(&bin).expect("a folder for the fake opener");
-    let script = bin.join("xdg-open");
+    let script = bin.join(OPENER);
     std::fs::write(&script, "#!/bin/sh\nexit 3\n").expect("a failing opener");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
         .expect("an executable opener");
