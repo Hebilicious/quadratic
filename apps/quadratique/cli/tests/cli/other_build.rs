@@ -24,6 +24,8 @@ const HOLDS_THE_LOCK_UNTIL_TOLD: &str =
     "exec 9>>\"$0\"; flock -x 9; echo ready; read -r _; exec 9>&-; echo released; read -r _";
 /// The same, ignoring SIGTERM: its children close descriptor 9, so only the shell holds the lock.
 const HOLDS_THE_LOCK_IGNORING_SIGTERM: &str = "exec 9>>\"$0\"; flock -x 9; trap 'touch \"$1\"' TERM; echo ready; while :; do tail -f /dev/null 9>&- & wait $!; done";
+/// No descriptor of the lock at all: a process that only answers for the server, once it runs (it says so).
+const ANSWERS_ONLY: &str = "echo ready; read -r _";
 /// A descriptor of the lock file of its own, and no lock: the test holds the lock.
 const OPENS_THE_LOCK: &str = "exec 9<\"$0\"; echo ready; read -r _";
 
@@ -35,23 +37,23 @@ struct LegacyServer {
 }
 
 impl LegacyServer {
-    /// Runs `program` as the old server's process: with a `script`, as a shell on the home's lock file (with `extra`
-    /// arguments); otherwise as is, while the test holds the lock. With `test_holds_the_lock`, the test takes the lock
-    /// first. Then starts its TCP listener and writes its runtime file.
+    /// Runs `program`, a shell, as the old server's process: `script` on the home's lock file (with `extra` arguments),
+    /// and waits until it says it is ready. With `test_holds_the_lock`, the test takes the lock first. Then starts its
+    /// TCP listener and writes its runtime file.
     fn start(
         home: &Home,
         program: &Path,
-        script: Option<&str>,
+        script: &str,
         test_holds_the_lock: bool,
         extra: &[&Path],
     ) -> LegacyServer {
         let lock_path = home.path().join("server.lock");
         let lock = test_holds_the_lock.then(|| hold(&lock_path));
-        let mut command = Command::new(program);
-        if let Some(script) = script {
-            command.arg("-c").arg(script).arg(&lock_path).args(extra);
-        }
-        let mut process = command
+        let mut process = Command::new(program)
+            .arg("-c")
+            .arg(script)
+            .arg(&lock_path)
+            .args(extra)
             .env_clear()
             .env("HOME", home.path())
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -61,13 +63,11 @@ impl LegacyServer {
             .spawn()
             .expect("the old server's process starts");
         let mut output = BufReader::new(process.stdout.take().expect("its output"));
-        if script.is_some() {
-            let mut said = String::new();
-            output
-                .read_line(&mut said)
-                .expect("the old server says it is ready");
-            assert_eq!(said.trim(), "ready");
-        }
+        let mut said = String::new();
+        output
+            .read_line(&mut said)
+            .expect("the old server says it is ready");
+        assert_eq!(said.trim(), "ready");
         let pid = process.id();
         let database = home
             .path()
@@ -204,7 +204,7 @@ fn message(refused: &Run) -> String {
 fn a_server_from_before_the_socket_is_found_used_by_no_command_and_stopped_with_its_proof() {
     let home = Home::new();
     let installed = install(&home, "/bin/sh");
-    let old = LegacyServer::start(&home, &installed, Some(HOLDS_THE_LOCK), false, &[]);
+    let old = LegacyServer::start(&home, &installed, HOLDS_THE_LOCK, false, &[]);
     let pid = old.pid();
 
     let status = run(&home, &["server", "status"]).ok();
@@ -257,7 +257,7 @@ struct Unproven {
     /// The old server's program: the installed file, or another one.
     runs_installed: bool,
     program: &'static str,
-    script: Option<&'static str>,
+    script: &'static str,
     test_holds_the_lock: bool,
     why: &'static str,
 }
@@ -278,10 +278,10 @@ fn a_server_from_before_the_socket_without_proof_gets_no_signal_and_the_person_r
     let cases = [
         Unproven {
             case: "answers on the port and holds no lock",
-            installed: Installed::CopyOf("/bin/cat"),
+            installed: Installed::CopyOf("/bin/sh"),
             runs_installed: true,
             program: "",
-            script: None,
+            script: ANSWERS_ONLY,
             test_holds_the_lock: true,
             why: "does not hold this home's lock",
         },
@@ -290,7 +290,7 @@ fn a_server_from_before_the_socket_without_proof_gets_no_signal_and_the_person_r
             installed: Installed::CopyOf("/bin/sh"),
             runs_installed: true,
             program: "",
-            script: Some(OPENS_THE_LOCK),
+            script: OPENS_THE_LOCK,
             test_holds_the_lock: true,
             why: "does not hold this home's lock",
         },
@@ -299,7 +299,7 @@ fn a_server_from_before_the_socket_without_proof_gets_no_signal_and_the_person_r
             installed: Installed::Nothing,
             runs_installed: false,
             program: "/bin/sh",
-            script: Some(HOLDS_THE_LOCK),
+            script: HOLDS_THE_LOCK,
             test_holds_the_lock: false,
             why: "the installed binary does not count",
         },
@@ -308,7 +308,7 @@ fn a_server_from_before_the_socket_without_proof_gets_no_signal_and_the_person_r
             installed: Installed::LinkTo("/bin/sh"),
             runs_installed: false,
             program: "/bin/sh",
-            script: Some(HOLDS_THE_LOCK),
+            script: HOLDS_THE_LOCK,
             test_holds_the_lock: false,
             why: "is not a regular file",
         },
@@ -317,7 +317,7 @@ fn a_server_from_before_the_socket_without_proof_gets_no_signal_and_the_person_r
             installed: Installed::CopyBehindALinkedFolder("/bin/sh"),
             runs_installed: true,
             program: "",
-            script: Some(HOLDS_THE_LOCK),
+            script: HOLDS_THE_LOCK,
             test_holds_the_lock: false,
             why: "is reached through a link",
         },
@@ -438,13 +438,7 @@ fn a_runtime_file_that_names_no_valid_process_gives_no_process_command() {
 fn a_process_that_let_go_of_the_lock_while_the_stop_waited_for_start_lock_gets_no_signal() {
     let home = Home::new();
     let installed = install(&home, "/bin/sh");
-    let mut old = LegacyServer::start(
-        &home,
-        &installed,
-        Some(HOLDS_THE_LOCK_UNTIL_TOLD),
-        false,
-        &[],
-    );
+    let mut old = LegacyServer::start(&home, &installed, HOLDS_THE_LOCK_UNTIL_TOLD, false, &[]);
     let start_lock = hold(&home.path().join("start.lock"));
     let mut watch = Watch::of(&home);
 
@@ -480,7 +474,7 @@ fn a_command_during_a_take_over_is_refused_and_one_after_it_uses_the_new_server(
     let old = LegacyServer::start(
         &home,
         &installed,
-        Some(HOLDS_THE_LOCK_IGNORING_SIGTERM),
+        HOLDS_THE_LOCK_IGNORING_SIGTERM,
         false,
         &[&signaled],
     );
@@ -536,7 +530,7 @@ fn a_stop_that_meant_a_generation_signals_no_server_from_before_the_socket() {
 
     let home = Home::new();
     let installed = install(&home, "/bin/sh");
-    let mut old = LegacyServer::start(&home, &installed, Some(HOLDS_THE_LOCK), false, &[]);
+    let mut old = LegacyServer::start(&home, &installed, HOLDS_THE_LOCK, false, &[]);
     let socket = home.path().join("server.sock");
     let listener = UnixListener::bind(&socket).expect("a socket");
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).expect("mode 0600");
