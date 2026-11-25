@@ -15,6 +15,7 @@ mod links;
 mod model;
 mod projects;
 mod tokens;
+mod views;
 
 use std::sync::Arc;
 
@@ -195,7 +196,13 @@ pub fn application() -> Result<Arc<Application<Context>>, Vec<String>> {
         .capability(tokens::create())
         .capability(tokens::list())
         .capability(tokens::revoke())
+        .capability(views::list())
+        .capability(views::save())
+        .capability(views::rename())
+        .capability(views::delete())
+        .capability(views::import())
         .event(changed::event())
+        .event(views::event())
         .build()
 }
 

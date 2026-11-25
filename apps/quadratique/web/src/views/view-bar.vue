@@ -1,11 +1,12 @@
 <script setup lang="ts" vapor>
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watchEffect } from "vue";
 
 import type { Category, WorkflowStatus } from "../board/model.ts";
 import {
   nameProblem,
-  refusedWrite,
+  refusalOf,
   savedViewOf,
+  writeState,
   type SavedView,
 } from "../board/saved-views.machine.ts";
 import {
@@ -21,7 +22,7 @@ import { GROUPING_NAMES } from "../keys/menu.ts";
 import { firstCharacters, LIMITS, withQuery, type Route } from "../route.ts";
 import { useSnapshot } from "../use-actor.ts";
 import { useWorkspace } from "../workspace.ts";
-import { priorityLabel } from "./present.ts";
+import { priorityLabel, viewProblemText } from "./present.ts";
 
 const props = defineProps<{
   readonly route: Extract<Route, { view: "list" | "board" }>;
@@ -152,9 +153,20 @@ const replacing = computed(() => {
     : undefined;
 });
 
-const notSaved = computed(
-  () => saving.value.kind === "naming" && refusedWrite(savedSnapshot.value, SAVE_FORM),
+const saveState = computed(() => writeState(savedSnapshot.value, SAVE_FORM));
+const notSaved = computed(() =>
+  saving.value.kind === "naming" ? refusalOf(savedSnapshot.value, SAVE_FORM) : undefined,
 );
+const submitted = ref(false);
+watchEffect(() => {
+  if (!submitted.value || saveState.value === "pending") {
+    return;
+  }
+  submitted.value = false;
+  if (saveState.value === "idle") {
+    void closeSaving();
+  }
+});
 
 async function startSaving(): Promise<void> {
   saving.value = {
@@ -176,10 +188,9 @@ function save(event: Event): void {
     name: saving.value.name,
     scope: props.route.scope,
     filter: filter.value,
+    replace: replacing.value?.id,
   });
-  if (!refusedWrite(savedViews.getSnapshot(), SAVE_FORM)) {
-    void closeSaving();
-  }
+  submitted.value = true;
 }
 
 async function closeSaving(): Promise<void> {
@@ -343,10 +354,14 @@ function cancelSaving(event: KeyboardEvent): void {
           @input="nameInput"
         />
       </label>
-      <p v-if="notSaved" class="field-error" role="alert">
-        The view could not be saved: this browser does not keep site data here.
+      <p v-if="notSaved !== undefined" class="field-error" role="alert">
+        {{ viewProblemText(notSaved, "saved") }}
       </p>
-      <button class="primary-button" type="submit" :disabled="saveProblem !== undefined">
+      <button
+        class="primary-button"
+        type="submit"
+        :disabled="saveProblem !== undefined || saveState === 'pending'"
+      >
         {{ replacing === undefined ? "Save" : `Replace ${replacing.name}` }}
       </button>
       <button class="ghost-button" type="button" @click="closeSaving">Cancel</button>

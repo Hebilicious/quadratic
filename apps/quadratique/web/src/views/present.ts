@@ -9,6 +9,7 @@ import {
   type Relation,
   type RelationKind,
 } from "../board/model.ts";
+import type { Problem } from "../board/saved-views.machine.ts";
 import { PastMoment, Refused } from "../core/quadratique.ts";
 
 const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"] as const;
@@ -452,4 +453,20 @@ export function textParts(text: string, meter: Meter = { steps: 0 }): readonly T
 
 export function shortCommit(commit: string): string {
   return commit.slice(0, 12);
+}
+
+/** Why a saved view was not saved, renamed or deleted, and what the human can do. */
+export function viewProblemText(problem: Problem, done: "saved" | "renamed" | "deleted"): string {
+  switch (problem) {
+    case "NameTaken":
+      return `The view could not be ${done}: another page has saved a view with this name. Save again to replace it, or choose another name.`;
+    case "Renamed":
+      return `The view could not be ${done}: another page has renamed that view. Save again to make a new view, or choose another name.`;
+    case "NotFound":
+      return `The view could not be ${done}: another page has deleted it.`;
+    case "TooManyViews":
+      return `The view could not be ${done}: 100 views is the most. Delete a view first.`;
+    case "unavailable":
+      return `The view could not be ${done}: the server did not answer. Try again.`;
+  }
 }

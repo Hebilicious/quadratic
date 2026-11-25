@@ -855,6 +855,22 @@
       ],
       "type": "string"
     },
+    "NameTaken": {
+      "properties": {
+        "_tag": {
+          "const": "NameTaken",
+          "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/SavedViewId"
+        }
+      },
+      "required": [
+        "_tag",
+        "view"
+      ],
+      "type": "object"
+    },
     "NoProject": {
       "properties": {
         "_tag": {
@@ -893,7 +909,8 @@
         "kind": {
           "enum": [
             "issue",
-            "project"
+            "project",
+            "view"
           ],
           "type": "string"
         }
@@ -1058,6 +1075,73 @@
       "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
       "type": "string"
     },
+    "SavedView": {
+      "description": "A named filter of the web app. It belongs to the data folder, and so to the human.",
+      "properties": {
+        "filter": {
+          "$ref": "#/$defs/SavedViewFilter"
+        },
+        "id": {
+          "$ref": "#/$defs/SavedViewId"
+        },
+        "name": {
+          "$ref": "#/$defs/SavedViewName"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectKey",
+          "description": "The project whose issues the view shows. Absent: every project."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "filter"
+      ],
+      "type": "object"
+    },
+    "SavedViewFilter": {
+      "description": "The filters of a saved view, as the query of the web app's address that shows them, such as `label=web&ready=true`. Empty for no filter. The server keeps it as it is given. The limit is about twice the longest query the web app's filters can make (4,265 characters: every list at its cap and a search of 200 four-byte characters, percent-encoded).",
+      "maxLength": 8192,
+      "type": "string"
+    },
+    "SavedViewId": {
+      "description": "A saved view, such as `v3`. The server gives the id; it never changes and no other view of the data folder ever has it.",
+      "maxLength": 20,
+      "pattern": "^v[1-9][0-9]{0,8}$",
+      "type": "string"
+    },
+    "SavedViewName": {
+      "description": "The name of a saved view. The server keeps it without its leading and trailing spaces. Two views never have names that are the same once trimmed and lowercased.",
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "SavedViewRevision": {
+      "description": "The revision of the list of saved views. It grows with each database commit that changes the list and never goes back: of two lists, the one with the higher revision is newer.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "SavedViews": {
+      "description": "Every saved view, in the order the web app shows them, under `items`, at most 100: every write and every `view.changed` carries the whole list, and 100 views of the longest filter stay under 1 MiB.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SavedView"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/SavedViewRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "items"
+      ],
+      "type": "object"
+    },
     "Source": {
       "additionalProperties": false,
       "description": "The tool's finding that this issue is; absent for an issue made by hand. The tool's next complete run finishes the issue when the finding is gone.",
@@ -1089,6 +1173,23 @@
       "description": "A moment in UTC, to the second, such as `2030-01-15T09:30:00Z`.",
       "pattern": "^([0-9]{4}-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29)T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
       "type": "string"
+    },
+    "TooManyViews": {
+      "properties": {
+        "_tag": {
+          "const": "TooManyViews",
+          "type": "string"
+        },
+        "most": {
+          "const": 100,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "_tag",
+        "most"
+      ],
+      "type": "object"
     },
     "ToolName": {
       "description": "A tool that reports findings, such as `linter`.",
@@ -2943,6 +3044,219 @@
         "type": "object"
       }
     },
+    "view.delete": {
+      "description": "Delete a saved view. A view that no longer exists is no failure. Answers every saved view. One database commit by the caller when something changed.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "view": {
+            "$ref": "#/$defs/SavedViewId"
+          }
+        },
+        "required": [
+          "view"
+        ],
+        "title": "ViewDeleteInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      }
+    },
+    "view.list": {
+      "description": "List the saved views of the web app, in their order, with the list's revision. Changes nothing.",
+      "audience": [
+        "web"
+      ],
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      },
+      "readOnly": true
+    },
+    "view.rename": {
+      "description": "Rename a saved view. `NotFound` when no view has the id, for example after another page deleted it; else `NameTaken` when another view has the name (trimmed, in any case). Answers every saved view. One database commit by the caller when something changed.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/SavedViewName"
+          },
+          "view": {
+            "$ref": "#/$defs/SavedViewId"
+          }
+        },
+        "required": [
+          "view",
+          "name"
+        ],
+        "title": "ViewRenameInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      },
+      "failures": {
+        "NameTaken": {
+          "$ref": "#/$defs/NameTaken"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        }
+      }
+    },
+    "view.save": {
+      "description": "Save the filters of a page of the web app under a name. Without `replace`, a new view comes last: `NameTaken` when a view has the name (trimmed, in any case), `TooManyViews` when 100 views exist. With `replace`, that view takes the project and filters and keeps its id, name and place: `NotFound` when no view has the id, `Renamed` when its name is no longer `name` (another page renamed it). Both checks are made in the write's transaction, so a page that saw an older list never changes a view it did not mean. Answers every saved view. One database commit by the caller when something changed, and no change to any issue or project.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "filter": {
+            "$ref": "#/$defs/SavedViewFilter"
+          },
+          "name": {
+            "$ref": "#/$defs/SavedViewName"
+          },
+          "project": {
+            "$ref": "#/$defs/ProjectKey"
+          },
+          "replace": {
+            "$ref": "#/$defs/SavedViewId",
+            "description": "The view whose filters the page replaces: the view it showed under `name`."
+          }
+        },
+        "required": [
+          "name",
+          "filter"
+        ],
+        "title": "ViewSaveInput",
+        "type": "object"
+      },
+      "output": {
+        "$ref": "#/$defs/SavedViews"
+      },
+      "failures": {
+        "NameTaken": {
+          "$ref": "#/$defs/NameTaken"
+        },
+        "NotFound": {
+          "$ref": "#/$defs/NotFound"
+        },
+        "Renamed": {
+          "properties": {
+            "_tag": {
+              "const": "Renamed",
+              "type": "string"
+            },
+            "name": {
+              "$ref": "#/$defs/SavedViewName"
+            },
+            "view": {
+              "$ref": "#/$defs/SavedViewId"
+            }
+          },
+          "required": [
+            "_tag",
+            "view",
+            "name"
+          ],
+          "type": "object"
+        },
+        "TooManyViews": {
+          "$ref": "#/$defs/TooManyViews"
+        }
+      }
+    },
+    "views.import": {
+      "description": "Add views that a browser kept before the server kept them, in their order, after the saved views, in one database commit. The browser names itself with `source`, and each old view by its own id `old`. The server keeps a receipt per imported old view: an old view with a receipt is skipped, so a repeated or resumed import adds each old view once, and two old views never become one. A view whose name is taken comes in as `<name> (imported)`, or `<name> (imported 2)` and so on. Old views that would make more than 100 views are not imported and are listed under `full`. Send at most 100 views per call; a browser with more sends several calls. Answers every saved view.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "description": "An id of the browser's old views that the page made once and keeps with them.",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$",
+            "type": "string"
+          },
+          "views": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "filter": {
+                  "$ref": "#/$defs/SavedViewFilter"
+                },
+                "name": {
+                  "$ref": "#/$defs/SavedViewName"
+                },
+                "old": {
+                  "description": "The old view's id in the browser.",
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "project": {
+                  "$ref": "#/$defs/ProjectKey"
+                }
+              },
+              "required": [
+                "old",
+                "name",
+                "filter"
+              ],
+              "type": "object"
+            },
+            "maxItems": 100,
+            "type": "array"
+          }
+        },
+        "required": [
+          "source",
+          "views"
+        ],
+        "title": "ViewsImportInput",
+        "type": "object"
+      },
+      "output": {
+        "properties": {
+          "full": {
+            "description": "The `old` ids of the views not imported because 100 views exist.",
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/SavedView"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "revision": {
+            "$ref": "#/$defs/SavedViewRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "items",
+          "full"
+        ],
+        "title": "ViewsImported",
+        "type": "object"
+      }
+    },
     "workspace.instructions": {
       "description": "Give the command reference for agents, and who and where the caller is: its actor, project, branch and worktree. Changes nothing.",
       "audience": [
@@ -3054,6 +3368,57 @@
           "projects"
         ],
         "title": "IssueChangedPayload",
+        "type": "object"
+      }
+    },
+    "view.changed": {
+      "description": "A database commit changed the saved views: the occurrence gives the commit, its author and operation, and every saved view after it with the list's revision. A page that subscribes, or subscribes again after the stream ended, reads `view.list` once it is open, and keeps of the lists it gets the one with the highest revision: this event replays nothing.",
+      "audience": [
+        "web"
+      ],
+      "input": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "ViewChangedInput",
+        "type": "object"
+      },
+      "payload": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "author": {
+            "$ref": "#/$defs/Actor"
+          },
+          "commit": {
+            "$ref": "#/$defs/CommitHash"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/SavedView"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "operation": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/$defs/SavedViewRevision"
+          }
+        },
+        "required": [
+          "commit",
+          "at",
+          "author",
+          "operation",
+          "revision",
+          "items"
+        ],
+        "title": "ViewChangedPayload",
         "type": "object"
       }
     }
