@@ -293,6 +293,7 @@ pub struct SignedOut {
     pub lasting: bool,
 }
 
+#[cfg(unix)]
 #[derive(Serialize, Deserialize)]
 struct Refusal {
     reason: String,
