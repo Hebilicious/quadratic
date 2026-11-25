@@ -617,6 +617,9 @@
         "updatedAt": {
           "format": "date-time",
           "type": "string"
+        },
+        "work": {
+          "$ref": "#/$defs/Work"
         }
       },
       "required": [
@@ -783,6 +786,23 @@
       "maxLength": 48,
       "pattern": "^[a-z0-9]+([:._-][a-z0-9]+)*$",
       "type": "string"
+    },
+    "LandedCommit": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/GitCommit"
+        },
+        "url": {
+          "description": "`<repository>/commit/<commit>`.",
+          "pattern": "^https://github\\.com/",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit"
+      ],
+      "type": "object"
     },
     "Link": {
       "additionalProperties": false,
@@ -1115,6 +1135,32 @@
         "_tag",
         "status",
         "statuses"
+      ],
+      "type": "object"
+    },
+    "Work": {
+      "additionalProperties": false,
+      "description": "Where the issue's work is in git, read from the project's repository: only `issue.get` gives it, and only for an issue with a branch or a landed commit. The addresses come only when the remote that the default branch tracks (else `origin`) is on github.com; the server builds them from that remote's owner and name and never contacts the forge.",
+      "properties": {
+        "branch": {
+          "description": "The branch of the issue's claim, or of its last claim once the claim has ended; else the branch that landed it.",
+          "type": "string"
+        },
+        "commits": {
+          "description": "The commits on the default branch that landed the issue: a branch's tip, or a commit whose `Refs` trailer names it.",
+          "items": {
+            "$ref": "#/$defs/LandedCommit"
+          },
+          "type": "array"
+        },
+        "pullRequest": {
+          "description": "`<repository>/pull/<branch>`, which github.com sends on to the branch's pull request. Absent when the branch is the default branch.",
+          "pattern": "^https://github\\.com/",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commits"
       ],
       "type": "object"
     },

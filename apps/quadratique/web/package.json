@@ -1,5 +1,6 @@
 {
   "name": "quadratique-web",
+  "version": "0.1.0",
   "private": true,
   "description": "The web app of Quadratique: the human's live view of the board, served by the Quadratique server.",
   "license": "MIT",

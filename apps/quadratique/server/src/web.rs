@@ -22,13 +22,13 @@ pub const WEBMCP_TARGET: &str = "webmcp";
 pub const WEBMCP_BASE: &str = "/webmcp";
 pub const APP_BASE: &str = "/";
 pub const APP_VARIABLE: &str = "QUADRATIQUE_WEB";
-#[cfg(not(feature = "embedded-web"))]
+#[cfg(not(embedded_web))]
 const BUILT_APP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../web/dist");
 const INDEX: &str = "index.html";
 const CONTENT_SECURITY_POLICY: &str =
     "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
-#[cfg(feature = "embedded-web")]
+#[cfg(embedded_web)]
 mod embedded {
     use super::EmbeddedFile;
 
@@ -56,12 +56,12 @@ impl WebApp {
         }
     }
 
-    #[cfg(feature = "embedded-web")]
+    #[cfg(embedded_web)]
     fn built() -> WebApp {
         WebApp::Embedded(embedded::FILES)
     }
 
-    #[cfg(not(feature = "embedded-web"))]
+    #[cfg(not(embedded_web))]
     fn built() -> WebApp {
         WebApp::Directory(PathBuf::from(BUILT_APP))
     }

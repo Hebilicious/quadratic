@@ -113,6 +113,31 @@ impl View<'_> {
             .collect())
     }
 
+    /// The commits that landed `issue`, in this view.
+    pub fn landings_of(&self, issue: &str) -> Result<Vec<GitLanding>, StoreError> {
+        Ok(self
+            .rows(
+                &format!(
+                    "SELECT issue, git_commit, project, branch, landed_in FROM {} \
+                     WHERE issue = ? ORDER BY git_commit",
+                    self.table("git_landings")
+                ),
+                &[issue.into()],
+            )?
+            .iter()
+            .map(|row| {
+                let cells = Cells(row);
+                GitLanding {
+                    issue: cells.text(0),
+                    git_commit: cells.text(1),
+                    project: cells.text(2),
+                    branch: cells.opt_text(3),
+                    landed_in: cells.text(4),
+                }
+            })
+            .collect())
+    }
+
     pub fn claimed_work(
         &self,
         project: &str,

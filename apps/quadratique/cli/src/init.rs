@@ -5,7 +5,7 @@ use acid_cat_core::http::HttpClient;
 use acid_cat_core::{Kind, Outcome};
 use quadratique_server::app::input_refusal;
 use quadratique_server::domain::Binding;
-use quadratique_server::git::default_branch;
+use quadratique_server::git::{default_branch, environment};
 use serde_json::{Map, Value, json};
 
 use crate::caller;
@@ -16,11 +16,11 @@ pub const USAGE: &str = "init [--key <KEY>] [--name <name>] [--default-branch <b
 const SKILL_FILES: [(&str, &str); 2] = [
     (
         ".agents/skills/quadratique/SKILL.md",
-        include_str!("../../skill/quadratique/SKILL.md"),
+        include_str!("skill/SKILL.md"),
     ),
     (
         ".agents/skills/quadratique/planning.md",
-        include_str!("../../skill/quadratique/planning.md"),
+        include_str!("skill/planning.md"),
     ),
 ];
 const AGENTS_PATH: &str = "AGENTS.md";
@@ -184,7 +184,7 @@ impl File {
     }
 
     fn uncommitted(&self, root: &Path) -> bool {
-        std::process::Command::new("git")
+        environment::without_trace(&mut std::process::Command::new("git"))
             .arg("-C")
             .arg(root)
             .args([

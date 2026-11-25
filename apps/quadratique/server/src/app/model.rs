@@ -205,6 +205,26 @@ pub(crate) struct Issue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source: Option<Source>,
     pub(crate) links: Vec<domain::Link>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) work: Option<Work>,
+}
+
+/// Where an issue's work is in git. Only `issue.get` answers it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Work {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pull_request: Option<String>,
+    pub(crate) commits: Vec<LandedCommit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct LandedCommit {
+    pub(crate) commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

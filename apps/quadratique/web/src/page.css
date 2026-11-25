@@ -845,6 +845,11 @@ textarea.field-input {
   text-decoration: underline;
 }
 
+.text-link {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
 .claim-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

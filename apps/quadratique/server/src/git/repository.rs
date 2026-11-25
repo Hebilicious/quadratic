@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use super::environment::{self, Configuration};
 use super::ids;
 use super::watch::{Commit, Head, Place, Reached, Reading, Seen};
 use crate::store::GitWatch;
@@ -52,6 +54,7 @@ struct Output {
 pub struct Repository {
     git_dir: String,
     limit: Duration,
+    configuration: Configuration,
 }
 
 impl Repository {
@@ -59,6 +62,15 @@ impl Repository {
         Repository {
             git_dir: git_dir.to_owned(),
             limit,
+            configuration: Configuration::User,
+        }
+    }
+
+    /// The same repository, read with `path` as git's global configuration and no system one.
+    pub fn with_global_configuration(self, path: PathBuf) -> Repository {
+        Repository {
+            configuration: Configuration::Global(path),
+            ..self
         }
     }
 
@@ -221,6 +233,21 @@ impl Repository {
         }
     }
 
+    /// Which of `commits` this repository has; none when git cannot tell.
+    pub async fn present(&self, commits: &[String]) -> BTreeSet<String> {
+        let mut args = vec![
+            "rev-list",
+            "--no-walk",
+            "--ignore-missing",
+            "--end-of-options",
+        ];
+        args.extend(commits.iter().map(String::as_str));
+        match self.text(&args).await {
+            Ok(listed) => listed.lines().map(str::to_owned).collect(),
+            Err(_) => BTreeSet::new(),
+        }
+    }
+
     pub async fn reachable_from(&self, commit: &str) -> Result<BTreeSet<String>, GitError> {
         let listed = self.text(&["rev-list", "--end-of-options", commit]).await?;
         Ok(listed.lines().map(str::to_owned).collect())
@@ -267,6 +294,18 @@ impl Repository {
             .collect())
     }
 
+    /// The first line git prints for `args`, or `None` when git fails or prints nothing. What
+    /// git said on failure is dropped, so it reaches no error message and no log.
+    pub(super) async fn line(&self, args: &[&str]) -> Option<String> {
+        let output = self.run(args).await.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let line = text.lines().next()?.trim();
+        (!line.is_empty()).then(|| line.to_owned())
+    }
+
     async fn text(&self, args: &[&str]) -> Result<String, GitError> {
         let output = self.bytes(args).await?;
         String::from_utf8(output).map_err(|_| GitError::NotText(command_name(args)))
@@ -290,16 +329,10 @@ impl Repository {
 
     async fn run(&self, args: &[&str]) -> Result<Output, GitError> {
         let mut command = Command::new("git");
-        for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("GIT_") {
-                command.env_remove(name);
-            }
-        }
+        environment::prepare(command.as_std_mut(), &self.configuration);
         let mut child = command
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C")
             .arg("--no-pager")
             .arg("--no-replace-objects")
             .arg(format!("--git-dir={}", self.git_dir))

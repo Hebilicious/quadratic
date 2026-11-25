@@ -77,6 +77,77 @@ quadratique ui --open
 
 The port changes each time the server starts. `quadratique ui` prints the current address.
 
+## Install from a release
+
+Each [GitHub release](https://github.com/Hebilicious/quadratique/releases) has a prebuilt binary,
+with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.34 or newer and
+`libgcc_s.so.1` (Ubuntu 22.04, Debian 12, RHEL 9, Fedora 35 or later have both), and no other
+tool: no Rust, Node.js or proto. The service that `install.sh` sets up needs a running systemd
+user manager (`systemctl --user status` answers), as for an install from source.
+
+Each platform has one archive, named for the version and the target, and its SHA-256 file:
+
+| Platform | Archive |
+|---|---|
+| Linux x86-64 | `quadratique-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `quadratique-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+
+The archive has one folder, `quadratique-<version>-<target>/`, with the binary in `bin/quadratique`,
+the scripts `install.sh` and `uninstall.sh`, this file and the license. `install.sh` is the script
+that `moon run quadratique-install:install` runs, and does the steps 2 to 4 of "Install" with the
+binary you give it. Download, check and install a release (here 0.1.0 for x86-64; use `aarch64`
+for arm64):
+
+```sh
+version=0.1.0
+archive=quadratique-$version-x86_64-unknown-linux-gnu
+curl -fLO "https://github.com/Hebilicious/quadratique/releases/download/v$version/$archive.tar.gz"
+curl -fLO "https://github.com/Hebilicious/quadratique/releases/download/v$version/$archive.tar.gz.sha256"
+sha256sum -c "$archive.tar.gz.sha256"
+tar -xzf "$archive.tar.gz"
+sh "$archive/install.sh" "$archive/bin/quadratique"
+```
+
+To upgrade, do the same with the new release. To uninstall, run `sh "$archive/uninstall.sh"`
+from any release: it removes the binary and the unit that the unit names.
+
+### With mise
+
+[mise](https://mise.jdx.dev) installs the binary from the GitHub releases. It picks the archive
+for your platform from its name, checks it against the SHA-256 file, and unpacks the archive's
+folder. It puts that folder's `bin/` on your `PATH`, so `quadratique` is the only command it adds;
+`install.sh` and `uninstall.sh` stay in the folder:
+
+```sh
+mise use -g github:Hebilicious/quadratique
+```
+
+This installs only the binary. To run the server as a systemd user service, also run the
+`install.sh` of that release with the binary that mise installed:
+
+```sh
+sh "$(mise where github:Hebilicious/quadratique)/install.sh" "$(mise which quadratique)"
+```
+
+The install copies the binary to `~/.local/bin/quadratique`, so the service keeps the version you
+installed until you run `install.sh` again after `mise upgrade`. By default mise does not install a
+release published less than 24 hours ago (its setting `minimum_release_age`); name the version to
+install it earlier (`mise use -g github:Hebilicious/quadratique@0.1.0`).
+
+### With cargo
+
+From the first publication to crates.io on (not before), cargo builds and installs the binary,
+with the web app inside it:
+
+```sh
+cargo install quadratique
+```
+
+This builds from source, so it needs Rust, a C compiler and the zlib development files (the store
+engine is compiled from C; on Debian or Ubuntu: `sudo apt install build-essential zlib1g-dev`).
+Then run the `install.sh` of the release of the same version, with `~/.cargo/bin/quadratique`, to
+set up the service.
+
 ## Set up a repository
 
 From inside a git repository:
@@ -370,6 +441,7 @@ Run every task through moon, for example `moon run quadratique-server:test`:
 | `quadratique-web:typecheck`, `quadratique-web:lint`, `quadratique-web:format-check` | Static checks of the web app |
 | `quadratique-install:test` | Installs on a temporary home with no systemd, and checks the service's cases and the uninstall |
 | `quadratique-eval:test` | The evaluation harness's own tests |
+| `quadratique-server:package-test` | The packaging preflight's cases, and how `build.rs` embeds the web app in the repository and in a packaged crate (see "The crates") |
 
 ### Continuous integration
 
@@ -407,6 +479,135 @@ the page to see each build. Stop the server with `target/debug/quadratique serve
 shell. A binary of any build serves another folder when the variable `QUADRATIQUE_WEB` names it in
 the environment of the command that starts the server. Give an absolute path: the server runs in
 its data folder and reads a relative path from there, so the page would answer 503.
+
+### Releases
+
+A pull request is squash-merged, and its title, which becomes the commit on `main`, is a
+[Conventional Commit](https://www.conventionalcommits.org). Only `feat:` (a minor release) and
+`fix:` (a patch release) make a release; `perf:`, `revert:`, `refactor:`, `chore:`, `docs:`,
+`style:`, `ci:`, `test:` and `build:` do not. A breaking change (`!` after the type, or a
+`BREAKING CHANGE:` footer) makes a release under any of these types: before 1.0.0, a minor one.
+
+[release-please](https://github.com/googleapis/release-please) makes the releases from those
+commits. The workflow [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
+runs on every push to `main`:
+
+1. release-please opens or updates the release pull request. It sets the new version in
+   `Cargo.toml`, `Cargo.lock`, the three `package.json` files, `pyproject.toml` and `uv.lock`
+   together, and adds the changes to `CHANGELOG.md`.
+2. When that pull request is merged, release-please creates the tag `v<version>` on the merge
+   commit and a draft GitHub release.
+3. A job that checks out nothing names the release to finish: the release whose tag is `v` and
+   the version that `.release-please-manifest.json` says at the pushed commit, found by its exact
+   tag, even when release-please failed after it made the draft. It builds a draft only when the
+   tag points at the commit that was released. A published release with its four files needs
+   nothing; a published release without them fails this job and is not changed.
+4. One job per platform checks out that commit by its SHA, checks that the tag points at it,
+   builds the web app and the release binary with it inside on the oldest hosted Ubuntu (22.04),
+   and keeps the archive and its SHA-256 file as workflow artifacts. `install/package.sh` makes
+   the archive. The job prints the libraries and the newest glibc that the binary needs. It holds
+   no token.
+5. A last job, which checks out nothing and runs no project code, checks that the four files are
+   there and that each archive matches its SHA-256 file. It works on the release by its ID and
+   changes files only while the release is a draft: it removes any file whose name or digest is
+   not one of the four, uploads the missing ones, checks the four digests, checks the tag again,
+   and only then publishes the release. On a release that is already public it changes nothing:
+   it succeeds when the four digests match and fails otherwise.
+
+The workflow writes with tokens of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
+workflow for a tag that `GITHUB_TOKEN` pushes, and holds the checks of a pull request that it
+opens. Each token is for this repository only: release-please's can write contents and pull
+requests; the two other jobs' tokens can write contents only (a token needs write access to see a
+draft release). The workflow reads the App's client ID from the repository variable
+`RELEASE_APP_CLIENT_ID` and its private key from the secret `RELEASE_APP_PRIVATE_KEY`.
+
+A pull request that changes the release workflow, its configuration, `.github/release-tests/` or
+`install/` builds the archives too, as workflow artifacts, and releases nothing. It also runs
+`node .github/release-tests/release-please.cjs`, which runs release-please as the pinned action
+bundles it on this configuration and checks that it opens `chore(release): release <version>` and
+that the merged pull request yields the draft release `v<version>`, and
+`bash .github/release-tests/steps.sh`, which runs the jobs' scripts against a fake `gh`. Both run
+locally too, with no token.
+
+#### When a release stops half-way
+
+The release stays a draft until the last job has attached and checked the four files, so a
+failure never leaves a public release without its archives.
+
+- **A job failed** (a flaky runner, a network error, release-please after it made the draft): in
+  the workflow run, use "Re-run failed jobs". The builds run again on the same commit, replace
+  their artifacts, and the last job replaces only the files that are wrong.
+- **The run is too old to re-run:** push any commit to `main` (a `docs:` or `chore:` one releases
+  nothing). The workflow finds the draft of the manifest's version and finishes it.
+- **By hand**, if the workflow cannot run, in this order:
+  1. On each platform: `git checkout refs/tags/v<version>`, `moon run quadratique-web:build`,
+     then `sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target`
+     and `sh apps/quadratique/install/package.sh <binary> <version> <target triple> <folder>`.
+  2. Put the four files in one folder and check them there: `sha256sum --check --strict *.sha256`.
+  3. Check that the release is still a draft:
+     `gh release view v<version> --json isDraft --jq .isDraft` must print `true`. If it prints
+     `false`, stop: do not change a public release's files.
+  4. `gh release upload v<version> <the four files> --clobber`.
+  5. Check the attached digests against the local files:
+     `gh release view v<version> --json assets --jq '.assets[] | "\(.name) \(.digest)"'` must
+     list exactly the four files, each with `sha256:` and the hash that `sha256sum` prints for it.
+  6. Only then: `gh release edit v<version> --draft=false`.
+
+### The crates
+
+The command line and the server are the crates `quadratique` and `quadratique-server`. Both
+inherit `publish = false` from `[workspace.package]` until the first publication. Each crate
+carries the files it reads at build time: the catalog JSON, the skill and the license are links in
+the crate to the files of the repository, and `cargo package` copies their content.
+
+The web app is embedded in every binary that people install, and in none that you build in the
+repository without asking:
+
+- A packaged crate, as crates.io serves it, embeds the copy of the built web app it carries in
+  `server/web-dist` (ignored by git), which `moon run quadratique-server:stage-web` writes. Its
+  `build.rs` fails, and says to stage it, when that copy is missing, and ignores
+  `QUADRATIQUE_WEB_DIST`. It tells a package from the repository by `server/moon.yml`, which the
+  package leaves out.
+- In the repository, the release build (`install/build.sh`) asks for it with the feature
+  `embedded-web`, which embeds the folder that `QUADRATIQUE_WEB_DIST` names, else `web/dist`.
+- Any other build in the repository embeds nothing and reads `web/dist` at each request, as "See a
+  change in the web app" describes.
+
+`moon run quadratique-server:preflight` first builds the web app and stages it (it depends on
+`stage-web`), then fails when a crate lacks the staged web app (or it is not the current build of
+`web/dist`), the catalog JSON, a skill file or the licence. It also catches a checkout without
+symbolic links, where git writes each link as a plain file holding a path.
+`moon run quadratique-server:package-test` checks the preflight's cases and each case of
+`build.rs`, on a copy of the crates that it stages and packages itself: it leaves this checkout's
+`server/web-dist` as it was.
+
+## Releasing
+
+What a maintainer does for a release, and what happens on its own:
+
+1. Merge pull requests into `main` with Conventional Commit titles (see "Releases"). When one of
+   them releases, release-please opens or updates the release pull request on its own.
+2. Review and merge the release pull request. The tag, the draft release, the archives and the
+   publication of the release follow on their own; check that the run of the workflow
+   `Release` is green and that the release lists four files.
+3. After the first release (0.1.0) only: delete the line `"release-as": "0.1.0",` from
+   `release-please-config.json`, in a `chore:` pull request. While it is there, every later
+   release pull request proposes 0.1.0 again.
+
+To publish a release to crates.io (by hand: no workflow does it yet):
+
+1. Once, before the first publication: set `publish = true` in `[workspace.package]` of
+   `apps/quadratique/Cargo.toml`, in a `build:` pull request, merged before the release pull
+   request so that the tagged commit can be published. Do not delete the key: both crates
+   inherit it (`publish.workspace = true`).
+2. Check out the tag: `git checkout refs/tags/v<version>`, then `pnpm install --frozen-lockfile`.
+3. Stage the web app and check both crates: `moon run quadratique-server:preflight` (it stages
+   the web app first, then checks).
+4. From `apps/quadratique`, with a crates.io API token in `CARGO_REGISTRY_TOKEN`:
+   `cargo publish --workspace --allow-dirty`. Cargo publishes `quadratique-server` first, then
+   `quadratique`, which depends on it. (`--allow-dirty`: the staged `web-dist` is not in git.)
+5. After the first publication, trusted publishing on crates.io (with
+   `rust-lang/crates-io-auth-action` in a workflow) can replace the token.
 
 ## License
 
