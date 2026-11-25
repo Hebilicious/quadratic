@@ -4,6 +4,7 @@ mod caller;
 mod commands;
 mod init;
 mod mcp;
+mod process;
 mod route;
 mod shipped;
 

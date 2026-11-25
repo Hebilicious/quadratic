@@ -219,8 +219,17 @@ fn inspect(root: &Path, relative: &str, classify: Classify) -> std::io::Result<D
     })
 }
 
+#[cfg(unix)]
 fn writable(path: &Path) -> bool {
     rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok()
+}
+
+/// Windows has no `access`, and it ignores the read-only attribute on a folder: only a file's attribute is told
+/// before trying, and a folder whose access rules refuse the write is found by the write itself.
+#[cfg(windows)]
+fn writable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() || !metadata.permissions().readonly())
 }
 
 /// Why a write of `target` would fail now, when it can be told before trying: the file or the
@@ -1169,5 +1178,33 @@ mod tests {
         assert_eq!(key_of("quadratique-tracker").as_deref(), Some("QUADRATIQU"));
         assert_eq!(key_of("x"), None);
         assert_eq!(key_of("--"), None);
+    }
+
+    /// Windows ignores the read-only attribute on a folder, so it blocks nothing; on a file it does.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_only_a_files_read_only_attribute_blocks_a_write() {
+        use super::write_blocker;
+
+        let folder = tempfile::tempdir().unwrap();
+        let read_only = |path: &std::path::Path, value: bool| {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_readonly(value);
+            std::fs::set_permissions(path, permissions).unwrap();
+        };
+        let file = folder.path().join("SKILL.md");
+        std::fs::write(&file, "text\n").unwrap();
+        read_only(folder.path(), true);
+        read_only(&file, true);
+
+        let new_file = write_blocker(&folder.path().join("planning.md"));
+        let existing = write_blocker(&file);
+        std::fs::write(folder.path().join("planning.md"), "written\n")
+            .expect("Windows writes into a folder with the read-only attribute");
+
+        read_only(&file, false);
+        read_only(folder.path(), false);
+        assert_eq!(new_file, None);
+        assert!(existing.is_some_and(|reason| reason.contains("SKILL.md")));
     }
 }

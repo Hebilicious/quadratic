@@ -1,3 +1,7 @@
+//! Holds the writer's lock from another process with a POSIX lock, which is how SQLite's Unix VFS locks. On Windows
+//! SQLite locks with `LockFileEx`, and nothing tests a long-held writer's lock there yet.
+#![cfg(unix)]
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};

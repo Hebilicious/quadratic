@@ -3,6 +3,10 @@ language: "rust"
 layer: "library"
 tags: ["quadratique"]
 
+# The task scripts are POSIX shell: on Windows they run in Git's bash, not PowerShell.
+taskOptions:
+  windowsShell: "bash"
+
 fileGroups:
   sources:
     - "src/**/*"

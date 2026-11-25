@@ -1,0 +1,2 @@
+# Every text file is checked out with LF endings, on Windows too: the formatters and the shell scripts expect them.
+* text=auto eol=lf

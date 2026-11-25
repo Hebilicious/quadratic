@@ -17,6 +17,13 @@ class Hang(RuntimeError):
 
 
 def group_members(group: int) -> list[int]:
+    """The live processes of a process group: from /proc on Linux, from ps where there is no /proc (macOS)."""
+    if Path("/proc/self/stat").exists():
+        return _group_members_in_proc(group)
+    return _group_members_from_ps(group)
+
+
+def _group_members_in_proc(group: int) -> list[int]:
     members = []
     for stat in Path("/proc").glob("[0-9]*/stat"):
         try:
@@ -26,6 +33,16 @@ def group_members(group: int) -> list[int]:
         state, process_group = fields[0], int(fields[2])
         if process_group == group and state != "Z":
             members.append(int(stat.parent.name))
+    return members
+
+
+def _group_members_from_ps(group: int) -> list[int]:
+    listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, check=True)
+    members = []
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and int(fields[1]) == group and not fields[2].startswith("Z"):
+            members.append(int(fields[0]))
     return members
 
 

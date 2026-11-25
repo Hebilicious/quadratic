@@ -29,7 +29,15 @@ pub(crate) fn database_path(path: &Path) -> Result<PathBuf, StoreError> {
     };
     refuse_git_work_tree(directory)?;
     std::fs::create_dir_all(directory)?;
-    Ok(directory.canonicalize()?.join(file_name))
+    Ok(canonical_folder(directory)?.join(file_name))
+}
+
+/// The folder's canonical path, in the form doltlite can open. On Windows `canonicalize` gives a verbatim path
+/// (`\\?\C:\...`), with which doltlite creates a store that has no `HEAD`; this gives `C:\...` wherever that names
+/// the same folder. Every path that names the store must come from here, so that the server's and the command line's
+/// paths of one store compare equal.
+pub fn canonical_folder(folder: &Path) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(folder)
 }
 
 pub fn refuse_git_work_tree(directory: &Path) -> Result<(), StoreError> {
