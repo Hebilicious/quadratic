@@ -1,5 +1,6 @@
 {
   "name": "quadratique-catalog",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "The AcidCat catalog of Quadratique: the Pkl source and the JSON that every implementation reads.",

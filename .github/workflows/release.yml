@@ -1,0 +1,333 @@
+name: Release
+
+# GitHub starts no workflows for tags that GITHUB_TOKEN makes, and holds the checks of pull requests that GITHUB_TOKEN
+# opens. So every step that writes to the repository uses a token of the release GitHub App, minted with only the
+# permissions that step needs, in a job that runs no project code.
+on:
+  push:
+    branches: [main]
+  # A pull request that changes how a release is built builds the archives, without releasing them.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/release-tests/**"
+      - "apps/quadratique/install/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && 'main' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Opens or updates the release pull request; once it is merged, creates the tag and a draft release.
+  release-please:
+    name: release-please
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          token: ${{ steps.app.outputs.token }}
+
+  # Names the release to finish, even when release-please failed after it made the draft: the release whose tag is
+  # `v` and the version that `.release-please-manifest.json` says at the pushed commit. A draft is built when its tag
+  # points at the commit that release-please released; a published release with its four files needs nothing; a
+  # published release without them fails here and is not changed. Checks out nothing and runs no project code; its
+  # token can see drafts, which needs write access to contents.
+  pending:
+    name: release to finish
+    needs: release-please
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pending.outputs.tag }}
+      sha: ${{ steps.pending.outputs.sha }}
+      version: ${{ steps.pending.outputs.version }}
+      release: ${{ steps.pending.outputs.release }}
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Name the release to finish
+        id: pending
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          CREATED: ${{ needs.release-please.outputs.created }}
+          CREATED_TAG: ${{ needs.release-please.outputs.tag }}
+          CREATED_SHA: ${{ needs.release-please.outputs.sha }}
+        run: |
+          set -euo pipefail
+          repo=repos/$GITHUB_REPOSITORY
+          fail() { echo "::error::$*" >&2; exit 1; }
+          manifest_version() {
+            gh api "$repo/contents/.release-please-manifest.json?ref=$1" --jq .content | base64 -d | jq -r '.["."]'
+          }
+          version=$(manifest_version "$GITHUB_SHA")
+          case $version in '' | *[!0-9A-Za-z.+-]*) fail "the manifest at $GITHUB_SHA has no version: $version" ;; esac
+          tag=v$version
+          if [ "$CREATED" = true ] && [ "$CREATED_TAG" != "$tag" ]; then
+            fail "release-please created $CREATED_TAG, but the manifest at $GITHUB_SHA says $version"
+          fi
+          releases=$(gh api --paginate "$repo/releases?per_page=100" | jq -s --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]')
+          case $(jq length <<< "$releases") in
+            0) echo "There is no release $tag: nothing to build."; exit 0 ;;
+            1) ;;
+            *) fail "several releases have the tag $tag: delete all but one, then run this workflow again" ;;
+          esac
+          id=$(jq -r '.[0].id' <<< "$releases")
+          if [ "$(jq -r '.[0].draft' <<< "$releases")" = false ]; then
+            missing=""
+            for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+              archive=quadratique-$version-$target.tar.gz
+              digest=$(jq -r --arg name "$archive" '.[0].assets[] | select(.name == $name) | .digest' <<< "$releases")
+              checksum=$(jq -r --arg name "$archive.sha256" '.[0].assets[] | select(.name == $name) | .id' <<< "$releases")
+              if [ -z "$digest" ] || [ -z "$checksum" ] \
+                || [ "sha256:$(gh api -H 'Accept: application/octet-stream' "$repo/releases/assets/$checksum" | cut -d ' ' -f 1)" != "$digest" ]; then
+                missing="$missing $archive"
+              fi
+            done
+            [ -z "$missing" ] || fail "the release $tag is public, but these archives are missing or do not match their SHA-256 file:$missing. Nothing was changed. Attach them by hand as the README's \"When a release stops half-way\" says."
+            echo "The release $tag is published with its four files: nothing to do."
+            exit 0
+          fi
+          sha=$(gh api "$repo/commits/refs/tags/$tag" --jq .sha) || fail "the draft release $tag has no tag $tag"
+          if [ "$CREATED" = true ]; then
+            [ "$sha" = "$CREATED_SHA" ] || fail "the tag $tag points at $sha, not at $CREATED_SHA, which release-please released"
+          else
+            [ "$(manifest_version "$sha")" = "$version" ] || fail "the tag $tag points at $sha, whose manifest does not say $version"
+            case $(gh api "$repo/compare/$sha...$GITHUB_SHA" --jq .status) in
+              ahead | identical) ;;
+              *) fail "the tag $tag points at $sha, which is not in the history of $GITHUB_SHA" ;;
+            esac
+            echo "The draft release $tag is not finished: building it again."
+          fi
+          [ "$(jq -r '.[0].target_commitish' <<< "$releases")" = "$sha" ] || fail "the draft release $tag targets another commit than its tag, $sha"
+          {
+            echo "tag=$tag"
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "release=$id"
+          } >> "$GITHUB_OUTPUT"
+
+  # On a pull request: release-please, as the pinned action bundles it, opens the release pull request and turns the
+  # merged one into the release; and the scripts of the jobs below behave as they should against a fake `gh`.
+  release-tests:
+    name: release-please and the release scripts
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+      - run: node .github/release-tests/release-please.cjs
+      - run: bash .github/release-tests/steps.sh
+
+  # Builds and packages one binary per platform. Holds no token: a build dependency it runs cannot write anything.
+  binaries:
+    name: binary for ${{ matrix.target }}
+    needs: pending
+    if: >-
+      !cancelled() && (
+        github.event_name == 'pull_request' ||
+        needs.pending.outputs.tag != ''
+      )
+    # The oldest hosted images (glibc 2.35), so that the binary runs on older distributions too.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    # Only stops a hang.
+    timeout-minutes: 60
+    steps:
+      # The release's commit, by its SHA: a tag name could also be a branch's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.pending.outputs.sha || github.sha }}
+          # Moon compares the checkout with `main`, so it needs the history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that the tag points at this commit
+        if: needs.pending.outputs.tag != ''
+        env:
+          TAG: ${{ needs.pending.outputs.tag }}
+        run: test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$(git rev-parse HEAD)"
+
+      # The store engine is compiled from C and links zlib.
+      - name: Install the system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential zlib1g-dev
+
+      # Installs proto, then the tools that .prototools pins, and caches them.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the host and the version
+        id: build
+        env:
+          RELEASED: ${{ needs.pending.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          test "$host" = "$TARGET"
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/quadratique/Cargo.toml)
+          if [ -n "$RELEASED" ]; then test "$version" = "$RELEASED"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the web app and the release binary with it inside
+        run: |
+          moon run quadratique-web:build
+          binary=$(sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target)
+          echo "BINARY=$binary" >> "$GITHUB_ENV"
+
+      - name: Show the libraries and the newest glibc the binary needs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          glibc=$(objdump -T "$BINARY" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          libraries=$(objdump -p "$BINARY" | awk '/NEEDED/ { print $2 }' | tr '\n' ' ')
+          echo "The binary for $TARGET needs glibc ${glibc#GLIBC_} or newer, and these libraries: $libraries" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Check that the binary runs
+        run: |
+          export QUADRATIQUE_HOME="$RUNNER_TEMP/quadratique-home"
+          "$BINARY" --version
+
+      - name: Package the archive and its SHA-256 file
+        env:
+          VERSION: ${{ steps.build.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive=$(sh apps/quadratique/install/package.sh "$BINARY" "$VERSION" "$TARGET" "$RUNNER_TEMP/release")
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quadratique-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error
+          # A re-run of this job keeps the run, and so the artifact's name.
+          overwrite: true
+
+  # Attaches the archives to the draft release and publishes it. Checks out nothing and runs no project code: it only
+  # reads the artifacts of this run, checks them, and holds the only token here that can change a release.
+  publish:
+    name: attach the archives and publish
+    needs: [pending, binaries]
+    if: github.event_name == 'push' && needs.pending.outputs.release != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: quadratique-*
+          path: assets
+          merge-multiple: true
+
+      - name: Check that the four files are there and that each archive matches its SHA-256 file
+        working-directory: assets
+        env:
+          VERSION: ${{ needs.pending.outputs.version }}
+        run: |
+          set -euo pipefail
+          wanted=$(for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            printf '%s\n' "quadratique-$VERSION-$target.tar.gz" "quadratique-$VERSION-$target.tar.gz.sha256"
+          done | LC_ALL=C sort | tr '\n' ' ')
+          present=$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | tr '\n' ' ')
+          if [ "$present" != "$wanted" ]; then
+            echo "the artifacts are: $present; the release needs: $wanted" >&2
+            exit 1
+          fi
+          for checksum in *.sha256; do
+            [ "$(awk '{ print $2 }' "$checksum")" = "${checksum%.sha256}" ] || { echo "$checksum names another file" >&2; exit 1; }
+            sha256sum --check --strict "$checksum"
+          done
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      # Works on the release by its ID. Changes assets only while the release is a draft, replaces only those whose
+      # digest differs, checks the four digests, and publishes last. A release that is already public is complete
+      # when its four digests match, and is never changed.
+      - name: Attach the files, check the release, and publish it
+        working-directory: assets
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          RELEASE: ${{ needs.pending.outputs.release }}
+          TAG: ${{ needs.pending.outputs.tag }}
+          SHA: ${{ needs.pending.outputs.sha }}
+        run: |
+          set -euo pipefail
+          repo=repos/$GITHUB_REPOSITORY
+          fail() { echo "::error::$*" >&2; exit 1; }
+          release() { gh api "$repo/releases/$RELEASE"; }
+          attached() { release | jq -r '.assets[] | "\(.name) \(.digest)"' | LC_ALL=C sort; }
+          local=$(for file in *; do echo "$file sha256:$(sha256sum "$file" | cut -d ' ' -f 1)"; done | LC_ALL=C sort)
+          state=$(release)
+          [ "$(jq -r .tag_name <<< "$state")" = "$TAG" ] || fail "the release $RELEASE is not $TAG"
+          if [ "$(jq -r .draft <<< "$state")" = false ]; then
+            [ "$(attached)" = "$local" ] || fail "the release $TAG is already public, and its files are not the four checked ones. Nothing was changed. Attach them by hand as the README's \"When a release stops half-way\" says."
+            echo "The release $TAG is already public with these four files: nothing to do."
+            exit 0
+          fi
+          [ "$(gh api "$repo/commits/refs/tags/$TAG" --jq .sha)" = "$SHA" ] || fail "the tag $TAG no longer points at $SHA"
+          jq -r '.assets[] | "\(.id) \(.name) \(.digest)"' <<< "$state" | while read -r asset name digest; do
+            grep -qxF "$name $digest" <<< "$local" || gh api -X DELETE "$repo/releases/assets/$asset" > /dev/null
+          done
+          upload=$(jq -r '.upload_url | sub("\\{.*$"; "")' <<< "$state")
+          for file in *; do
+            [ "$(release | jq -r .draft)" = true ] || fail "the release $TAG was published while this job ran; nothing more was changed"
+            if ! attached | grep -qxF "$(grep "^$file " <<< "$local")"; then
+              gh api -X POST "$upload?name=$file" -H "Content-Type: application/octet-stream" --input "$file" > /dev/null
+            fi
+          done
+          [ "$(attached)" = "$local" ] || fail "the draft release $TAG does not hold the four checked files: run this job again"
+          [ "$(gh api "$repo/commits/refs/tags/$TAG" --jq .sha)" = "$SHA" ] || fail "the tag $TAG no longer points at $SHA"
+          gh api -X PATCH "$repo/releases/$RELEASE" -F draft=false > /dev/null
+          [ "$(release | jq -r .draft)" = false ] || fail "the release $TAG is still a draft"
+          echo "Published $TAG with its four files."

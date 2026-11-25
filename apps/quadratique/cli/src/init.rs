@@ -26,12 +26,12 @@ struct SkillFile {
 const SKILL_FILES: [SkillFile; 2] = [
     SkillFile {
         path: ".agents/skills/quadratique/SKILL.md",
-        text: include_str!("../../skill/quadratique/SKILL.md"),
+        text: include_str!("skill/SKILL.md"),
         shipped: shipped::SKILL_MD,
     },
     SkillFile {
         path: ".agents/skills/quadratique/planning.md",
-        text: include_str!("../../skill/quadratique/planning.md"),
+        text: include_str!("skill/planning.md"),
         shipped: shipped::PLANNING_MD,
     },
 ];
