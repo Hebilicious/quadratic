@@ -254,7 +254,8 @@ chooses, which it then keeps, when another program holds it. `serve --port <port
 reads and keeps nothing. The **strict setting** (`quadratique server strict on`) gives a **freshly
 bound origin** instead: the server binds a port its home has never served. It lists the ports it
 served in the data folder (the last 4096), and binds again, up to 8 times, if the system gives one
-from the list. Turning strict on adds the kept port to that list. The same setting makes the bearer
+from the list. Turning strict on adds the kept port to that list. Turning strict on or off starts no server
+and applies from the next start; the first start after `strict off` takes a new address and keeps it. The same setting makes the bearer
 per server start: one setting, for a machine whose other accounts are not trusted.
 
 **Threat analysis.** B is another account on the same machine. A machine with a single account has
