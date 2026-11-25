@@ -9,7 +9,7 @@
 
 use std::fs::{File, TryLockError};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -226,20 +226,23 @@ fn row_no_socket_and_a_free_lock_status_is_not_running_stop_finds_nothing_ensure
 #[test]
 fn row_a_stale_socket_and_a_free_lock_is_not_running_and_the_next_server_replaces_the_file() {
     let home = Home::new();
+    let socket = home.path().join("server.sock");
     let stale = fake_socket(&home);
     drop(stale);
-    let stale_inode = std::fs::symlink_metadata(home.path().join("server.sock"))
-        .expect("the stale socket stays")
-        .ino();
+    let refused = UnixStream::connect(&socket);
+    assert_eq!(
+        refused.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::ConnectionRefused),
+        "{refused:?}"
+    );
     assert_eq!(status(&home)["running"], false);
     assert_eq!(run(&home, &["server", "stop"]).ok()["stopped"], false);
 
     run(&home, &["project", "list"]).ok();
 
-    let replaced = std::fs::symlink_metadata(home.path().join("server.sock"))
-        .expect("the new server's socket")
-        .ino();
-    assert_ne!(replaced, stale_inode);
+    // A file system may give the new socket the inode number of the stale one, so the proof of the replacement is
+    // that the name now reaches a listener.
+    UnixStream::connect(&socket).expect("the new server's socket accepts");
     let serving = status(&home);
     assert_eq!(serving["running"], true, "{serving}");
     let pid = serving["pid"].as_u64().expect("a pid") as u32;
