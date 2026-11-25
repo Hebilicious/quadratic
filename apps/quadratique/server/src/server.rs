@@ -13,7 +13,7 @@ use http::{Method, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpSocket, TcpStream};
 
 use crate::app::{Context, application, caller_of, interface};
 use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
@@ -32,6 +32,9 @@ const DATABASE_FILE: &str = "workspace.db";
 const RUNTIME_FILE: &str = "server.json";
 const LOCK_FILE: &str = "server.lock";
 const PORT_FILE: &str = "server.port";
+const KEEP_ADDRESS_FILE: &str = "keep-address";
+/// `server.port` holds one port number: anything longer is not one.
+const PORT_FILE_LIMIT: u64 = 16;
 const DIRECTORY: &str = "quadratique";
 /// How long a server may take to start: a command waits this long for the server it started, and a server waits
 /// this long for a holder of the lock that is not a server to let go.
@@ -94,9 +97,15 @@ impl Paths {
         self.database.with_file_name(CREDENTIALS_FILE)
     }
 
-    /// The port the server of this home listened on last, kept after it stops, unlike the runtime file.
+    /// The port this home's server keeps while the owner has asked it to keep its address. Unlike the runtime file,
+    /// it stays after the server stops.
     pub fn port(&self) -> PathBuf {
         self.database.with_file_name(PORT_FILE)
+    }
+
+    /// Present while the owner has asked this home's server to keep its address (`quadratique server keep-address`).
+    pub fn keep_address(&self) -> PathBuf {
+        self.database.with_file_name(KEEP_ADDRESS_FILE)
     }
 
     pub fn in_home(home: &Path) -> Result<Paths, ServerError> {
@@ -227,10 +236,31 @@ pub fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
 }
 
+/// Where a server listens: on the address it is given, a port of 0 letting the system choose; or, by default, on a port
+/// the system chooses unless the owner asked this home to keep its address.
+#[derive(Clone, Copy, Debug)]
+enum Listen {
+    On(SocketAddr),
+    Default,
+}
+
 pub async fn start(paths: &Paths, address: SocketAddr) -> Result<Server, ServerError> {
     start_with(
         paths,
         address,
+        WebApp::from_env(),
+        watcher::EVERY,
+        Waits::default(),
+    )
+    .await
+}
+
+/// Starts the server where the owner wants it when no port is given: on the port it kept when this home keeps its
+/// address and that port is free, otherwise on a loopback port the system chooses.
+pub async fn start_default(paths: &Paths) -> Result<Server, ServerError> {
+    start_listening(
+        paths,
+        Listen::Default,
         WebApp::from_env(),
         watcher::EVERY,
         Waits::default(),
@@ -245,7 +275,19 @@ pub async fn start_with(
     look_every: Duration,
     waits: Waits,
 ) -> Result<Server, ServerError> {
-    if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
+    start_listening(paths, Listen::On(address), web_app, look_every, waits).await
+}
+
+async fn start_listening(
+    paths: &Paths,
+    listen: Listen,
+    web_app: WebApp,
+    look_every: Duration,
+    waits: Waits,
+) -> Result<Server, ServerError> {
+    if let Listen::On(address) = listen
+        && !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback())
+    {
         return Err(ServerError::NotLoopback(address));
     }
     let own_account = callers::own_account()?;
@@ -295,14 +337,14 @@ pub async fn start_with(
         web::OriginHeader::OwnOnly,
     ));
     let admit = callers::owner_only(own_account);
-    let listener = match listen(paths, address).await {
-        Ok(listener) => listener,
+    let socket = match bind(paths, listen) {
+        Ok(socket) => socket,
         Err(error) => {
             watcher.stop().await;
             return Err(error.into());
         }
     };
-    let address = match listener.local_addr() {
+    let address = match socket.local_addr() {
         Ok(address) => address,
         Err(error) => {
             watcher.stop().await;
@@ -316,16 +358,21 @@ pub async fn start_with(
         url: format!("http://{address}{BASE}"),
         database,
     };
-    // The runtime file names the address before the server there answers: a command that reads an older file, which
-    // may name the same port, never finds this server while the file still names another.
-    let written = write_port(&paths.port(), address.port())
-        .and_then(|()| write_runtime(&paths.runtime, &runtime));
-    if let Err(error) = written {
+    // The socket listens only once the runtime file names its address: a command that reads an older file, which may
+    // name the same port, never finds this server while the file still names another; and a start that fails before
+    // this point leaves no listening socket behind.
+    if let Err(error) = write_runtime(&paths.runtime, &runtime) {
         watcher.stop().await;
         return Err(error.into());
     }
+    if matches!(listen, Listen::Default) && keeps_address(paths) {
+        keep_port(paths, address.port());
+    }
     let published = closing::Published::new(paths.runtime.clone(), &runtime);
-    let served = match serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS) {
+    let served = match socket
+        .listen(LISTEN_BACKLOG)
+        .and_then(|listener| serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS))
+    {
         Ok(served) => served,
         Err(error) => {
             watcher.stop().await;
@@ -505,25 +552,121 @@ async fn ask_identity(address: SocketAddr) -> Result<Identity, Unanswered> {
     }
 }
 
-/// A server asked for any port listens on the port this home's server had last, when it is free, so that the web app
-/// keeps its address across restarts; otherwise on the port the system chooses.
-async fn listen(paths: &Paths, address: SocketAddr) -> std::io::Result<TcpListener> {
-    let previous = std::fs::read_to_string(paths.port())
-        .ok()
-        .and_then(|text| text.trim().parse::<u16>().ok())
-        .filter(|port| *port != 0);
-    if let (0, Some(port)) = (address.port(), previous)
-        && let Ok(listener) = TcpListener::bind(SocketAddr::new(address.ip(), port)).await
-    {
-        return Ok(listener);
-    }
-    TcpListener::bind(address).await
+/// The backlog `TcpListener::bind` gives a listener.
+const LISTEN_BACKLOG: u32 = 1024;
+
+/// A socket bound to the server's address, not yet listening. By default it takes the kept port when this home keeps
+/// its address and that port is free; a port that is given, 0 included, never reads `server.port`.
+fn bind(paths: &Paths, listen: Listen) -> std::io::Result<TcpSocket> {
+    let address = match listen {
+        Listen::On(address) => address,
+        Listen::Default => {
+            let kept = keeps_address(paths).then(|| kept_port(paths)).flatten();
+            if let Some(port) = kept
+                && let Ok(socket) = bound(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+            {
+                return Ok(socket);
+            }
+            loopback()
+        }
+    };
+    bound(address)
 }
 
-fn write_port(path: &Path, port: u16) -> std::io::Result<()> {
-    let partial = path.with_extension(format!("port.{}", std::process::id()));
-    std::fs::write(&partial, format!("{port}\n"))?;
-    std::fs::rename(&partial, path)
+fn bound(address: SocketAddr) -> std::io::Result<TcpSocket> {
+    let socket = TcpSocket::new_v4()?;
+    // As `TcpListener::bind` does on Unix: a restart may bind the port while connections of the last server wait out
+    // TIME_WAIT. On Windows the option lets another socket take a bound port, so it stays off there.
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    Ok(socket)
+}
+
+/// Whether the owner asked this home's server to keep its address: a regular file, not a link, at `keep-address`.
+pub fn keeps_address(paths: &Paths) -> bool {
+    std::fs::symlink_metadata(paths.keep_address()).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// Asks this home's server to keep its address from its next start, or to take a port the system chooses again, which
+/// also forgets the kept port. `port`, when given, is kept at once: the port of the server that runs now.
+pub fn set_keep_address(paths: &Paths, keep: bool, port: Option<u16>) -> std::io::Result<()> {
+    if keep {
+        write_atomically(&paths.keep_address(), b"on\n")?;
+        if let Some(port) = port {
+            write_atomically(&paths.port(), format!("{port}\n").as_bytes())?;
+        }
+        return Ok(());
+    }
+    for path in [paths.keep_address(), paths.port()] {
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The kept port, read only from a small regular file: a link, a FIFO or a file too long for a port number is ignored.
+/// The data folder is private to its account, so nothing else can swap the file between the check and the read.
+fn kept_port(paths: &Paths) -> Option<u16> {
+    use std::io::Read;
+
+    let path = paths.port();
+    let looked = std::fs::symlink_metadata(&path).ok()?;
+    if !looked.is_file() || looked.len() > PORT_FILE_LIMIT {
+        return None;
+    }
+    let file = File::open(&path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(PORT_FILE_LIMIT).read_to_string(&mut text).ok()?;
+    text.trim().parse::<u16>().ok().filter(|port| *port != 0)
+}
+
+/// The kept port is a convenience: when it cannot be written, the server says so in its log and serves anyway.
+fn keep_port(paths: &Paths, port: u16) {
+    let path = paths.port();
+    if kept_port(paths) == Some(port) {
+        return;
+    }
+    if let Err(error) = write_atomically(&path, format!("{port}\n").as_bytes()) {
+        eprintln!(
+            "quadratique server: could not keep port {port} in {}: {error}; the next start may take another port",
+            path.display()
+        );
+    }
+}
+
+/// Writes a sibling file, then renames it over `path`. The sibling is removed when either step fails.
+fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let partial = path.with_file_name(format!("{name}.{}", std::process::id()));
+    let written = std::fs::write(&partial, contents)
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("writing {}: {error}", partial.display()),
+            )
+        })
+        .and_then(|()| {
+            std::fs::rename(&partial, path).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "renaming {} to {}: {error}",
+                        partial.display(),
+                        path.display()
+                    ),
+                )
+            })
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
 }
 
 fn write_runtime(path: &Path, runtime: &RuntimeFile) -> std::io::Result<()> {

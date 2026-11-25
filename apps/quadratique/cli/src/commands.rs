@@ -20,17 +20,17 @@ pub fn all() -> Vec<CliCommand<Context>> {
     vec![
         command(
             "serve",
-            "Run the server in the foreground, until SIGINT or SIGTERM, on the loopback port that --port <port> names, or else on the port this home's server had last when it is free, or else on a port the system chooses. Other commands start it in the background when it is not running. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
+            "Run the server in the foreground, until SIGINT or SIGTERM, on the loopback port that --port <port> names (0: one the system chooses); without --port, on the port this home keeps when `server keep-address on` was run and that port is free, otherwise on a port the system chooses. Other commands start it in the background when it is not running. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
             |args, io| serve(args, io).boxed(),
         ),
         command(
             "server",
-            "server status: whether the server of this home runs, and where. server stop: stop it.",
+            "server status: whether the server of this home runs, and where. server stop: stop it. server keep-address on: from now on, the server of this home keeps its port across restarts, so the web app keeps its address; another account of this machine could take that port while the server is down. server keep-address off: each start takes a port the system chooses (the default).",
             |args, io| server_command(args, io).boxed(),
         ),
         command(
             "ui",
-            "Make sure the server runs, and print the address of the web app. ui --open: also open it in the browser.",
+            "Make sure the server runs, and print the address of the web app, and addressKept: whether the server keeps that address across restarts (server keep-address on). ui --open: also open it in the browser.",
             |args, io| ui(args, io).boxed(),
         ),
         command("init", crate::init::USAGE, |args, io| {
@@ -104,9 +104,9 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
         .filter(|word| *word != TAKE_OVER_FLAG)
         .collect();
     let port = match words[..] {
-        [] => 0,
+        [] => None,
         ["--port", port] => match port.parse::<u16>() {
-            Ok(port) => port,
+            Ok(port) => Some(port),
             Err(_) => {
                 return report(
                     io,
@@ -132,7 +132,6 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
         std::process::id(),
         home.paths.database.display()
     ));
-    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let taken = if take_over {
         match background::take_over(&home).await {
             Ok(taken) => Some(taken),
@@ -141,7 +140,14 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
     } else {
         None
     };
-    match server::start(&home.paths, address).await {
+    let started = match port {
+        Some(port) => {
+            let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+            server::start(&home.paths, address).await
+        }
+        None => server::start_default(&home.paths).await,
+    };
+    match started {
         Ok(server) => {
             drop(taken);
             server::until_stopped(server).await;
@@ -160,11 +166,13 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     let answer = match words(&args)[..] {
         ["status"] => status(&home).await,
         ["stop"] => stop(&home).await,
+        ["keep-address", "on"] => keep_address(&home, true).await,
+        ["keep-address", "off"] => keep_address(&home, false).await,
         _ => {
             return report(
                 io,
                 Kind::InvalidInput,
-                "Give one of: quadratique server status, quadratique server stop.",
+                "Give one of: quadratique server status, quadratique server stop, quadratique server keep-address on, quadratique server keep-address off.",
             );
         }
     };
@@ -178,6 +186,7 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
 }
 
 fn located(home: &Home, mut value: Value) -> Value {
+    value["addressKept"] = json!(server::keeps_address(&home.paths));
     value["runtime"] = json!(home.paths.runtime);
     value["log"] = json!(home.log());
     value
@@ -221,6 +230,19 @@ fn unreachable(home: &Home, reason: String) -> Value {
     })
 }
 
+/// Turning it on makes sure the server runs and keeps its port at once, so that the address already open in the browser
+/// is the one kept; the server makes the data folder private when it starts.
+async fn keep_address(home: &Home, keep: bool) -> Result<Value, background::LifeError> {
+    let port = if keep {
+        Some(background::ensure(home).await?.address.port())
+    } else {
+        None
+    };
+    server::set_keep_address(&home.paths, keep, port)
+        .map_err(|error| home.unusable(error, Attempt::Start))?;
+    Ok(located(home, json!({})))
+}
+
 async fn stop(home: &Home) -> Result<Value, background::LifeError> {
     let value = match background::stop(home).await? {
         Stopped::Ended { pid } => json!({ "stopped": true, "pid": pid }),
@@ -251,12 +273,15 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
         Err(error) => return report(io, Kind::Unavailable, error.to_string()),
     };
     let url = format!("http://{}/", runtime.address);
+    let kept = server::keeps_address(&home.paths);
     let answer = if !open {
-        json!({ "url": url, "opened": false })
+        json!({ "url": url, "opened": false, "addressKept": kept })
     } else {
         match open_in_browser(&url).await {
-            Ok(Launch::Opened) => json!({ "url": url, "opened": true }),
-            Ok(Launch::Requested) => json!({ "url": url, "opened": false, "launch": "requested" }),
+            Ok(Launch::Opened) => json!({ "url": url, "opened": true, "addressKept": kept }),
+            Ok(Launch::Requested) => {
+                json!({ "url": url, "opened": false, "launch": "requested", "addressKept": kept })
+            }
             Ok(Launch::Failed(status)) => {
                 let ended = match status.code() {
                     Some(code) => format!("exited with code {code}"),

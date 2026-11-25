@@ -75,12 +75,18 @@ quadratique server status
 quadratique ui --open
 ```
 
-The web app is at `http://127.0.0.1:<port>/`. The system chooses the port the first time the
-server starts, and the server keeps it in `server.port` in its data folder. Each later start
-asks for the same port again, so open tabs and bookmarks keep working after a restart or an
-upgrade. When another program holds that port, the server starts on a new port and keeps that
-one instead. `quadratique ui` prints the current address. `quadratique serve --port <port>`
-starts the server on the port you give.
+The web app is at `http://127.0.0.1:<port>/`. By default each start of the server takes a port
+the system chooses, so the address changes after a restart or an upgrade. `quadratique ui`
+prints the current address. `quadratique serve --port <port>` starts the server on the port you
+give.
+
+To keep the address, run `quadratique server keep-address on`. The server then keeps its
+current port in `server.port` in its data folder and asks for it again at each start, so open
+tabs and bookmarks keep working. When another program holds the port, the server starts on a new
+port and keeps that one. While the server is down, another account of this machine can listen on
+the kept port, and your tabs and bookmarks would then reach that program. Turn it on only on a
+machine whose other accounts you trust. `quadratique ui` says `"addressKept": true` while it is
+on; `quadratique server keep-address off` turns it off.
 
 ## Install from a release
 
