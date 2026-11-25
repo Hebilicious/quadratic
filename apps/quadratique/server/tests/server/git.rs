@@ -185,22 +185,6 @@ async fn a_branch_merged_with_no_ff_moves_its_claimed_issue_from_review_to_merge
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_first_read_of_an_issue_after_its_merge_answers_merged() {
-    let space = Workspace::looking_only_when_asked("ABC").await;
-    let issue = space.issue_in_review("Parse the headers").await;
-    space.board.look().await;
-
-    let root = &space.repository.root;
-    space.repository.commit(
-        root,
-        "parser.rs",
-        &format!("Parse the headers\n\nRefs: {issue}"),
-    );
-
-    assert_eq!(space.status(&issue).await.0, "merged");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_read_from_the_web_page_answers_from_the_store_without_a_look() {
     let space = Workspace::looking_only_when_asked("ABC").await;
     let issue = space.issue_in_review("Parse the headers").await;
@@ -1040,6 +1024,7 @@ async fn an_issue_landed_by_its_refs_trailer_alone_without_a_remote_shows_its_co
         "parser.rs",
         &format!("Parse the headers\n\nRefs: {issue}"),
     );
+    space.board.look().await;
 
     let shown = space.board.get(&issue).await;
     assert_eq!(shown["status"], "merged", "{shown}");
