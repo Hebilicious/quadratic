@@ -231,12 +231,7 @@ impl Credentials {
 
 fn new_value() -> std::io::Result<String> {
     let mut bytes = [0_u8; RANDOM_BYTES];
-    let mut filled = 0;
-    while filled < bytes.len() {
-        filled +=
-            rustix::rand::getrandom(&mut bytes[filled..], rustix::rand::GetRandomFlags::empty())
-                .map_err(std::io::Error::from)?;
-    }
+    getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
     Ok(format!("{VALUE_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes)))
 }
 

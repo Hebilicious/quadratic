@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -352,6 +353,7 @@ class DeployRow(unittest.TestCase):
         self.assertEqual(row["values"]["quadratique"], [report.UNMEASURED])
 
 
+@unittest.skipIf(sys.platform == "win32", "QUA-40: the harness runs commands in POSIX process groups")
 class WrittenFromGit(unittest.TestCase):
     ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
@@ -407,6 +409,7 @@ class FilesWrittenRow(unittest.TestCase):
         self.assertEqual(row["values"]["beads"], [2])
 
 
+@unittest.skipIf(sys.platform == "win32", "QUA-40: the harness runs commands in POSIX process groups")
 class SetupStepsRow(unittest.TestCase):
     """The commands of each tracker's quickstart, as the harness logs them; a commit is not a step."""
 
@@ -524,8 +527,9 @@ class ReportArguments(unittest.TestCase):
         with tempfile.TemporaryDirectory() as run:
             (Path(run) / "results.json").mkdir()
             message = self.refusal("--run", run)
-        self.assertIn(f"cannot read {run}/results.json", message)
-        self.assertIn("directory", message)
+        self.assertIn(f"cannot read {Path(run) / 'results.json'}", message)
+        # Opening a folder fails with EISDIR on POSIX systems and with EACCES on Windows.
+        self.assertIn("Permission denied" if sys.platform == "win32" else "directory", message)
 
     def test_from_without_out_names_out(self):
         self.assertIn("--from needs --out", self.refusal("--from", "all=/nowhere"))

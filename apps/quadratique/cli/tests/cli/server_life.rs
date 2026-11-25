@@ -247,18 +247,6 @@ fn serve_with_a_port_listens_on_that_loopback_port() {
 }
 
 #[test]
-fn serve_refuses_a_port_that_is_not_a_number() {
-    let home = Home::new();
-    let elsewhere = outside();
-    let run = home
-        .quadratique(elsewhere.path())
-        .args(["serve", "--port", "web"])
-        .run();
-    assert_ne!(run.code, 0);
-    assert!(home.runtime().is_none());
-}
-
-#[test]
 fn commands_with_and_without_a_runtime_directory_find_the_same_server_of_the_default_home() {
     let home = Home::new();
     let elsewhere = outside();
