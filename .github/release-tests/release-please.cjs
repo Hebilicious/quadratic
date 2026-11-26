@@ -46,6 +46,7 @@ function load(folder) {
   const version = /exports\.VERSION = '([0-9.]+)'/.exec(text)[1];
   return {
     version,
+    readsAlwaysUpdate: /\['always-update'\]|"always-update"/.test(text),
     GitHub: moduleOf("exports.GitHub = GitHub").GitHub,
     Manifest: moduleOf("exports.Manifest = Manifest").Manifest,
     setLogger: moduleOf("exports.setLogger = setLogger").setLogger,
@@ -93,6 +94,12 @@ const silent = { error() {}, warn() {}, info() {}, debug() {}, trace() {} };
     const lib = load(folder);
     lib.setLogger(silent);
     const config = JSON.parse(fs.readFileSync(path.join(repository, "release-please-config.json"), "utf8"));
+
+    // Without always-update, release-please leaves the release pull request on an older main when a push does not
+    // change the changelog; a push that changed a file the pull request edits (Cargo.lock) then leaves it in conflict.
+    assert.equal(config["always-update"], true, "the configuration asks for a release pull request that follows main");
+    assert.ok(lib.readsAlwaysUpdate, "the pinned release-please reads always-update");
+    console.log("ok: the release pull request is written again at every push to main (always-update)");
 
     const opened = await (await lib.Manifest.fromManifest(client(lib), "main")).buildPullRequests();
     assert.equal(opened.length, 1, "release-please opens one release pull request");
