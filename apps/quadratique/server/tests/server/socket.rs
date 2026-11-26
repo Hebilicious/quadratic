@@ -278,6 +278,7 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
 /// already inside `accept` at that moment sees only the shut-down socket. This test makes that state on purpose: it
 /// shuts the socket down through a second descriptor while the loop runs, on a runtime with one thread. Once the
 /// runtime has seen the shutdown, its thread must still run another task.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_accept_loop_on_a_socket_that_was_shut_down_leaves_its_thread_to_other_tasks() {
     use std::os::fd::AsFd;
