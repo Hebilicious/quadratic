@@ -2,7 +2,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use acid_cat_core::cli::{CliIo, exit};
-use acid_cat_core::http::HttpClient;
 use acid_cat_core::{Kind, Outcome};
 use quadratique_server::app::input_refusal;
 use quadratique_server::domain::Binding;
@@ -532,7 +531,7 @@ impl Retired {
 
 struct Plan {
     root: PathBuf,
-    client: Option<HttpClient>,
+    client: Option<caller::Client>,
     skills: Vec<(File, &'static str)>,
     retired: Vec<Retired>,
     agents: File,
@@ -552,7 +551,7 @@ pub async fn init(words: &[&str], io: &mut CliIo) -> i32 {
 
 /// The server to ask about projects. A dry run asks only a server that already runs, so that it
 /// writes nothing; when there is none it says why.
-async fn server(dry_run: bool) -> Result<Result<HttpClient, String>, i32> {
+async fn server(dry_run: bool) -> Result<Result<caller::Client, String>, i32> {
     if !dry_run {
         return crate::remote(crate::route::McpTool::Absent).await.map(Ok);
     }

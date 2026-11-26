@@ -48,7 +48,13 @@ impl Client {
         }
     }
 
-    fn refusal(&mut self, name: &str, arguments: Value) -> String {
+    /// Ends the session: closes standard input, and waits for the process to exit.
+    pub(crate) fn finish(mut self) -> crate::support::Run {
+        self.process.close_stdin();
+        self.process.finish()
+    }
+
+    pub(crate) fn refusal(&mut self, name: &str, arguments: Value) -> String {
         let answer = self.request(
             "tools/call",
             json!({ "name": name, "arguments": arguments }),

@@ -105,3 +105,119 @@ fn a_command_watch_an_mcp_tool_call_init_and_upgrade_skills_work_while_tcp_refus
         "a command started a server of its own"
     );
 }
+
+/// A server that answers its identity on the home's socket, as a server of this build and home does, then closes every
+/// call unanswered: a server that stops between the moment a command finds it and its call.
+struct FoundThenGone {
+    socket: std::path::PathBuf,
+}
+
+impl FoundThenGone {
+    fn serve(home: &Home) -> FoundThenGone {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::fs::PermissionsExt;
+
+        use quadratique_server::server::{CONTROL, Identity, Started};
+
+        let identity = Identity {
+            pid: std::process::id(),
+            database: home
+                .path()
+                .canonicalize()
+                .expect("a real path")
+                .join("workspace.db"),
+            interface: Some(quadratique_server::app::interface()),
+            schema: Some(quadratique_server::store::SCHEMA_VERSION),
+            generation: Some("0123456789abcdef0123456789abcdef".to_owned()),
+            control: Some(CONTROL),
+            controls: Some(vec![CONTROL]),
+            executable: None,
+            started: Some(Started::Serve),
+            url: Some("http://127.0.0.1:9/cli".to_owned()),
+            address_kept: None,
+        };
+        let body = serde_json::to_string(&identity).expect("the identity as JSON");
+        let socket = home.path().join("server.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("the socket");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+            .expect("mode 0600");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("a stream"));
+                let mut first = String::new();
+                if reader.read_line(&mut first).is_err() || !first.starts_with("GET /server ") {
+                    continue;
+                }
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                    line.clear();
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        FoundThenGone { socket }
+    }
+
+    fn lost(&self, again: &str) -> String {
+        format!(
+            "The Quadratique server stopped after it was found on {}, before it answered. {again}",
+            self.socket.display()
+        )
+    }
+}
+
+#[test]
+fn a_server_that_stops_after_it_was_found_is_named_by_its_socket_with_what_to_do() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let elsewhere = outside();
+    let gone = FoundThenGone::serve(&home);
+
+    let init = home
+        .quadratique(&repository.root)
+        .args(["init", "--key", "TAL"])
+        .run();
+    let mut mcp = Client::start(
+        home.quadratique(&repository.root)
+            .args(["mcp"])
+            .spawn_interactive(),
+    );
+    let tool = mcp.refusal("issue.ready", json!({}));
+    let session = mcp.finish();
+    let skills = home
+        .quadratique(elsewhere.path())
+        .args(["upgrade", "--skills"])
+        .run()
+        .ok();
+
+    assert_eq!(init.code, 4, "{init:?}");
+    let init: serde_json::Value = serde_json::from_str(init.stderr.trim()).expect("one JSON line");
+    assert_eq!(
+        init,
+        json!({
+            "kind": "unavailable",
+            "message": gone.lost("Run the command again: it starts the server."),
+        })
+    );
+    assert!(tool.contains("The capability failed."), "{tool}");
+    assert!(
+        session
+            .stderr
+            .contains(&gone.lost("Call the tool again: the next call starts the server."))
+            && !session.stderr.contains("the server answered"),
+        "{session:?}"
+    );
+    assert_eq!(
+        skills["skills"]["error"],
+        format!(
+            "the projects could not be listed: {}",
+            gone.lost("Run the command again: it starts the server.")
+        ),
+        "{skills}"
+    );
+}

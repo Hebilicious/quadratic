@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use acid_cat_core::Kind;
 use acid_cat_core::cli::{CliOptions, CliOutput, OutputForm, exit, run_cli_process};
-use acid_cat_core::http::HttpClient;
 use quadratique_server::app::{CATALOG_JSON, Context, application};
 use quadratique_server::domain::Binding;
 use quadratique_server::server::TARGET;
@@ -47,7 +46,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if words.call_the_server(&args) {
         match remote(words.mcp_tool(&args)).await {
-            Ok(client) => options = options.remote(client),
+            Ok(client) => options = options.remote(client.http()),
             Err(code) => return code,
         }
     }
@@ -61,7 +60,7 @@ async fn run(args: Vec<String>) -> i32 {
     code
 }
 
-pub(crate) async fn remote(mcp_tool: route::McpTool) -> Result<HttpClient, i32> {
+pub(crate) async fn remote(mcp_tool: route::McpTool) -> Result<caller::Client, i32> {
     let caller = caller::detect(Binding::Cli)
         .map_err(|error| fail(Kind::InvalidInput, error.to_string()))?;
     let home = commands::home().map_err(|error| {

@@ -125,7 +125,11 @@ impl Upstream {
             .await
             .map_err(|error| Defect::new(error.to_string()))?;
         let client = caller::client(caller, &endpoint).map_err(Defect::new)?;
-        match client.invoke(id, input).await {
+        let outcome = client
+            .invoke_or_lost(id, input)
+            .await
+            .map_err(|lost| Defect::new(lost.for_a_tool()))?;
+        match outcome {
             Outcome::Value(value) => Ok(value),
             Outcome::Failure(failure) => Err(RunError::Failure(failure)),
             Outcome::CallFailure(failure) => Err(RunError::Defect(Defect::new(format!(
