@@ -16,7 +16,10 @@ pub use findings::{
     decision_blocks, step,
 };
 pub use issue::{Assignee, Caller, Claim, HolderKey, Issue, IssueId, Project, WorkingCopy};
-pub use lifecycle::{Change, ClaimAfter, Event, Landing, Outcome, create_status, decide};
+pub use lifecycle::{
+    Change, ClaimAfter, Confidence, Event, Landing, Outcome, create_status, decide, decide_on_word,
+    uses_human_word,
+};
 pub use project::check_project_update;
 pub use readiness::{Readiness, Wait, WaitKind, readiness};
 pub use stack::{Base, STACKED_ON, Stage, holding_back, may_reach, may_stack};
