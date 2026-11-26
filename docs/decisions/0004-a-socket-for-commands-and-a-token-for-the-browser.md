@@ -404,6 +404,16 @@ exists (QUA-55).
 | The reboot recipe (documentation only) | A systemd user unit that runs `quadratique serve` starts at login. With `loginctl enable-linger`, it starts before login. On macOS, a LaunchAgent runs at login. |
 | A release that was skipped, or a kernel without pidfds | The manual recovery of §3. |
 
+**As built in QUA-60 (2026-11-26), the cutover's third step.**
+
+| Point | What was built |
+| --- | --- |
+| Install | `install.sh` copies the binary to `$XDG_BIN_HOME/quadratique` (else `~/.local/bin/quadratique`) through a private staging file and a rename, and starts nothing. `uninstall.sh` and the `uninstall` task are gone, and the release archive holds `install.sh` alone beside the binary. The install test runs no service manager: it checks the copy, the page of a binary whose web folder is gone, an install from a release over a running older build, and `serve --take-over`. |
+| `upgrade` | No `systemctl`: it stops the generation that runs the replaced file, says to restart a server started with `quadratique serve` the way it was started, and otherwise lets the next command start the new build. The service hint after a manager's upgrade and the hint for an inactive unit are gone. A test's fake `systemctl` records any call, and the upgrade makes none. The legacy instructions point to the README section on a unit that an earlier install wrote instead of naming `systemctl`. |
+| What a 0.2 or 0.3 upgrader needs | Checked with the released 0.2.0 and 0.3.0 archives: their `install.sh` (with a fake `systemctl`) writes the unit; after the binary is replaced and the unit restarted, the new build's `serve --take-over` is the unit's main process, the new `server status` says `running`, `sameInterface` and that `pid`, and the 0.2.0 and 0.3.0 command lines' own look takes it as running with that pid. The install test checks the same fields against `serve --take-over` with and without a server running. |
+| The README | "Keep the server up after a reboot" (a user unit at login, `loginctl enable-linger`, a LaunchAgent), "A unit that an earlier install wrote" (what it runs and for which data folder, disable, remove, `daemon-reload`, the store stays, the mise copy, the inactive but enabled unit after a clean stop, the manual recovery of §3), and "Uninstall". |
+| macOS | The install test runs there without `continue-on-error`; it skips the release archive, which `package.sh` makes with GNU tar and `sha256sum` (QUA-36). |
+
 ## 7. Platforms
 
 | | Linux | macOS | Windows |

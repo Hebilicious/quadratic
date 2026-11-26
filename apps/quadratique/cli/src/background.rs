@@ -326,7 +326,7 @@ fn legacy_instructions(pid: Option<u32>) -> String {
         None => "otherwise find the process that serves this data folder and end it".to_owned(),
     };
     format!(
-        "Stop it yourself, then run the command again: if `quadratique.service` runs it (`systemctl --user status quadratique.service` names its main PID), run `systemctl --user stop quadratique.service`; if it runs in a terminal, press Ctrl-C there; {process}."
+        "Stop it yourself, then run the command again: if the user unit `quadratique.service` of an earlier install runs it, stop that unit, as the README section \"A unit that an earlier install wrote\" says; if it runs in a terminal, press Ctrl-C there; {process}."
     )
 }
 

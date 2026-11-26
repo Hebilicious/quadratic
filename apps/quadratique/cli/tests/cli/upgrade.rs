@@ -1,7 +1,7 @@
 //! `quadratique upgrade` against a local fake of the GitHub release source. The binary under test
 //! is a debug build, the only kind that reads QUADRATIQUE_UPGRADE_SOURCE; nothing here reaches
-//! the network. Every run finds a fake `systemctl` first on its PATH, so no test reads or
-//! changes this machine's user services.
+//! the network. Every run finds a fake `systemctl` first on its PATH, which records a call and
+//! changes nothing: the upgrade calls none, and no test reaches this machine's user services.
 //!
 //! The upgrade finds the home's server on its socket and stops only the generation it saw before
 //! the rename, and only when that server says it runs the replaced file
@@ -30,7 +30,9 @@ const SKILL: &str = include_str!("../../../skill/quadratique/SKILL.md");
 const SKILL_PATH: &str = ".agents/skills/quadratique/SKILL.md";
 const PLANNING_PATH: &str = ".agents/skills/quadratique/planning.md";
 const LOCK: &str = ".quadratique-upgrade.lock";
-const NO_SERVICE: &str = "#!/bin/sh\necho LoadState=not-found\necho ActiveState=inactive\necho MainPID=0\necho NeedDaemonReload=no\n";
+/// Records that it ran, beside itself, and fails.
+const RECORDING_SYSTEMCTL: &str =
+    "#!/bin/sh\ntouch \"$(dirname \"$0\")/systemctl-called\"\nexit 1\n";
 
 fn this_target() -> &'static str {
     match std::env::consts::ARCH {
@@ -322,7 +324,7 @@ fn place_binary(path: &Path) {
 }
 
 /// A binary installed as a file in a folder of its own, outside any git working tree, with a
-/// home for its server and a fake `systemctl`.
+/// home for its server and a fake `systemctl` that only records a call.
 struct Installed {
     home: Home,
     folder: TempDir,
@@ -350,7 +352,11 @@ impl Installed {
             tools,
             _pass: pass,
         };
-        installed.systemctl(NO_SERVICE);
+        write_executable(
+            &installed.tools.join("systemctl"),
+            None,
+            RECORDING_SYSTEMCTL,
+        );
         installed
     }
 
@@ -362,10 +368,8 @@ impl Installed {
         self.folder.path().canonicalize().unwrap()
     }
 
-    fn systemctl(&self, script: &str) {
-        let staged = self.tools.join("systemctl.new");
-        write_executable(&staged, None, script);
-        std::fs::rename(&staged, self.tools.join("systemctl")).unwrap();
+    fn systemctl_was_called(&self) -> bool {
+        self.tools.join("systemctl-called").exists()
     }
 
     fn quadratique(&self, releases: &Releases) -> Quadratique {
@@ -901,23 +905,6 @@ fn a_staging_folder_left_by_a_killed_upgrade_is_removed_by_the_next() {
     );
 }
 
-/// A fake `systemctl` that runs `quadratique.service` as systemd would: its main process is the
-/// pid in `<state>/pid` while that process lives (a zombie has exited), and a start of an
-/// inactive unit starts the installed binary's server with take-over. It logs every call.
-///
-/// With a file `<state>/start-another`, the first `show` that finds the unit inactive first runs a
-/// command of the installed binary, which starts a server on demand and returns once it is ready,
-/// and writes that server's `server status` to `<state>/another.json`: a command that started a
-/// server between the upgrade's stop and the unit's start.
-fn service(state: &Path, binary: &Path, needs_reload: bool) -> String {
-    format!(
-        "#!/bin/sh\nstate={state}\necho \"$*\" >> \"$state/calls\"\nalive() {{ pid=$(cat \"$state/pid\" 2>/dev/null) && [ -r \"/proc/$pid/stat\" ] && [ \"$(sed 's/^.*) //' \"/proc/$pid/stat\" | cut -c1)\" != Z ]; }}\ncase \"$1 $2\" in\n'--user show') if alive; then echo LoadState=loaded; echo ActiveState=active; echo \"MainPID=$pid\"; else if [ -f \"$state/start-another\" ] && [ ! -f \"$state/another.json\" ]; then {binary} project list > /dev/null 2>&1; {binary} server status > \"$state/another.json\"; fi; echo LoadState=loaded; echo ActiveState=inactive; echo MainPID=0; fi; echo NeedDaemonReload={reload} ;;\n'--user start') alive || {{ nohup {binary} serve --take-over > \"$state/log\" 2>&1 & echo $! > \"$state/pid\"; }} ;;\nesac\n",
-        state = state.display(),
-        binary = binary.display(),
-        reload = if needs_reload { "yes" } else { "no" },
-    )
-}
-
 /// The generation of the home's server, from `server status` over its socket.
 fn generation_of(installed: &Installed, releases: &Releases) -> String {
     let status = installed
@@ -929,90 +916,6 @@ fn generation_of(installed: &Installed, releases: &Releases) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("no generation: {status}"))
         .to_owned()
-}
-
-/// The interrupted upgrade under the service: the generation that runs the replaced file is
-/// asked to stop over the socket, and once systemd has seen its main process leave, the unit is
-/// started again and its `serve --take-over` runs the installed file. Nothing restarts the unit.
-#[test]
-fn under_the_service_the_generation_on_the_replaced_file_is_stopped_and_the_unit_started_until_the_new_build_serves()
- {
-    let releases = Releases::start();
-    let installed = Installed::file();
-    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
-    let earlier = installed.server_of_an_earlier_build(&releases);
-    let generation = generation_of(&installed, &releases);
-    let state = installed.root().join("systemd");
-    std::fs::create_dir_all(&state).unwrap();
-    std::fs::write(state.join("pid"), earlier.to_string()).unwrap();
-    installed.systemctl(&service(&state, &installed.binary, false));
-
-    let answer = installed.upgrade(&releases, &[]).ok();
-
-    let now: u32 = std::fs::read_to_string(state.join("pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert_ne!(now, earlier);
-    assert_eq!(
-        answer["server"],
-        format!(
-            "stopped the earlier build and started quadratique.service again; {CURRENT} serves this home (pid {now}, generation {})",
-            generation_of(&installed, &releases)
-        ),
-        "{answer}"
-    );
-    let status = installed
-        .quadratique(&releases)
-        .args(["server", "status"])
-        .run()
-        .ok();
-    assert_eq!(
-        status["running"], true,
-        "answered before the new build served: {status}"
-    );
-    assert_eq!(status["sameInterface"], true, "{status}");
-    assert_eq!(status["pid"], now, "{status}");
-    assert_ne!(status["generation"], json!(generation), "{status}");
-    await_exit(earlier);
-    assert_eq!(
-        std::fs::canonicalize(format!("/proc/{now}/exe")).unwrap(),
-        installed.binary
-    );
-    let calls = std::fs::read_to_string(state.join("calls")).unwrap();
-    assert!(
-        calls.contains("--user start quadratique.service"),
-        "{calls}"
-    );
-    assert!(!calls.contains("restart"), "{calls}");
-}
-
-#[test]
-fn a_service_whose_unit_changed_on_disk_is_not_restarted() {
-    let releases = Releases::start();
-    let installed = Installed::file();
-    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
-    let earlier = installed.server_of_an_earlier_build(&releases);
-    let state = installed.root().join("systemd");
-    std::fs::create_dir_all(&state).unwrap();
-    std::fs::write(state.join("pid"), earlier.to_string()).unwrap();
-    installed.systemctl(&service(&state, &installed.binary, true));
-
-    let answer = installed.upgrade(&releases, &[]).ok();
-
-    let warning = answer["warnings"][0].as_str().unwrap();
-    assert!(
-        warning.contains("systemctl --user daemon-reload"),
-        "{warning}"
-    );
-    assert!(warning.contains("nothing was stopped"), "{warning}");
-    let calls = std::fs::read_to_string(state.join("calls")).unwrap();
-    assert!(
-        !calls.contains("restart") && !calls.contains("start"),
-        "{calls}"
-    );
-    assert_eq!(installed.home.servers(), vec![earlier]);
 }
 
 /// An upgrade killed between its rename and its stop left the server on the replaced file; the
@@ -1044,7 +947,7 @@ fn an_interrupted_upgrade_is_finished_by_the_next_run_which_stops_the_generation
 }
 
 /// The server was started from the installed file, which the upgrade replaces: the generation
-/// read before the rename is stopped after it.
+/// read before the rename is stopped after it, and no service manager is asked anything.
 #[test]
 fn a_server_that_runs_the_replaced_file_is_stopped_by_the_generation_seen_before_the_rename() {
     let releases = Releases::start();
@@ -1075,6 +978,10 @@ fn a_server_that_runs_the_replaced_file_is_stopped_by_the_generation_seen_before
     assert_eq!(installed.bytes(), binary);
     await_exit(servers[0]);
     assert!(installed.home.servers().is_empty());
+    assert!(
+        !installed.systemctl_was_called(),
+        "the upgrade called systemctl"
+    );
 }
 
 /// The home's server runs a copy installed elsewhere: the upgrade replaces its own file and
@@ -1298,139 +1205,6 @@ fn a_server_that_becomes_ready_while_the_upgrade_waits_for_start_lock_is_seen_an
     );
 }
 
-/// A command starts a server between the upgrade's stop and the unit's start (the fake runs it
-/// when the upgrade first finds the unit inactive). The unit's take-over replaces it, and the
-/// answer names it.
-#[test]
-fn a_server_started_between_the_stop_and_the_service_start_is_named_in_the_answer() {
-    let releases = Releases::start();
-    let installed = Installed::file();
-    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
-    let earlier = installed.server_of_an_earlier_build(&releases);
-    let state = installed.root().join("systemd");
-    std::fs::create_dir_all(&state).unwrap();
-    std::fs::write(state.join("pid"), earlier.to_string()).unwrap();
-    std::fs::write(state.join("start-another"), "").unwrap();
-    installed.systemctl(&service(&state, &installed.binary, false));
-
-    let answer = installed.upgrade(&releases, &[]).ok();
-
-    let another: Value =
-        serde_json::from_str(&std::fs::read_to_string(state.join("another.json")).unwrap())
-            .unwrap();
-    let (generation, pid) = (
-        another["generation"].as_str().unwrap(),
-        another["pid"].as_u64().unwrap(),
-    );
-    let now: u32 = std::fs::read_to_string(state.join("pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let told = answer["server"].as_str().unwrap_or_default();
-    assert!(
-        told.starts_with("stopped the earlier build and started quadratique.service again")
-            && told.contains(&format!("serves this home (pid {now}, "))
-            && told.contains(&format!(
-                "Generation {generation} (pid {pid}), which a command started after the earlier build stopped, was replaced by the take-over of quadratique.service, whose server serves now"
-            )),
-        "{answer}"
-    );
-    await_exit(u32::try_from(pid).unwrap());
-    await_exit(earlier);
-    assert_eq!(installed.home.servers(), vec![now]);
-}
-
-/// The bring-up has one deadline, and each `systemctl` call gets only what is left of it: a
-/// `systemctl show` that never answers ends at the deadline (1.5 seconds in this debug build),
-/// not at a limit of its own, and nothing is stopped.
-#[test]
-fn a_systemctl_that_never_answers_ends_at_the_bring_up_deadline_and_stops_nothing() {
-    let releases = Releases::start();
-    let installed = Installed::file();
-    releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
-    let fake = FakeServer::start(&installed, OnStop::Accept);
-    let never_written = installed.root().join("never-written");
-    let made = std::process::Command::new("mkfifo")
-        .arg(&never_written)
-        .status()
-        .unwrap();
-    assert!(made.success());
-    installed.systemctl(&format!(
-        "#!/bin/sh\nread -r _ < {}\n",
-        never_written.display()
-    ));
-
-    let answer = installed
-        .quadratique(&releases)
-        .env("QUADRATIQUE_UPGRADE_BRING_UP_MS", "1500")
-        .args(["upgrade"])
-        .run()
-        .ok();
-
-    let warning = answer["warnings"][0].as_str().unwrap_or_default();
-    assert!(
-        warning.contains("quadratique.service could not be inspected")
-            && warning.contains("gave no answer within 1 seconds")
-            && warning.contains("was left running"),
-        "{answer}"
-    );
-    assert!(fake.asked().is_empty(), "{answer}");
-}
-
-/// A fake `systemctl` whose `quadratique.service` is loaded, inactive, and starts `binary`.
-fn inactive_service(state: &Path, binary: &Path) -> String {
-    format!(
-        "#!/bin/sh\necho \"$*\" >> {state}/calls\ncase \"$1 $2\" in\n'--user show') echo LoadState=loaded; echo ActiveState=inactive; echo MainPID=0; echo NeedDaemonReload=no; echo 'ExecStart={{ path={binary} ; argv[]={binary} serve --take-over ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }}' ;;\nesac\n",
-        state = state.display(),
-        binary = binary.display(),
-    )
-}
-
-/// An upgrade killed after it stopped the service's server and before it started the unit again
-/// leaves the unit inactive. The next run starts nothing (the person may have stopped the unit),
-/// and says what to run; with the unit starting another binary, it says nothing of it.
-#[test]
-fn an_upgrade_killed_before_the_service_start_leaves_a_run_that_says_how_to_start_the_unit() {
-    let releases = Releases::start();
-    let installed = Installed::file();
-    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
-    installed.record_replaced();
-    let copy = installed.binary.with_file_name("copy");
-    copy_binary(&copy);
-    std::fs::rename(&copy, &installed.binary).unwrap();
-    let state = installed.root().join("systemd");
-    std::fs::create_dir_all(&state).unwrap();
-    installed.systemctl(&inactive_service(&state, &installed.binary));
-
-    let answer = installed.upgrade(&releases, &[]).ok();
-    let checked = installed.upgrade(&releases, &["--check"]).ok();
-    installed.systemctl(&inactive_service(
-        &state,
-        Path::new("/elsewhere/quadratique"),
-    ));
-    let other = installed.upgrade(&releases, &[]).ok();
-
-    let warning = answer["warnings"][0].as_str().unwrap_or_default();
-    assert!(
-        warning
-            .contains("quadratique.service, which starts this binary, is not running (inactive)")
-            && warning.contains("systemctl --user start quadratique.service"),
-        "{answer}"
-    );
-    assert!(
-        checked["server"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("systemctl --user start quadratique.service"),
-        "{checked}"
-    );
-    assert!(other.get("warnings").is_none(), "{other}");
-    let calls = std::fs::read_to_string(state.join("calls")).unwrap();
-    assert!(!calls.contains("--user start"), "{calls}");
-    assert!(installed.home.servers().is_empty());
-}
-
 /// The read-only forms create neither a missing data folder nor the install lock.
 #[test]
 fn check_and_the_reports_create_no_data_folder_and_no_install_lock() {
@@ -1525,7 +1299,7 @@ fn a_server_from_before_the_socket_is_found_without_tcp_and_the_upgrade_says_wha
     assert!(
         warning.contains("release 0.1")
             && warning.contains("The upgrade stopped nothing")
-            && warning.contains("systemctl --user stop quadratique.service"),
+            && warning.contains("stop that unit"),
         "{answer}"
     );
     assert!(
@@ -1663,21 +1437,6 @@ fn a_server_on_a_file_that_no_run_recorded_as_replaced_is_left_running() {
     let answer = installed.upgrade(&releases, &[]).ok();
 
     assert!(answer.get("server").is_none(), "{answer}");
-    assert_eq!(installed.home.servers(), vec![earlier]);
-}
-
-#[test]
-fn a_service_that_cannot_be_inspected_stops_nothing() {
-    let releases = Releases::start();
-    let installed = Installed::file();
-    releases.publish(CURRENT, assets(CURRENT, b"never installed"));
-    let earlier = installed.server_of_an_earlier_build(&releases);
-    installed.systemctl("#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n");
-
-    let answer = installed.upgrade(&releases, &[]).ok();
-
-    let warning = answer["warnings"][0].as_str().unwrap();
-    assert!(warning.contains("could not be inspected"), "{warning}");
     assert_eq!(installed.home.servers(), vec![earlier]);
 }
 
