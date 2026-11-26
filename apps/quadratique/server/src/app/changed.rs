@@ -401,3 +401,80 @@ fn computed(view: &View<'_>, caller: &Caller) -> Result<Computed, Refused> {
         .map(|record| Ok((record.id.clone(), board.summary(record, caller)?)))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use acid_cat_core::{Outcome, Session, SubscribeOptions};
+    use jiff::{SignedDuration, Timestamp};
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::app::{Context, application};
+    use crate::domain::{Caller, WorkingCopy};
+    use crate::store::{Author, Call, NewIssue, Store};
+
+    const HUMAN: &str = r#"{"kind":"human","name":"sam"}"#;
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+    // Far longer than the hang guard: an occurrence that arrives at all is younger than this, however slow the machine.
+    const MAX_AGE: SignedDuration = SignedDuration::from_hours(1);
+
+    async fn create(store: &Store, title: &str) {
+        let issue = NewIssue {
+            project: "DEM".into(),
+            title: title.into(),
+            status: "todo".into(),
+            created_by: HUMAN.into(),
+            ..NewIssue::default()
+        };
+        let call = Call::new(Author::new(HUMAN).expect("an author"), "issue.create");
+        store
+            .write(call, move |tx| tx.create_issue(&issue).map(|_| ()))
+            .await
+            .expect("the write ends");
+    }
+
+    #[tokio::test]
+    async fn a_live_occurrence_older_than_max_age_is_skipped_and_the_next_one_is_truncated() {
+        let home = tempfile::tempdir().expect("a temporary directory");
+        let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
+        let human = Caller {
+            actor: serde_json::from_str(HUMAN).expect("an actor"),
+            working_copy: WorkingCopy::default(),
+        };
+        let app = application().expect("the application");
+        let session = Session::open(&app, "cli", Arc::new(Context::new(store.clone(), human)));
+        let created = session
+            .invoke(
+                "project.create",
+                json!({ "key": "DEM", "name": "Demo" }),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(created, Outcome::Value(_)), "{created:?}");
+        let mut live = session
+            .subscribe(
+                "issue.changed",
+                json!({}),
+                SubscribeOptions {
+                    max_age_ms: Some(MAX_AGE.as_secs_f64() * 1000.0),
+                    ..SubscribeOptions::default()
+                },
+            )
+            .expect("the subscription starts");
+
+        store.date_next_commit(Timestamp::now() - MAX_AGE * 2);
+        create(&store, "Aged").await;
+        create(&store, "Fresh").await;
+
+        let first = tokio::time::timeout(HANG_GUARD, live.next())
+            .await
+            .expect("an occurrence within the hang guard")
+            .expect("the subscription goes on")
+            .expect("an occurrence");
+        assert_eq!(first.data["issues"][0]["issue"]["title"], "Fresh");
+        assert!(first.truncated, "{first:?}");
+    }
+}
