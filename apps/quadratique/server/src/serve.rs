@@ -494,10 +494,14 @@ pub fn serve_socket(
     let gate = gate.clone();
     let task = tokio::spawn(async move {
         loop {
+            // Once a stop shuts the socket down, Linux reports it readable and hung up for good, and `accept4` answers
+            // `EAGAIN`. tokio's `accept` retries inside one poll and spends no budget on `EAGAIN`, so it would hold its
+            // worker thread forever and this loop would never see the cancellation that came before the shutdown.
+            // `poll_accept` spends budget on each try and yields once the budget is spent.
             let accepted = tokio::select! {
                 biased;
                 () = accepted_while.cancelled() => return,
-                accepted = listening.accept() => accepted,
+                accepted = std::future::poll_fn(|cx| listening.poll_accept(cx)) => accepted,
             };
             let Ok((stream, _)) = accepted else {
                 continue;

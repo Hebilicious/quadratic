@@ -60,7 +60,17 @@ jobs:
       - if: steps.browsers.outputs.cache-hit == 'true'
         run: pnpm --filter quadratique-web exec playwright install-deps chromium-headless-shell
 
+      # Ubuntu's AppArmor lets an unprivileged process make a user namespace but not map its account in it, which the
+      # tests of a sandbox's user namespace need (unshare --map-user); the variable makes them fail instead of skip.
+      - name: Allow user namespaces that map this account
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Run the full check
+        env:
+          QUADRATIQUE_TEST_USER_NAMESPACES: required
         run: >-
           moon run
           quadratique-cli:test quadratique-cli:lint quadratique-cli:fmt-check

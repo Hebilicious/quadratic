@@ -83,13 +83,25 @@ pub enum HomeError {
     #[error("{0}")]
     Store(#[from] StoreError),
     #[error("{} is a link that another account could change: {reason}", .link.display())]
-    ForeignLink { link: PathBuf, reason: String },
+    ForeignLink {
+        link: PathBuf,
+        reason: String,
+        other_owner: Option<OtherOwner>,
+    },
     #[error("another account can replace {}: {reason}", .path.display())]
-    Replaceable { path: PathBuf, reason: String },
+    Replaceable {
+        path: PathBuf,
+        reason: String,
+        other_owner: Option<OtherOwner>,
+    },
     #[error("{} gives access to another account: {reason}", .path.display())]
     SharedAccess { path: PathBuf, reason: String },
     #[error("{} is not private: {reason}", .path.display())]
-    NotPrivate { path: PathBuf, reason: String },
+    NotPrivate {
+        path: PathBuf,
+        reason: String,
+        other_owner: Option<OtherOwner>,
+    },
     #[error("{} is not a folder", .0.display())]
     NotAFolder(PathBuf),
     #[error(
@@ -134,6 +146,72 @@ impl HomeError {
             _ => None,
         }
     }
+
+    /// The entry whose owner made this refusal, when the kernel showed that owner as its overflow uid because this
+    /// process's user namespace does not map the real one ([`owner_hidden`]). The refusal stands: this process cannot
+    /// tell whether that owner is root or another account.
+    pub fn hidden_owner(&self) -> Option<&Path> {
+        let (HomeError::ForeignLink { other_owner, .. }
+        | HomeError::Replaceable { other_owner, .. }
+        | HomeError::NotPrivate { other_owner, .. }) = self
+        else {
+            return None;
+        };
+        let other = other_owner.as_ref()?;
+        owner_hidden(other.uid).then_some(other.path.as_path())
+    }
+}
+
+/// The entry that a refusal found owned by another account than this one or root, and that owner as `lstat` gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherOwner {
+    pub path: PathBuf,
+    pub uid: u32,
+}
+
+const OVERFLOW_UID: &str = "/proc/sys/kernel/overflowuid";
+const UID_MAP: &str = "/proc/self/uid_map";
+
+/// Whether `owner`, as `lstat` gave it, is not an account at all but the kernel's overflow uid, which stands for any
+/// owner that this process's user namespace does not map (`user_namespaces(7)`). Read from the kernel, never guessed:
+/// see [`stands_for_an_unmapped_owner`]. Outside Linux there is no such namespace, and it is never true.
+pub fn owner_hidden(owner: u32) -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let (Ok(overflow), Ok(uid_map)) = (
+        std::fs::read_to_string(OVERFLOW_UID),
+        std::fs::read_to_string(UID_MAP),
+    ) else {
+        return false;
+    };
+    overflow
+        .trim()
+        .parse()
+        .is_ok_and(|overflow| stands_for_an_unmapped_owner(owner, overflow, &uid_map))
+}
+
+/// `owner` is the overflow uid, and the overflow uid is no uid of this namespace: no line of its `uid_map` (inside,
+/// outside, count) covers it. The kernel shows a file as owned by a uid of the namespace only when the map gives that
+/// uid, so such an owner can only be the overflow uid standing in for an unmapped one. Outside a user namespace the map
+/// is the identity map `0 0 4294967295`, which covers every uid: an entry that the account nobody (uid 65534) really
+/// owns stays that account's. A map that does not read as such lines hides nothing.
+fn stands_for_an_unmapped_owner(owner: u32, overflow: u32, uid_map: &str) -> bool {
+    if owner != overflow {
+        return false;
+    }
+    let mut covered = false;
+    for line in uid_map.lines() {
+        let fields: Option<Vec<u64>> = line
+            .split_whitespace()
+            .map(|field| field.parse().ok())
+            .collect();
+        let Some([inside, _outside, count]) = fields.as_deref() else {
+            return false;
+        };
+        covered |= (*inside..inside.saturating_add(*count)).contains(&u64::from(overflow));
+    }
+    !covered
 }
 
 /// A path as a person types it in a POSIX shell.
@@ -229,7 +307,7 @@ mod unix {
     use std::path::{Component, Path, PathBuf};
     use std::time::Duration;
 
-    use super::{HomeError, Prepared, SOCKET_PATH_LIMIT, shell_word};
+    use super::{HomeError, OtherOwner, Prepared, SOCKET_PATH_LIMIT, shell_word};
 
     const GROUP_OR_OTHER_WRITE: u32 = 0o022;
     const GROUP_OR_OTHER_ANY: u32 = 0o077;
@@ -419,6 +497,7 @@ mod unix {
         if !meta.is_dir() || meta.uid() != me || meta.mode() & GROUP_OR_OTHER_ANY != 0 {
             return Err(HomeError::NotPrivate {
                 path: folder.to_path_buf(),
+                other_owner: None,
                 reason: format!(
                     "the folder that Quadratique made there is not a private folder of this account (mode {:o}, uid {})",
                     meta.mode() & 0o7777,
@@ -430,17 +509,27 @@ mod unix {
     }
 
     fn check_link(link: &Path, meta: &Metadata, holder: &Path, me: u32) -> Result<(), HomeError> {
-        let foreign = |reason: String| HomeError::ForeignLink {
+        let foreign = |reason: String, other_owner: Option<OtherOwner>| HomeError::ForeignLink {
             link: link.to_path_buf(),
             reason: format!("{reason}; name the folder without this link, {ELSEWHERE}"),
+            other_owner,
         };
         if meta.uid() != me && meta.uid() != ROOT {
-            return Err(foreign(format!(
-                "it belongs to another account (uid {})",
-                meta.uid()
-            )));
+            return Err(foreign(
+                format!("it belongs to another account (uid {})", meta.uid()),
+                Some(OtherOwner {
+                    path: link.to_path_buf(),
+                    uid: meta.uid(),
+                }),
+            ));
         }
-        check_ancestors(holder, me).map_err(|refusal| foreign(refusal.to_string()))
+        check_ancestors(holder, me).map_err(|refusal| {
+            let other_owner = match &refusal {
+                HomeError::Replaceable { other_owner, .. } => other_owner.clone(),
+                _ => None,
+            };
+            foreign(refusal.to_string(), other_owner)
+        })
     }
 
     /// `folder` and every folder above it, as folders above the home.
@@ -448,20 +537,31 @@ mod unix {
         for ancestor in folder.ancestors() {
             let meta = std::fs::symlink_metadata(ancestor).map_err(at(ancestor))?;
             let shown = shell_word(&ancestor.display().to_string());
-            let replaceable = |reason: String| HomeError::Replaceable {
-                path: ancestor.to_path_buf(),
-                reason,
-            };
+            let replaceable =
+                |reason: String, other_owner: Option<OtherOwner>| HomeError::Replaceable {
+                    path: ancestor.to_path_buf(),
+                    reason,
+                    other_owner,
+                };
             match exposure(meta.uid(), meta.mode(), me, false) {
                 Some(Exposure::OtherOwner(uid)) => {
-                    return Err(replaceable(format!(
-                        "it belongs to another account (uid {uid}); ask its owner to give it to you or to root, {ELSEWHERE}"
-                    )));
+                    return Err(replaceable(
+                        format!(
+                            "it belongs to another account (uid {uid}); ask its owner to give it to you or to root, {ELSEWHERE}"
+                        ),
+                        Some(OtherOwner {
+                            path: ancestor.to_path_buf(),
+                            uid,
+                        }),
+                    ));
                 }
                 Some(Exposure::Writable(mode)) => {
-                    return Err(replaceable(format!(
-                        "its mode is {mode:o}, which lets a group or other accounts rename what it holds, and it is not sticky; remove their write access (chmod go-w {shown}), {ELSEWHERE}"
-                    )));
+                    return Err(replaceable(
+                        format!(
+                            "its mode is {mode:o}, which lets a group or other accounts rename what it holds, and it is not sticky; remove their write access (chmod go-w {shown}), {ELSEWHERE}"
+                        ),
+                        None,
+                    ));
                 }
                 None => {}
             }
@@ -481,15 +581,22 @@ mod unix {
 
     fn check_leaf(leaf: &Path, me: u32) -> Result<(), HomeError> {
         let meta = std::fs::symlink_metadata(leaf).map_err(at(leaf))?;
-        let not_private = |reason: String| HomeError::NotPrivate {
+        let not_private = |reason: String, other_owner: Option<OtherOwner>| HomeError::NotPrivate {
             path: leaf.to_path_buf(),
             reason,
+            other_owner,
         };
         if meta.uid() != me {
-            return Err(not_private(format!(
-                "it belongs to another account (uid {}); set QUADRATIQUE_HOME to a folder of your own",
-                meta.uid()
-            )));
+            return Err(not_private(
+                format!(
+                    "it belongs to another account (uid {}); set QUADRATIQUE_HOME to a folder of your own",
+                    meta.uid()
+                ),
+                Some(OtherOwner {
+                    path: leaf.to_path_buf(),
+                    uid: meta.uid(),
+                }),
+            ));
         }
         if let Some(grant) = acl::granted(leaf, acl::Access::Any)? {
             return Err(HomeError::SharedAccess {
@@ -502,10 +609,13 @@ mod unix {
         }
         let mode = meta.permissions().mode() & 0o777;
         if mode & GROUP_OR_OTHER_ANY != 0 {
-            return Err(not_private(format!(
-                "its mode is {mode:o}, which lets a group or other accounts use it; run chmod 700 {}",
-                shell_word(&leaf.display().to_string())
-            )));
+            return Err(not_private(
+                format!(
+                    "its mode is {mode:o}, which lets a group or other accounts use it; run chmod 700 {}",
+                    shell_word(&leaf.display().to_string())
+                ),
+                None,
+            ));
         }
         Ok(())
     }
@@ -945,5 +1055,47 @@ mod unix {
             assert_eq!(named_grant(&acl(&me), Access::Any, ME), None);
             assert!(named_grant(&[1, 0, 0, 0], Access::Any, ME).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod hidden_owner_tests {
+    use super::stands_for_an_unmapped_owner;
+
+    const OVERFLOW: u32 = 65534;
+    const IDENTITY: &str = "         0          0 4294967295\n";
+    const ONLY_THIS_ACCOUNT: &str = "      1000       1000          1\n";
+
+    #[test]
+    fn outside_a_user_namespace_the_account_nobody_is_an_owner_like_any_other() {
+        assert!(!stands_for_an_unmapped_owner(OVERFLOW, OVERFLOW, IDENTITY));
+    }
+
+    #[test]
+    fn in_a_namespace_that_maps_only_this_account_the_overflow_uid_hides_the_real_owner() {
+        assert!(stands_for_an_unmapped_owner(
+            OVERFLOW,
+            OVERFLOW,
+            ONLY_THIS_ACCOUNT
+        ));
+        assert!(!stands_for_an_unmapped_owner(
+            1001,
+            OVERFLOW,
+            ONLY_THIS_ACCOUNT
+        ));
+    }
+
+    #[test]
+    fn a_namespace_that_maps_the_overflow_uid_or_a_map_that_does_not_read_hides_nothing() {
+        assert!(!stands_for_an_unmapped_owner(
+            OVERFLOW,
+            OVERFLOW,
+            "0 100000 65536\n"
+        ));
+        assert!(!stands_for_an_unmapped_owner(
+            OVERFLOW,
+            OVERFLOW,
+            "1000 1000\n"
+        ));
     }
 }
