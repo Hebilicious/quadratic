@@ -109,7 +109,10 @@ class Existing:
         self.worktrees = {a: root / a for a in scripted.AGENTS if (root / a).exists()}
 
     def stop(self) -> None:
-        self.adapter.stop(self.sb, self.repo)
+        try:
+            self.adapter.stop(self.sb, self.repo)
+        finally:
+            self.sb.remove()
 
 
 def reanalyze(adapter: Adapter, root: Path, quadratique_bin: Path) -> dict:

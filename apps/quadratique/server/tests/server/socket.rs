@@ -160,7 +160,8 @@ async fn the_socket_answers_the_identity_with_the_generation_and_the_control_ver
     assert_eq!(identity.pid, std::process::id());
     assert_eq!(identity.control, Some(CONTROL));
     assert_eq!(identity.started, Some(Started::Serve));
-    assert_eq!(identity.url.as_deref(), Some(server::COMPATIBLE_URL));
+    assert_eq!(identity.url, None);
+    assert_eq!(identity.controls, Some(vec![1, 2]));
     assert_eq!(
         identity.web, None,
         "a server that no browser used names a web app"
@@ -254,7 +255,7 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
         listener,
         file,
         Vec::new(),
-        serve::SOCKET_REQUEST_LIMIT,
+        serve::REQUEST_LIMIT,
         &serve::Gate::default(),
     );
     let other_name = home.path().join("same-socket");
@@ -302,7 +303,7 @@ fn an_accept_loop_on_a_socket_that_was_shut_down_leaves_its_thread_to_other_task
                 listener,
                 file,
                 Vec::new(),
-                serve::SOCKET_REQUEST_LIMIT,
+                serve::REQUEST_LIMIT,
                 &serve::Gate::default(),
             );
 
@@ -617,7 +618,7 @@ async fn answered_before_the_cut(running: &crate::support::Running, bytes: &[u8]
 async fn a_partial_control_request_is_cut_off_at_the_limit_and_stops_nothing() {
     use futures::FutureExt;
 
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
     let prepared = prepared_at(board.home());
     let generation = server::identity_over_socket(&prepared)
         .await
@@ -646,7 +647,7 @@ async fn a_partial_control_request_is_cut_off_at_the_limit_and_stops_nothing() {
 /// never arrives whole is cut off.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_request_whose_body_never_arrives_whole_is_cut_off_at_the_limit() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -662,7 +663,7 @@ async fn a_command_request_whose_body_never_arrives_whole_is_cut_off_at_the_limi
 /// it is cut off at the limit.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_connection_after_a_complete_answer_is_cut_off_at_the_limit() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -679,7 +680,7 @@ async fn an_idle_connection_after_a_complete_answer_is_cut_off_at_the_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_partial_request_after_a_complete_answer_on_the_same_connection_is_cut_off_at_the_limit()
 {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -743,7 +744,7 @@ async fn calls_and_their_event_stream_answer_on_the_socket_of_a_server_that_list
 /// off at the limit, and the stream still delivers the next occurrence.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_event_stream_on_the_socket_outlives_the_limit_of_a_request() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
     board.project("DEM").await;
     let mut live = within(
         "the subscription",
@@ -770,23 +771,29 @@ async fn an_event_stream_on_the_socket_outlives_the_limit_of_a_request() {
     within("the shutdown", board.server.shutdown()).await;
 }
 
-/// The command lines of releases 0.2 and 0.3 take an identity as a server only when it has these fields, the `url` as
-/// a loopback address of the command line's routes (`background.rs` `on_socket_within` and `runtime_of` at v0.2.0 and
-/// v0.3.0). Their `quadratique upgrade` waits for such an identity from the new build, with its own pid and
-/// executable, after it restarts the unit (record 0004, §6). Anything else is `Malformed` to them, and the upgrade
-/// fails.
+/// The command lines of releases 0.2 and 0.3 look at the generation, the database and then the control version of an
+/// identity (`background.rs` `on_socket_within` at v0.2.0 and v0.3.0): a version other than 1 is a newer server, which
+/// they tell the person to upgrade the command line for, and which they still stop, and their `quadratique upgrade`
+/// still waits for, while it lists version 1 among its `controls` (record 0004, §6).
 #[tokio::test(flavor = "multi_thread")]
-async fn the_identity_is_one_that_the_command_lines_of_releases_0_2_and_0_3_take_as_a_server() {
+async fn the_identity_is_a_newer_server_to_the_command_lines_of_releases_0_2_and_0_3_that_they_can_stop()
+ {
     let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let running = server::start(&paths, server::loopback())
         .await
         .expect("the server starts");
-    crate::support::web_address(&running).await;
 
     let identity = server::identity_over_socket(&prepared_at(home.path()))
         .await
         .expect("the identity on the socket");
+    let stop = server::stop_over_socket(
+        &prepared_at(home.path()),
+        identity.generation.as_deref().unwrap_or_default(),
+        server::PROBE_LIMIT,
+    )
+    .await;
+    within("the server's own stop", running.stop_requested()).await;
     running.shutdown().await;
 
     let generation = identity.generation.clone().unwrap_or_default();
@@ -798,18 +805,15 @@ async fn the_identity_is_one_that_the_command_lines_of_releases_0_2_and_0_3_take
         identity.database,
         home.path().canonicalize().unwrap().join("workspace.db")
     );
-    assert_eq!(identity.control, Some(1));
-    assert!(identity.started.is_some(), "{identity:?}");
+    assert_ne!(identity.control, Some(1), "{identity:?}");
+    assert!(
+        identity
+            .controls
+            .as_deref()
+            .is_some_and(|controls| controls.contains(&1)),
+        "{identity:?}"
+    );
     assert_eq!(identity.pid, std::process::id());
     assert!(identity.executable.is_some(), "{identity:?}");
-    let url = identity.url.clone().unwrap_or_default();
-    let (authority, path) = url
-        .strip_prefix("http://")
-        .and_then(|rest| rest.split_once('/'))
-        .unwrap_or_else(|| panic!("{url} is not http://<address>/<path>"));
-    let address: std::net::SocketAddr = authority
-        .parse()
-        .unwrap_or_else(|_| panic!("{authority} is not an address"));
-    assert!(address.ip().is_loopback(), "{url}");
-    assert_eq!(path, "cli", "{url}");
+    assert!(matches!(stop, Ok(server::StopAnswer::Accepted)), "{stop:?}");
 }

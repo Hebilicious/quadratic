@@ -38,9 +38,13 @@ pub const IDENTITY: &str = "/server";
 pub const STOP: &str = "/server/stop";
 /// The version of the control protocol, which the socket serves: `GET /server` and `POST /server/stop`
 /// (apps/quadratique/README.md, "The control protocol"). A build keeps answering every version it ever served, and
-/// lists them in `controls`.
-pub const CONTROL: u32 = 1;
-pub const CONTROLS: &[u32] = &[CONTROL];
+/// lists them in `controls`. Version 2: the command line's routes are on the socket and nowhere else. Version 1, which
+/// releases 0.2 and 0.3 speak, served them on TCP; its two requests are the same, so a command line of those releases
+/// takes this server as newer and still stops it.
+pub const CONTROL: u32 = 2;
+/// The control version of releases 0.2 and 0.3.
+pub const EARLIER_CONTROL: u32 = 1;
+pub const CONTROLS: &[u32] = &[EARLIER_CONTROL, CONTROL];
 /// The authority that a request on the Unix socket names: the socket, not a host, decides where it goes.
 pub const SOCKET_AUTHORITY: &str = "quadratique.invalid";
 
@@ -53,11 +57,7 @@ pub(crate) const DATABASE_FILE: &str = "workspace.db";
 /// Written by the servers of releases 0.1 to 0.3, which served the command line on TCP: a hint, for the command line,
 /// that one of them may hold the home. No server writes it any more.
 pub(crate) const RUNTIME_FILE: &str = "server.json";
-/// The `url` of every identity. Releases 0.2 and 0.3 take an identity only with a loopback address of the command
-/// line's routes there, and their `quadratique upgrade` waits for that identity from the new build (record 0004, §6).
-/// No route answers at it: the command line's routes are on the socket only, and port 0 is no port.
-pub const COMPATIBLE_URL: &str = "http://127.0.0.1:0/cli";
-pub(crate) const LOCK_FILE: &str = "server.lock";
+pub const LOCK_FILE: &str = "server.lock";
 const DIRECTORY: &str = "quadratique";
 /// How long a server may take to start: a command waits this long for the server it started, and a server waits
 /// this long for a holder of the lock that is not a server to let go.
@@ -76,8 +76,8 @@ const LISTEN_BACKLOG: u32 = 1024;
 pub struct Waits {
     pub start: Duration,
     pub probe: Duration,
-    /// How long a client of the socket has to send a whole request.
-    pub socket_request: Duration,
+    /// How long a client, of the socket or of the web app on TCP, has to send a whole request.
+    pub request: Duration,
 }
 
 impl Default for Waits {
@@ -85,7 +85,7 @@ impl Default for Waits {
         Waits {
             start: START_LIMIT,
             probe: PROBE_LIMIT,
-            socket_request: serve::SOCKET_REQUEST_LIMIT,
+            request: serve::REQUEST_LIMIT,
         }
     }
 }
@@ -217,8 +217,8 @@ pub struct Identity {
     pub executable: Option<Executable>,
     #[serde(default)]
     pub started: Option<Started>,
-    /// [`COMPATIBLE_URL`] from this build on; a server of releases 0.2 and 0.3 named the command line's routes on TCP.
-    #[serde(default)]
+    /// The command line's routes on TCP, in the identity of a server of releases 0.2 and 0.3; none from this build on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// The address of the web app, `http://127.0.0.1:<port>/`, once its listener is open: at the start of a server whose
     /// home was paired before, otherwise at the first `quadratique ui`.
@@ -531,6 +531,11 @@ impl Server {
         self.web.listening()
     }
 
+    /// The web app's TCP connections open now, each a descriptor of the server.
+    pub async fn web_connections(&self) -> usize {
+        self.web.open_connections().await
+    }
+
     /// Opens the web app's listener, as the first `quadratique ui` does, and gives its address.
     pub async fn open_web(&self) -> std::io::Result<SocketAddr> {
         self.web.open().await
@@ -759,7 +764,7 @@ async fn start_checked(
         controls: Some(CONTROLS.to_vec()),
         executable: Executable::of_this_process(),
         started: Some(started),
-        url: Some(COMPATIBLE_URL.to_owned()),
+        url: None,
         web: None,
         address_kept: None,
     };
@@ -786,6 +791,7 @@ async fn start_checked(
         listen,
         strict,
         routes: web_routes,
+        request_limit: waits.request,
         gate: gate.clone(),
         origin,
     });
@@ -831,7 +837,7 @@ async fn start_checked(
             socket_listener,
             socket_file,
             vec![(IDENTITY.into(), control), (BASE.into(), surface)],
-            waits.socket_request,
+            waits.request,
             &gate,
         )
     };

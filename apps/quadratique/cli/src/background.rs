@@ -87,6 +87,13 @@ pub enum LifeError {
         control: u32,
         attempt: Attempt,
     },
+    /// A server of an earlier release (control version 1, releases 0.2 and 0.3) holds the home: it serves the commands
+    /// on TCP only, which this command line never uses.
+    Older {
+        pid: u32,
+        control: u32,
+        attempt: Attempt,
+    },
     /// The server answered `409`: it is not the generation this command asked to stop.
     OtherGeneration {
         asked: String,
@@ -191,7 +198,7 @@ impl std::fmt::Display for LifeError {
                     home.display(),
                     log.display(),
                     attempt.outcome(),
-                    recovery(*pid)
+                    recovery(*pid, Some(&home.join(quadratique_server::server::LOCK_FILE)))
                 )
             }
             LifeError::Stalled {
@@ -206,7 +213,7 @@ impl std::fmt::Display for LifeError {
                 PROBE,
                 log.display(),
                 attempt.outcome(),
-                recovery(*pid)
+                recovery(*pid, Some(&socket.with_file_name(quadratique_server::server::LOCK_FILE)))
             ),
             LifeError::Malformed {
                 socket,
@@ -232,6 +239,15 @@ impl std::fmt::Display for LifeError {
             LifeError::Newer { control, attempt } => write!(
                 formatter,
                 "the server of this home speaks control version {control}, which this command line does not know. {} Upgrade this command line.",
+                attempt.outcome()
+            ),
+            LifeError::Older {
+                pid,
+                control,
+                attempt,
+            } => write!(
+                formatter,
+                "a Quadratique server of an earlier release (pid {pid}, control version {control}) holds this home, and this command line cannot use it. {} Run `quadratique server stop`, which stops it, then run the command again: it starts this build's server.",
                 attempt.outcome()
             ),
             LifeError::OtherGeneration { asked, serving } => {
@@ -264,7 +280,7 @@ impl std::fmt::Display for LifeError {
                 write!(
                     formatter,
                     " End it yourself, then run the command again. {}",
-                    recovery(Some(*pid))
+                    recovery(Some(*pid), None)
                 )
             }
             LifeError::Legacy {
@@ -299,12 +315,16 @@ const PROBE: Duration = quadratique_server::server::PROBE_LIMIT;
 
 /// What a person does about a server that this command line will not signal: the process number comes from the
 /// server's last answer or its runtime file, and nothing has verified it.
-fn recovery(pid: Option<u32>) -> String {
-    let check = match usable_pid(pid) {
-        Some(pid) => format!(
+fn recovery(pid: Option<u32>, lock: Option<&Path>) -> String {
+    let check = match (usable_pid(pid), lock) {
+        (Some(pid), _) => format!(
             "its process number was last given as {pid}, unverified: check it with `ps -p {pid} -o args` before you end it"
         ),
-        None => "find its process first".to_owned(),
+        (None, Some(lock)) => format!(
+            "`lsof -t {}` names the process that holds the home's lock, on Linux and on macOS; check it with `ps -p <pid> -o args` before you end it",
+            lock.display()
+        ),
+        (None, None) => "find its process first".to_owned(),
     };
     format!(
         "To recover: press Ctrl-C in the terminal that runs `quadratique serve`, stop it with the supervisor that started it, or end the process ({check})."
@@ -528,6 +548,8 @@ pub enum OnSocket {
     OtherDatabase(Identity),
     /// A control version that this build does not know: a newer server.
     Newer(Identity),
+    /// An earlier control version: a server of an earlier release, which this build only stops.
+    Older(Identity),
     Malformed(String),
     Stalled,
     /// An entry that is not yet a socket of this account with mode 0600.
@@ -570,7 +592,8 @@ async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
     }
     match identity.control {
         None => return OnSocket::Malformed("the identity has no control version".to_owned()),
-        Some(control) if control != CONTROL => return OnSocket::Newer(identity),
+        Some(control) if control > CONTROL => return OnSocket::Newer(identity),
+        Some(control) if control < CONTROL => return OnSocket::Older(identity),
         Some(_) => {}
     }
     if identity.started.is_none() {
@@ -596,6 +619,8 @@ pub enum Observed {
         identity: Identity,
     },
     Newer(Identity),
+    /// A server of an earlier release: its control version is older than this build's.
+    Older(Identity),
     OtherDatabase(Identity),
     Malformed(String),
     Stalled,
@@ -623,6 +648,7 @@ async fn observe_within(home: &Home, limit: Duration) -> Result<Observed, LifeEr
         OnSocket::Serving(identity) => Observed::Serving { identity },
         OnSocket::OtherDatabase(identity) => Observed::OtherDatabase(identity),
         OnSocket::Newer(identity) => Observed::Newer(identity),
+        OnSocket::Older(identity) => Observed::Older(identity),
         OnSocket::Malformed(why) => Observed::Malformed(why),
         OnSocket::Stalled => Observed::Stalled,
         OnSocket::Denied(reason) | OnSocket::PathError(reason) => Observed::Unreachable(reason),
@@ -740,6 +766,11 @@ fn refusal(home: &Home, observed: Observed, attempt: Attempt) -> LifeError {
             attempt,
         },
         Observed::Newer(identity) => LifeError::Newer {
+            control: identity.control.unwrap_or_default(),
+            attempt,
+        },
+        Observed::Older(identity) => LifeError::Older {
+            pid: identity.pid,
             control: identity.control.unwrap_or_default(),
             attempt,
         },
@@ -991,7 +1022,7 @@ async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError>
             None
         }
         Observed::Starting { .. } => None,
-        Observed::Serving { identity, .. } => identity.generation,
+        Observed::Serving { identity, .. } | Observed::Older(identity) => identity.generation,
         Observed::Newer(identity) if lists_this_control(&identity) => identity.generation,
         refused => return Err(refusal(home, refused, Attempt::Stop)),
     };
@@ -1091,7 +1122,7 @@ async fn stop_holding(
                 }
             }
             Observed::Legacy | Observed::Starting { .. } => None,
-            Observed::Serving { identity, .. } => Some(identity),
+            Observed::Serving { identity, .. } | Observed::Older(identity) => Some(identity),
             Observed::Newer(identity)
                 if attempt == Attempt::Stop && lists_this_control(&identity) =>
             {
@@ -1324,6 +1355,36 @@ mod tests {
         );
         assert_eq!(command.get_current_dir(), Some(resolved.as_path()));
         assert!(!other.join("quadratique").exists());
+    }
+
+    /// No runtime file names the process any more: the recovery says how to find the process that holds the home's
+    /// lock, on Linux and on macOS.
+    #[test]
+    fn the_recovery_of_a_server_that_does_not_answer_names_how_to_find_its_process() {
+        use super::{Attempt, Hang};
+
+        let home = std::path::PathBuf::from("/home/someone/.local/share/quadratique");
+        let stalled = LifeError::Stalled {
+            socket: home.join("server.sock"),
+            log: home.join("server.log"),
+            pid: None,
+            attempt: Attempt::Start,
+        };
+        let hung = LifeError::Hung {
+            hang: Hang::NotStopped,
+            home: home.clone(),
+            log: home.join("server.log"),
+            pid: None,
+            attempt: Attempt::Stop,
+        };
+
+        for refused in [stalled, hung] {
+            let said = refused.to_string();
+            assert!(
+                said.contains("lsof -t /home/someone/.local/share/quadratique/server.lock"),
+                "{said}"
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -184,7 +184,8 @@ pub fn guarded(origin: &Origin, routes: Routes, origin_header: OriginHeader) -> 
 }
 
 /// The `Host` check refuses a page of another site whose name was made to resolve to the loopback interface; a
-/// refused request gets `403` with no CORS header, so a browser's preflight from another origin fails too.
+/// refused request gets `403` with no CORS header, so a browser's preflight from another origin fails too. A request
+/// names one `Host`, and an absolute-form request line names that same authority.
 struct SameOrigin {
     origin: Origin,
     origin_header: OriginHeader,
@@ -197,10 +198,18 @@ impl Handler for SameOrigin {
         mut request: Request<RequestBody>,
     ) -> BoxFuture<'static, Response<ResponseBody>> {
         let hosts = self.origin.hosts();
-        let host = request
-            .headers()
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok());
+        let mut named = request.headers().get_all(header::HOST).iter();
+        // Exactly one `Host`, and an absolute-form request line that names the same authority or none.
+        let host = match (named.next(), named.next()) {
+            (Some(value), None) => value.to_str().ok(),
+            _ => None,
+        }
+        .filter(|host| {
+            request
+                .uri()
+                .authority()
+                .is_none_or(|authority| authority.as_str() == *host)
+        });
         let own_host = host.filter(|host| hosts.iter().any(|own| own == host));
         if self.origin_header == OriginHeader::Refused
             && request.headers().contains_key(header::ORIGIN)

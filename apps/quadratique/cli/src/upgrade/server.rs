@@ -72,6 +72,10 @@ pub async fn look(home: &Home) -> Result<Seen, String> {
             schema: reported(&identity),
             before: Before::Socket(identity),
         },
+        Observed::Older(identity) => Seen {
+            schema: reported(&identity),
+            before: Before::Socket(identity),
+        },
         Observed::Newer(identity) if background::lists_this_control(&identity) => Seen {
             schema: reported(&identity),
             before: Before::Socket(identity),

@@ -58,3 +58,23 @@ fn serve_refuses_a_port_that_is_not_a_number() {
     assert!(!run.status.success(), "{run:?}");
     assert_no_server(home.path());
 }
+
+/// On Windows, `serve` refuses before it creates anything: the data folder is not even made.
+#[cfg(windows)]
+#[test]
+fn serve_on_windows_refuses_before_it_creates_the_data_folder() {
+    let parent = tempfile::tempdir().expect("a temporary folder");
+    let home = parent.path().join("home");
+
+    let run = quadratique(&home, &["serve"]);
+
+    assert!(!run.status.success(), "{run:?}");
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("QUA-61"),
+        "{run:?}"
+    );
+    assert!(
+        !home.exists(),
+        "serve created the data folder before it refused"
+    );
+}

@@ -535,10 +535,9 @@ fn a_stop_that_meant_a_generation_signals_no_server_from_before_the_socket() {
         "interface": quadratique_server::app::interface(),
         "schema": 1,
         "generation": "0123456789abcdef0123456789abcdef",
-        "control": 1,
-        "controls": [1],
+        "control": 2,
+        "controls": [1, 2],
         "started": "serve",
-        "url": "http://127.0.0.1:9/cli",
     })
     .to_string();
     std::thread::spawn(move || {

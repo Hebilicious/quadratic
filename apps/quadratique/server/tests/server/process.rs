@@ -198,7 +198,13 @@ fn served_with_a_copy() -> (serve::Served, std::net::TcpListener) {
         .set_nonblocking(true)
         .expect("a nonblocking listener");
     let listener = tokio::net::TcpListener::from_std(listener).expect("a tokio listener");
-    let served = serve::serve_on(listener, Vec::new()).expect("served");
+    let served = serve::serve_on(
+        listener,
+        Vec::new(),
+        serve::TCP_CONNECTIONS,
+        serve::REQUEST_LIMIT,
+    )
+    .expect("served");
     (served, copy)
 }
 
@@ -312,4 +318,132 @@ async fn the_server_refuses_a_data_folder_that_other_accounts_may_use_and_leaves
         panic!("the home was not refused: {refused:?}");
     };
     assert!(error.to_string().contains("chmod 700"), "{error}");
+}
+
+/// Waits until `ended` says every held connection was cut off, and gives the most TCP connections that `server` had
+/// open at once meanwhile, each a descriptor of the server. Each look is a few milliseconds apart: a sample, not a
+/// deadline.
+#[cfg(target_os = "linux")]
+async fn most_open_until(server: &server::Server, mut ended: impl FnMut() -> bool) -> usize {
+    within("the cut-off of every held connection", async {
+        let mut most = server.web_connections().await;
+        while !ended() {
+            most = most.max(server.web_connections().await);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        most
+    })
+    .await
+}
+
+/// Connections to the web app beyond its bound wait in the backlog and hold no descriptor of the server, and a request
+/// that does not arrive whole within the limit is cut off, so every held connection ends; the socket answers meanwhile.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn tcp_connections_beyond_the_bound_hold_no_descriptor_and_partial_requests_are_cut_off() {
+    use std::io::{Read, Write};
+
+    let running = crate::support::start_with_request_limit(Duration::from_secs(1)).await;
+    let address = web_address(&running.server).await;
+    let held_count = 3 * serve::TCP_CONNECTIONS;
+    let mut held: Vec<std::net::TcpStream> = (0..held_count)
+        .map(|_| {
+            let mut client = std::net::TcpStream::connect(address).expect("a connection");
+            client
+                .write_all(b"GET / HTTP/1.1\r\nHost: ")
+                .expect("part of a request");
+            client.set_nonblocking(true).expect("a nonblocking client");
+            client
+        })
+        .collect();
+
+    let most = most_open_until(&running.server, || {
+        held.retain_mut(|client| {
+            let mut bytes = [0u8; 64];
+            match client.read(&mut bytes) {
+                Err(error) => error.kind() == std::io::ErrorKind::WouldBlock,
+                Ok(read) => read > 0,
+            }
+        });
+        held.is_empty()
+    })
+    .await;
+    let answered = server::identity_over_socket(
+        &quadratique_server::home::prepare(&Paths::in_home(running.home()).expect("a home"))
+            .expect("the home"),
+    )
+    .await;
+    running.server.shutdown().await;
+
+    assert!(answered.is_ok(), "{answered:?}");
+    assert!(
+        most <= serve::TCP_CONNECTIONS,
+        "the server had {most} of {held_count} connections open at once, more than the bound of {}",
+        serve::TCP_CONNECTIONS
+    );
+}
+
+/// What the account `nobody` holds against the web app: as many connections as it can open, each with part of a
+/// request, until the server cuts each one off. It says `held` once every connection is open.
+#[cfg(target_os = "linux")]
+const HOLD_AS_NOBODY: &str = r#"
+import socket, sys
+host, port, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+held = []
+for _ in range(count):
+    client = socket.create_connection((host, port), timeout=120)
+    client.sendall(b"GET / HTTP/1.1\r\nHost: ")
+    held.append(client)
+print("held", flush=True)
+for client in held:
+    while client.recv(64):
+        pass
+"#;
+
+/// Another account that holds three times the bound of TCP connections, each with part of a request, never takes a
+/// descriptor beyond the bound, and the owner's socket keeps answering.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs `sudo -n` as the account nobody, and python3; CI runs it with `moon run quadratique-server:test-as-nobody`"]
+async fn another_account_that_holds_tcp_connections_takes_no_descriptor_beyond_the_bound() {
+    use tokio::io::AsyncBufReadExt;
+
+    let running = crate::support::start_with_request_limit(Duration::from_secs(1)).await;
+    let address = web_address(&running.server).await;
+    let held_count = 3 * serve::TCP_CONNECTIONS;
+    let mut holder = tokio::process::Command::new("sudo")
+        .args(["-n", "-u", "nobody", "python3", "-c", HOLD_AS_NOBODY])
+        .arg(address.ip().to_string())
+        .arg(address.port().to_string())
+        .arg(held_count.to_string())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("sudo runs");
+    let mut said = String::new();
+    within(
+        "the other account's connections",
+        tokio::io::BufReader::new(holder.stdout.take().expect("its output")).read_line(&mut said),
+    )
+    .await
+    .expect("its output is read");
+    assert_eq!(said.trim(), "held", "the other account held no connection");
+    let home = quadratique_server::home::prepare(&Paths::in_home(running.home()).expect("a home"))
+        .expect("the home");
+
+    let answered = server::identity_over_socket(&home).await;
+    let mut ended = false;
+    let most = most_open_until(&running.server, || {
+        ended = ended || holder.try_wait().is_ok_and(|status| status.is_some());
+        ended
+    })
+    .await;
+    running.server.shutdown().await;
+
+    assert!(answered.is_ok(), "{answered:?}");
+    assert!(
+        most <= serve::TCP_CONNECTIONS,
+        "the server had {most} of another account's {held_count} connections open at once, more than the bound of {}",
+        serve::TCP_CONNECTIONS
+    );
 }

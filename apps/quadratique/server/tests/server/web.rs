@@ -666,3 +666,74 @@ async fn the_bearer_is_required_only_once_no_command_line_route_answers_on_tcp()
         "the event stream without the bearer, then with it"
     );
 }
+
+/// The command line's and the control's paths are not found on TCP even when the built app holds files under them:
+/// the guard, not the absence of a file, keeps them off TCP.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_of_the_built_app_under_the_command_line_and_control_paths_are_not_served() {
+    let site = start(|directory| {
+        built(directory);
+        for folder in ["cli", "server"] {
+            std::fs::create_dir(directory.join(folder)).expect("a folder in the built app");
+            std::fs::write(
+                directory.join(folder).join("x"),
+                "a file that must not be served",
+            )
+            .expect("a file in the built app");
+        }
+    })
+    .await;
+
+    for path in ["/cli/x", "/server/x"] {
+        let answer = site.page(path).await;
+        assert_eq!(answer.status, 404, "{path}");
+        assert!(
+            !answer.body.contains("must not be served"),
+            "{path}: {}",
+            answer.body
+        );
+    }
+}
+
+/// The `Host` is exact: one header, naming the server's own numeric address, and an absolute-form request line names
+/// no other authority. A browser sends neither of the refused forms.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_host_header_or_an_absolute_request_line_of_another_authority_is_refused() {
+    let site = start(built).await;
+    let own = site.address().to_string();
+
+    let twice = request(
+        site.address(),
+        "GET",
+        "/",
+        &[("Host", own.as_str()), ("Host", "rebound.example")],
+        None,
+    )
+    .await;
+    let elsewhere = request(
+        site.address(),
+        "GET",
+        "http://rebound.example/",
+        &[("Host", own.as_str())],
+        None,
+    )
+    .await;
+    let absolute_own = request(
+        site.address(),
+        "GET",
+        &format!("http://{own}/"),
+        &[("Host", own.as_str())],
+        None,
+    )
+    .await;
+
+    assert_eq!(twice.status, 403, "two Host headers");
+    assert_eq!(
+        elsewhere.status, 403,
+        "an absolute request line of another authority"
+    );
+    assert_eq!(
+        absolute_own.status, 200,
+        "an absolute request line of the own authority"
+    );
+}
