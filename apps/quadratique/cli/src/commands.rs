@@ -94,6 +94,15 @@ fn words(args: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// A home this process cannot reach is `unavailable` for every caller of the server, as a socket it cannot reach is;
+/// any other refusal of the home is `internal`.
+pub fn home_refusal_kind(error: &background::LifeError) -> Kind {
+    match error {
+        background::LifeError::Unreachable { .. } => Kind::Unavailable,
+        _ => Kind::Internal,
+    }
+}
+
 pub fn home() -> Result<Home, background::LifeError> {
     let paths =
         Paths::from_env().map_err(|error| background::LifeError::Refused(error.to_string()))?;
@@ -187,6 +196,28 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
 async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     let home = match home() {
         Ok(home) => home,
+        Err(background::LifeError::Unreachable { reason }) => {
+            return match words(&args)[..] {
+                ["status"] => {
+                    let database = Paths::from_env().map(|paths| paths.database).ok();
+                    print_json(
+                        io,
+                        &json!({ "reachable": false, "reason": reason, "database": database }),
+                    );
+                    exit::VALUE
+                }
+                ["stop"] => report(
+                    io,
+                    Kind::Unavailable,
+                    background::LifeError::UnreachableToStop { reason }.to_string(),
+                ),
+                _ => report(
+                    io,
+                    Kind::Unavailable,
+                    background::LifeError::Unreachable { reason }.to_string(),
+                ),
+            };
+        }
         Err(error) => return report(io, Kind::Internal, error.to_string()),
     };
     let answer = match words(&args)[..] {
@@ -385,7 +416,7 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
     };
     let home = match home() {
         Ok(home) => home,
-        Err(error) => return report(io, Kind::Internal, error.to_string()),
+        Err(error) => return report(io, home_refusal_kind(&error), error.to_string()),
     };
     let paired = match pair(&home, open).await {
         Ok(paired) => paired,
@@ -563,10 +594,7 @@ async fn mcp_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     };
     let home = match home() {
         Ok(home) => home,
-        Err(error @ background::LifeError::Unreachable { .. }) => {
-            return report(io, Kind::Unavailable, error.to_string());
-        }
-        Err(error) => return report(io, Kind::Internal, error.to_string()),
+        Err(error) => return report(io, home_refusal_kind(&error), error.to_string()),
     };
     if let Err(error @ background::LifeError::Unreachable { .. }) = background::ensure(&home).await
     {

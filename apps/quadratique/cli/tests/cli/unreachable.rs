@@ -532,3 +532,69 @@ fn another_account_cannot_reach_the_server_of_this_account_and_starts_nothing() 
     );
     assert_eq!(after, before);
 }
+
+/// The home's folder, closed to every account but root until the guard is dropped: a sandbox that hides the data
+/// folder, or another account's home folder.
+struct Closed(PathBuf);
+
+impl Closed {
+    fn make(home: &Path) -> Closed {
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o000)).expect("mode 0000");
+        Closed(home.to_path_buf())
+    }
+}
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// One rule for a data folder that this process cannot enter, whatever the command: `server status` answers
+/// `reachable: false` with the reason, as for a socket it cannot connect to, and every other command that would reach
+/// the server is `unavailable` (exit 4) with "Cannot reach the Quadratique server from here". `serve` is the server
+/// itself, not a caller: its home is unusable to it, an internal failure.
+#[test]
+fn a_data_folder_this_process_cannot_enter_is_unreachable_for_every_command_and_status_says_so() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let cannot_use = format!("this process cannot use {}", home.path().display());
+    let _closed = Closed::make(home.path());
+    let run = |args: &[&str]| home.quadratique(elsewhere.path()).args(args).run();
+
+    let status = run(&["server", "status"]);
+    let caller_commands = [
+        (&["issue", "list"][..], "Nothing was started."),
+        (&["ui"], "Nothing was started."),
+        (&["server", "stop"], "Nothing was stopped."),
+        (&["server", "sign-out"], "Nothing was started."),
+        (&["server", "strict", "on"], "Nothing was started."),
+    ];
+    let served = run(&["serve"]);
+
+    assert_eq!(status.code, 0, "{status:?}");
+    let status = status.json();
+    assert_eq!(status["reachable"], false, "{status}");
+    assert!(
+        status["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with(&cannot_use)),
+        "{status}"
+    );
+    for (args, outcome) in caller_commands {
+        let refused = run(args);
+        assert_eq!(refused.code, UNAVAILABLE, "{args:?}: {refused:?}");
+        let message = message_of(&refused);
+        assert!(
+            message.starts_with(&format!(
+                "Cannot reach the Quadratique server from here: {cannot_use}"
+            )) && message.contains(outcome),
+            "{args:?}: {message}"
+        );
+    }
+    assert_eq!(served.code, 5, "{served:?}");
+    assert!(
+        served.stderr.contains("\"kind\":\"internal\""),
+        "{served:?}"
+    );
+}
