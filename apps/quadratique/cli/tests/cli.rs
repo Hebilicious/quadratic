@@ -29,6 +29,8 @@ mod mcp;
 mod other_build;
 #[path = "cli/server_life.rs"]
 mod server_life;
+#[path = "cli/socket_only.rs"]
+mod socket_only;
 #[path = "cli/states.rs"]
 mod states;
 #[path = "cli/status.rs"]

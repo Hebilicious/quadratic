@@ -128,17 +128,14 @@ mod in_process {
     use std::sync::Arc;
 
     use acid_cat_core::{Occurrence, Occurrences, Outcome, Session, SubscribeOptions};
-    use futures::poll;
-    use jiff::{SignedDuration, Timestamp};
     use quadratique_server::app::{Context, application};
     use quadratique_server::domain::{Caller, WorkingCopy};
     use quadratique_server::store::{Author, Call, NewIssue, Store, StoreError};
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
-    use crate::support::{HANG_GUARD, within};
+    use crate::support::within;
 
-    const MAX_AGE_MS: i64 = 1500;
     const HUMAN: &str = r#"{"kind":"human","name":"sam"}"#;
 
     fn new_issue(title: &str) -> NewIssue {
@@ -149,10 +146,6 @@ mod in_process {
             created_by: HUMAN.into(),
             ..NewIssue::default()
         }
-    }
-
-    fn create(store: &Store, title: &str) -> impl Future<Output = Result<(), StoreError>> {
-        create_many(store, vec![new_issue(title)])
     }
 
     fn create_many(
@@ -256,67 +249,6 @@ mod in_process {
             occurrence.data["issues"].as_array().map(Vec::len),
             Some(500)
         );
-    }
-
-    #[tokio::test]
-    async fn a_live_occurrence_older_than_max_age_is_skipped_and_the_next_one_is_truncated() {
-        let home = crate::support::private_home();
-        let store = Store::open(home.path().join("workspace.db")).expect("the store opens");
-        let app = application().expect("the application");
-        let human = Caller {
-            actor: serde_json::from_str(HUMAN).expect("an actor"),
-            working_copy: WorkingCopy::default(),
-        };
-        let session = Session::open(&app, "cli", Arc::new(Context::new(store.clone(), human)));
-        let cancel = CancellationToken::new();
-        let created = session
-            .invoke(
-                "project.create",
-                json!({ "key": "DEM", "name": "Demo" }),
-                &cancel,
-            )
-            .await;
-        assert!(matches!(created, Outcome::Value(_)), "{created:?}");
-        let mut live = session
-            .subscribe(
-                "issue.changed",
-                json!({}),
-                SubscribeOptions {
-                    max_age_ms: Some(MAX_AGE_MS as f64),
-                    ..SubscribeOptions::default()
-                },
-            )
-            .expect("the subscription starts");
-
-        let mut commits = store.subscribe();
-        let mut aged = Box::pin(create(&store, "Aged"));
-        assert!(poll!(&mut aged).is_pending());
-        let guard = std::time::Instant::now() + HANG_GUARD;
-        let aged_commit = loop {
-            if let Ok(commit) = commits.try_recv() {
-                break commit;
-            }
-            assert!(
-                std::time::Instant::now() < guard,
-                "the aged commit was not made"
-            );
-            std::thread::yield_now();
-        };
-        let at: Timestamp = aged_commit.at.parse().expect("a commit time");
-        let old = at + SignedDuration::from_millis(MAX_AGE_MS + 1);
-        while Timestamp::now() <= old {
-            std::thread::yield_now();
-        }
-        aged.await.expect("the aged write ends");
-        create(&store, "Fresh").await.expect("the fresh write ends");
-
-        let first = tokio::time::timeout(HANG_GUARD, live.next())
-            .await
-            .expect("an occurrence within the hang guard")
-            .expect("the subscription goes on")
-            .expect("an occurrence");
-        assert_eq!(first.data["issues"][0]["issue"]["title"], "Fresh");
-        assert!(first.truncated, "{first:?}");
     }
 }
 

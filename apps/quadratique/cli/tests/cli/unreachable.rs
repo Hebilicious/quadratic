@@ -443,3 +443,158 @@ fn quadratique_mcp_that_cannot_reach_or_start_the_server_exits_with_the_reason_a
     assert!(!ended.stderr.contains("MCP tools"), "{ended:?}");
     assert!(ended.stdout.is_empty(), "{ended:?}");
 }
+
+/// A folder under `/tmp` that every account may traverse, so that only the modes of what it holds stop the account
+/// nobody.
+fn traversable_folder() -> tempfile::TempDir {
+    let folder = tempfile::Builder::new()
+        .prefix("q-")
+        .tempdir_in("/tmp")
+        .expect("a folder in /tmp");
+    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("mode 0755");
+    folder
+}
+
+/// The processes that run `program`.
+fn running(program: &Path) -> Vec<u32> {
+    std::fs::read_dir("/proc")
+        .expect("/proc lists the processes")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            cmdline.split(|byte| *byte == 0).next() == Some(program.as_os_str().as_encoded_bytes())
+        })
+        .collect()
+}
+
+/// Another account names this account's data folder, which lies in a private folder as a home folder does, while this
+/// account's server serves it: the command cannot reach that server, says so as for a sandbox, and starts nothing.
+#[test]
+#[ignore = "needs `sudo -n` as the account nobody, and /tmp, which nobody can traverse; CI runs it with `moon run quadratique-server:test-as-nobody`"]
+fn another_account_cannot_reach_the_server_of_this_account_and_starts_nothing() {
+    use quadratique_server::server::{self, Paths};
+
+    let folder = traversable_folder();
+    let program = folder.path().join("quadratique");
+    let copied = std::process::Command::new("cp")
+        .arg(crate::support::BINARY)
+        .arg(&program)
+        .status()
+        .expect("cp runs");
+    assert!(copied.success(), "the binary is copied");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode 0755");
+    let private = folder.path().join("private");
+    std::fs::create_dir(&private).expect("a private folder");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).expect("mode 0700");
+    let home = private.join("home");
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime for the server");
+    let serving = runtime
+        .block_on(server::start(
+            &Paths::in_home(&home).expect("an absolute home"),
+            server::loopback(),
+        ))
+        .expect("this account's server starts");
+    let before = entries(&home);
+
+    let refused = std::process::Command::new("sudo")
+        .current_dir(folder.path())
+        .args(["-n", "-u", "nobody", "env"])
+        .arg(format!("QUADRATIQUE_HOME={}", home.display()))
+        .arg(&program)
+        .args(["issue", "list"])
+        .output()
+        .expect("sudo runs");
+    let started_by_nobody = running(&program);
+    let after = entries(&home);
+    runtime.block_on(serving.shutdown());
+
+    let refused = Run {
+        code: refused.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&refused.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&refused.stderr).into_owned(),
+    };
+    println!("{refused:?}");
+    assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+    let message = message_of(&refused);
+    assert!(
+        message.starts_with(&format!(
+            "Cannot reach the Quadratique server from here: this process cannot use {}: Permission denied",
+            home.display()
+        )) && message.ends_with(&guidance("issue.list")),
+        "{message}"
+    );
+    assert_eq!(
+        started_by_nobody,
+        Vec::<u32>::new(),
+        "the command of the account nobody started a server"
+    );
+    assert_eq!(after, before);
+}
+
+/// The home's folder, closed to every account but root until the guard is dropped: a sandbox that hides the data
+/// folder, or another account's home folder.
+struct Closed(PathBuf);
+
+impl Closed {
+    fn make(home: &Path) -> Closed {
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o000)).expect("mode 0000");
+        Closed(home.to_path_buf())
+    }
+}
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// One rule for a data folder that this process cannot enter, whatever the command: `server status` answers
+/// `reachable: false` with the reason, as for a socket it cannot connect to, and every other command that would reach
+/// the server is `unavailable` (exit 4) with "Cannot reach the Quadratique server from here". `serve` is the server
+/// itself, not a caller: its home is unusable to it, an internal failure.
+#[test]
+fn a_data_folder_this_process_cannot_enter_is_unreachable_for_every_command_and_status_says_so() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let cannot_use = format!("this process cannot use {}", home.path().display());
+    let _closed = Closed::make(home.path());
+    let run = |args: &[&str]| home.quadratique(elsewhere.path()).args(args).run();
+
+    let status = run(&["server", "status"]);
+    let caller_commands = [
+        (&["issue", "list"][..], "Nothing was started."),
+        (&["ui"], "Nothing was started."),
+        (&["server", "stop"], "Nothing was stopped."),
+        (&["server", "sign-out"], "Nothing was started."),
+        (&["server", "strict", "on"], "Nothing was started."),
+    ];
+    let served = run(&["serve"]);
+
+    assert_eq!(status.code, 0, "{status:?}");
+    let status = status.json();
+    assert_eq!(status["reachable"], false, "{status}");
+    assert!(
+        status["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with(&cannot_use)),
+        "{status}"
+    );
+    for (args, outcome) in caller_commands {
+        let refused = run(args);
+        assert_eq!(refused.code, UNAVAILABLE, "{args:?}: {refused:?}");
+        let message = message_of(&refused);
+        assert!(
+            message.starts_with(&format!(
+                "Cannot reach the Quadratique server from here: {cannot_use}"
+            )) && message.contains(outcome),
+            "{args:?}: {message}"
+        );
+    }
+    assert_eq!(served.code, 5, "{served:?}");
+    assert!(
+        served.stderr.contains("\"kind\":\"internal\""),
+        "{served:?}"
+    );
+}

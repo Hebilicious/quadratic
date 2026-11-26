@@ -35,6 +35,12 @@ tasks:
     command: "cargo test -p quadratique --target-dir ../target/cli-test"
     inputs: ["$CFLAGS", "@group(sources)", "@group(server)", "@group(workspace)", "tests/**/*", "/apps/quadratique/server/tests/fixtures/findings/review.json"]
     tags: ["candidate"]
+  test-as-nobody:
+    description: "Needs `sudo -n` as the account nobody, and /tmp, which nobody can traverse: runs the ignored tests in which the account nobody runs a command against a server of this account. Not part of `test`; `quadratique-server:test-as-nobody` runs it."
+    command: "cargo test -p quadratique --target-dir ../target/cli-test --test cli -- --ignored --nocapture another_account"
+    inputs: ["$CFLAGS", "@group(sources)", "@group(server)", "@group(workspace)", "tests/**/*"]
+    options:
+      cache: false
   lint:
     command: "cargo clippy -p quadratique --all-targets -- -D warnings"
     inputs: ["$CFLAGS", "@group(sources)", "@group(server)", "@group(workspace)", "tests/**/*", "/apps/quadratique/server/tests/fixtures/findings/review.json"]
