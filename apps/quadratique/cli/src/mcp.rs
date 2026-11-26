@@ -152,7 +152,7 @@ fn application() -> Result<Arc<Application<Upstream>>, Vec<String>> {
     let mut app = App::new().target_with(
         TARGET,
         Target {
-            bindings: vec!["mcp".into()],
+            surfaces: vec!["mcp".into()],
             description: text(target, "description"),
             options: target.get("options").cloned(),
         },
@@ -365,10 +365,13 @@ mod tests {
     }
 
     #[test]
-    fn the_tools_are_the_view_of_the_mcp_target_that_the_server_serves_but_for_their_outputs() {
+    fn the_tools_are_the_catalog_of_the_mcp_target_that_the_server_serves_but_for_their_outputs() {
         let forwarded = super::application().expect("the forwarding application builds");
         let served = quadratique_server::app::application().expect("the server's application");
-        let (forwarded, served) = (forwarded.view(super::TARGET), served.view(super::TARGET));
+        let (forwarded, served) = (
+            forwarded.target_catalog(super::TARGET),
+            served.target_catalog(super::TARGET),
+        );
         let without_outputs = |view: &serde_json::Value| {
             let mut capabilities = view["capabilities"].clone();
             for capability in capabilities

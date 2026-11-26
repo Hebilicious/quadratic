@@ -6,34 +6,32 @@ description = "An issue tracker for one person working with many AI agents: read
 targets {
   ["cli"] {
     description = "The `quadratique` command line, for the human and for agents in their worktrees. It is a client of the server's HTTP binding of this target."
-    bindings { "cli"; "http" }
-    options {
-      cli {
-        aliases {
-          instructions { capability = "workspace.instructions" }
-          ready { capability = "issue.ready" }
-          show { capability = "issue.get" }
-          create { capability = "issue.create" }
-          claim { capability = "issue.claim" }
-          release { capability = "issue.release" }
-          finish { capability = "issues.finish" }
-          close { capability = "issues.close" }
-        }
-        ["default"] = "ready"
+    surfaces { "cli"; "http" }
+    cli {
+      aliases {
+        ["instructions"] { capability = "workspace.instructions" }
+        ["ready"] { capability = "issue.ready" }
+        ["show"] { capability = "issue.get" }
+        ["create"] { capability = "issue.create" }
+        ["claim"] { capability = "issue.claim" }
+        ["release"] { capability = "issue.release" }
+        ["finish"] { capability = "issues.finish" }
+        ["close"] { capability = "issues.close" }
       }
+      default = "ready"
     }
   }
   ["mcp"] {
     description = "Coding agents, through the MCP server that `quadratique mcp` starts: the agent interface, to find work, claim it, record it, finish it with evidence, and read the history."
-    bindings { "mcp" }
+    surfaces { "mcp" }
   }
   ["web"] {
     description = "The web app of the human, through its TypeScript core."
-    bindings { "typescript"; "http" }
+    surfaces { "typescript"; "http" }
   }
   ["webmcp"] {
     description = "Agents in the browser, through WebMCP tools of the web app. They act for the human, as the agent `browser`."
-    bindings { "webmcp"; "http" }
+    surfaces { "webmcp"; "http" }
   }
 }
 

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use acid_cat_core::http::{HttpBinding, HttpOptions};
+use acid_cat_core::http::{HttpOptions, HttpSurface};
 use acid_cat_core::remote::{self, Handler, RequestBody, ResponseBody};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -576,7 +576,7 @@ async fn start_checked(
     let origin = web::Origin::default();
     let web_routes = web::routes(&app, &store, web_app);
     let command_line_credentials = credentials.clone();
-    let binding = HttpBinding::with_request_context(
+    let surface = HttpSurface::with_request_context(
         app,
         move |parts: &http::request::Parts| {
             let context = caller_of(&parts.headers).map(|caller| {
@@ -592,7 +592,7 @@ async fn start_checked(
         },
     );
     let command_line: remote::Routes = vec![
-        (BASE.into(), Arc::new(binding) as Arc<dyn Handler>),
+        (BASE.into(), Arc::new(surface) as Arc<dyn Handler>),
         (IDENTITY.into(), Arc::clone(&identify)),
     ];
     let mut routes = web::guarded(&origin, command_line, web::OriginHeader::Refused);

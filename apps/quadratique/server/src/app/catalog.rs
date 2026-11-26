@@ -69,7 +69,7 @@ pub fn app() -> App<Context> {
         app = app.target_with(
             name,
             Target {
-                bindings: names(&target, "/bindings"),
+                surfaces: names(&target, "/surfaces"),
                 description: target
                     .get("description")
                     .and_then(Value::as_str)

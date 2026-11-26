@@ -4,7 +4,7 @@
   "description": "An issue tracker for one person working with many AI agents: ready work, atomic claims, full history, and the statuses of the work after the merge.",
   "targets": {
     "cli": {
-      "bindings": [
+      "surfaces": [
         "cli",
         "http"
       ],
@@ -42,20 +42,20 @@
       }
     },
     "mcp": {
-      "bindings": [
+      "surfaces": [
         "mcp"
       ],
       "description": "Coding agents, through the MCP server that `quadratique mcp` starts: the agent interface, to find work, claim it, record it, finish it with evidence, and read the history."
     },
     "web": {
-      "bindings": [
+      "surfaces": [
         "typescript",
         "http"
       ],
       "description": "The web app of the human, through its TypeScript core."
     },
     "webmcp": {
-      "bindings": [
+      "surfaces": [
         "webmcp",
         "http"
       ],
