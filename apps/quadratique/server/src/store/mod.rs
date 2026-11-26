@@ -135,6 +135,12 @@ impl Store {
         let _ = self.inner.jobs.send(job);
         (on_seal, resume)
     }
+
+    #[cfg(test)]
+    pub(crate) fn date_next_commit(&self, at: jiff::Timestamp) {
+        let job: Job = Box::new(move |writer| writer.date_next_commit(at));
+        let _ = self.inner.jobs.send(job);
+    }
 }
 
 #[cfg(test)]
