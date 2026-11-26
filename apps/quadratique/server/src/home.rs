@@ -214,48 +214,6 @@ fn stands_for_an_unmapped_owner(owner: u32, overflow: u32, uid_map: &str) -> boo
     !covered
 }
 
-#[cfg(test)]
-mod hidden_owner_tests {
-    use super::stands_for_an_unmapped_owner;
-
-    const OVERFLOW: u32 = 65534;
-    const IDENTITY: &str = "         0          0 4294967295\n";
-    const ONLY_THIS_ACCOUNT: &str = "      1000       1000          1\n";
-
-    #[test]
-    fn outside_a_user_namespace_the_account_nobody_is_an_owner_like_any_other() {
-        assert!(!stands_for_an_unmapped_owner(OVERFLOW, OVERFLOW, IDENTITY));
-    }
-
-    #[test]
-    fn in_a_namespace_that_maps_only_this_account_the_overflow_uid_hides_the_real_owner() {
-        assert!(stands_for_an_unmapped_owner(
-            OVERFLOW,
-            OVERFLOW,
-            ONLY_THIS_ACCOUNT
-        ));
-        assert!(!stands_for_an_unmapped_owner(
-            1001,
-            OVERFLOW,
-            ONLY_THIS_ACCOUNT
-        ));
-    }
-
-    #[test]
-    fn a_namespace_that_maps_the_overflow_uid_or_a_map_that_does_not_read_hides_nothing() {
-        assert!(!stands_for_an_unmapped_owner(
-            OVERFLOW,
-            OVERFLOW,
-            "0 100000 65536\n"
-        ));
-        assert!(!stands_for_an_unmapped_owner(
-            OVERFLOW,
-            OVERFLOW,
-            "1000 1000\n"
-        ));
-    }
-}
-
 /// A path as a person types it in a POSIX shell.
 pub fn shell_word(path: &str) -> String {
     if path
@@ -1097,5 +1055,47 @@ mod unix {
             assert_eq!(named_grant(&acl(&me), Access::Any, ME), None);
             assert!(named_grant(&[1, 0, 0, 0], Access::Any, ME).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod hidden_owner_tests {
+    use super::stands_for_an_unmapped_owner;
+
+    const OVERFLOW: u32 = 65534;
+    const IDENTITY: &str = "         0          0 4294967295\n";
+    const ONLY_THIS_ACCOUNT: &str = "      1000       1000          1\n";
+
+    #[test]
+    fn outside_a_user_namespace_the_account_nobody_is_an_owner_like_any_other() {
+        assert!(!stands_for_an_unmapped_owner(OVERFLOW, OVERFLOW, IDENTITY));
+    }
+
+    #[test]
+    fn in_a_namespace_that_maps_only_this_account_the_overflow_uid_hides_the_real_owner() {
+        assert!(stands_for_an_unmapped_owner(
+            OVERFLOW,
+            OVERFLOW,
+            ONLY_THIS_ACCOUNT
+        ));
+        assert!(!stands_for_an_unmapped_owner(
+            1001,
+            OVERFLOW,
+            ONLY_THIS_ACCOUNT
+        ));
+    }
+
+    #[test]
+    fn a_namespace_that_maps_the_overflow_uid_or_a_map_that_does_not_read_hides_nothing() {
+        assert!(!stands_for_an_unmapped_owner(
+            OVERFLOW,
+            OVERFLOW,
+            "0 100000 65536\n"
+        ));
+        assert!(!stands_for_an_unmapped_owner(
+            OVERFLOW,
+            OVERFLOW,
+            "1000 1000\n"
+        ));
     }
 }
