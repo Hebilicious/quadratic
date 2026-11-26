@@ -6,13 +6,18 @@
 //! after a restart or an upgrade; `quadratique server sign-out` makes a new one, which signs every browser out. In
 //! strict mode the bearer is made at each start and kept in memory only.
 //!
+//! An event stream admitted with the bearer ends when the bearer is replaced: a sign-out leaves no reader of the
+//! earlier bearer behind.
+//!
 //! No secret is ever written to a log, an error or a `Debug` output: [`Secret`] prints as `Secret(…)`.
 
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use acid_cat_core::remote::{Handler, RequestBody, ResponseBody};
@@ -22,7 +27,9 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{HeaderValue, Method, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
+use hyper::body::{Body, Frame, SizeHint};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::home::{self, Prepared};
 
@@ -115,9 +122,24 @@ struct Pending {
     bootstrap: Option<PathBuf>,
 }
 
+/// The current bearer, and what tells the event streams admitted with it that it was replaced.
+struct Bearer {
+    secret: Secret,
+    replaced: CancellationToken,
+}
+
+impl Bearer {
+    fn new(secret: Secret) -> Bearer {
+        Bearer {
+            secret,
+            replaced: CancellationToken::new(),
+        }
+    }
+}
+
 /// The bearer of the web app and the codes waiting to be redeemed.
 pub struct Pairing {
-    bearer: RwLock<Secret>,
+    bearer: RwLock<Bearer>,
     lifetime: Lifetime,
     folder: PathBuf,
     pending: Mutex<Vec<Pending>>,
@@ -187,7 +209,7 @@ impl Pairing {
             (bearer, Lifetime::Folder(file))
         };
         Ok(Arc::new(Pairing {
-            bearer: RwLock::new(bearer),
+            bearer: RwLock::new(Bearer::new(bearer)),
             lifetime,
             folder: folder.to_path_buf(),
             pending: Mutex::new(Vec::new()),
@@ -239,23 +261,35 @@ impl Pairing {
         if let Some(file) = redeemed.bootstrap {
             let _ = std::fs::remove_file(file);
         }
-        Some(self.current().encoded())
+        Some(self.current().secret.encoded())
     }
 
     /// Whether `presented` is the current bearer.
     pub fn admits(&self, presented: &str) -> bool {
-        self.current().matches(presented)
+        self.admit(presented).is_some()
     }
 
-    /// A new bearer: every saved one stops working, and the codes that wait are dropped with their bootstrap files.
+    /// When `presented` is the current bearer: the token that is cancelled when it is replaced.
+    pub fn admit(&self, presented: &str) -> Option<CancellationToken> {
+        let current = self.current();
+        current
+            .secret
+            .matches(presented)
+            .then(|| current.replaced.clone())
+    }
+
+    /// A new bearer: every saved one stops working, every event stream admitted with the earlier one ends, and the
+    /// codes that wait are dropped with their bootstrap files.
     pub fn rotate(&self) -> std::io::Result<()> {
-        let bearer = Secret::random()?;
-        // One lock around the file and the memory: two rotations at once cannot leave them on different tokens.
+        let secret = Secret::random()?;
+        // One lock around the file, the memory and the end of the streams: two rotations at once cannot leave the file
+        // and the memory on different tokens, and no stream is admitted with the earlier token once this returns.
         let mut current = self.bearer.write().unwrap_or_else(PoisonError::into_inner);
         if let Lifetime::Folder(file) = &self.lifetime {
-            write_token(file, &bearer)?;
+            write_token(file, &secret)?;
         }
-        *current = bearer;
+        let earlier = std::mem::replace(&mut *current, Bearer::new(secret));
+        earlier.replaced.cancel();
         drop(current);
         for dropped in self.pending().drain(..) {
             if let Some(file) = dropped.bootstrap {
@@ -276,11 +310,8 @@ impl Pairing {
         matches!(self.lifetime, Lifetime::Folder(_))
     }
 
-    fn current(&self) -> Secret {
-        self.bearer
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+    fn current(&self) -> std::sync::RwLockReadGuard<'_, Bearer> {
+        self.bearer.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, Vec<Pending>> {
@@ -447,7 +478,8 @@ impl Handler for SessionRoute {
 }
 
 /// The bearer on a route of the web app: `Authorization: Bearer <bearer>`. A request with another bearer gets `401`;
-/// one with none is served until the requirement is [`Requirement::Required`].
+/// one with none is served until the requirement is [`Requirement::Required`]. An event stream admitted with the
+/// bearer ends when the bearer is replaced; one admitted without a bearer is not bound to any.
 pub struct BearerGuard {
     pub pairing: Arc<Pairing>,
     pub requirement: Requirement,
@@ -471,16 +503,70 @@ impl Handler for BearerGuard {
                     .map(str::to_owned)
             })
             .collect();
-        let admitted = match presented.as_slice() {
-            [] => self.requirement == Requirement::Optional,
-            [Some(bearer)] => self.pairing.admits(bearer),
-            _ => false,
+        let replaced = match presented.as_slice() {
+            [] if self.requirement == Requirement::Optional => return self.inner.handle(request),
+            [Some(bearer)] => self.pairing.admit(bearer),
+            _ => None,
         };
-        if !admitted {
+        let Some(replaced) = replaced else {
             return Box::pin(std::future::ready(unauthorized()));
-        }
+        };
         request.headers_mut().remove(header::AUTHORIZATION);
-        self.inner.handle(request)
+        let answered = self.inner.handle(request);
+        Box::pin(async move { ends_when_replaced(answered.await, replaced) })
+    }
+}
+
+/// An event stream ends when `replaced` is cancelled; an answer whose body is already whole is left as it is.
+fn ends_when_replaced(
+    response: Response<ResponseBody>,
+    replaced: CancellationToken,
+) -> Response<ResponseBody> {
+    let streamed = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    if !streamed {
+        return response;
+    }
+    response.map(|inner| {
+        EndsWhenReplaced {
+            inner,
+            replaced: Box::pin(replaced.cancelled_owned()),
+        }
+        .boxed_unsync()
+    })
+}
+
+/// A body that ends, with no further frame, from the first poll after its bearer was replaced. Dropping the inner
+/// body, as the server does once this one ends, stops AcidCat's subscription.
+struct EndsWhenReplaced {
+    inner: ResponseBody,
+    replaced: Pin<Box<WaitForCancellationFutureOwned>>,
+}
+
+impl Body for EndsWhenReplaced {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        if self.replaced.as_mut().poll(context).is_ready() {
+            return Poll::Ready(None);
+        }
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        // The bearer may be replaced while the inner body is polled: a frame made then is not handed over.
+        if frame.is_ready() && self.replaced.as_mut().poll(context).is_ready() {
+            return Poll::Ready(None);
+        }
+        frame
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
     }
 }
 
@@ -901,5 +987,63 @@ mod tests {
         let shown = format!("{issued:?} {:?}", fixture.pairing);
 
         assert!(!shown.contains(&code), "{shown}");
+    }
+
+    /// A body that never has a frame, as an event stream with no event and no heartbeat due.
+    struct Idle;
+
+    impl hyper::body::Body for Idle {
+        type Data = bytes::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<bytes::Bytes>, Self::Error>>>
+        {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_event_stream_ends_when_its_bearer_is_replaced_without_waiting_for_a_frame() {
+        use http_body_util::BodyExt;
+        use hyper::body::Body as _;
+
+        let replaced = tokio_util::sync::CancellationToken::new();
+        let mut response = http::Response::new(Idle.boxed_unsync());
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        let mut body = super::ends_when_replaced(response, replaced.clone()).into_body();
+        let (waiting, is_waiting) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let mut waiting = Some(waiting);
+            std::future::poll_fn(|context| {
+                let frame = std::pin::Pin::new(&mut body).poll_frame(context);
+                if let Some(waiting) = waiting.take() {
+                    let _ = waiting.send(frame.is_pending());
+                }
+                frame
+            })
+            .await
+            .is_none()
+        });
+        assert!(
+            is_waiting.await.expect("the reader polls the body"),
+            "an idle stream had a frame"
+        );
+
+        replaced.cancel();
+
+        let ended = tokio::time::timeout(Duration::from_secs(60), reader)
+            .await
+            .expect("the idle stream did not end after its bearer was replaced")
+            .expect("the reader ends");
+        assert!(
+            ended,
+            "the stream had a frame after its bearer was replaced"
+        );
     }
 }
