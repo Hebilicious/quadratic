@@ -203,3 +203,48 @@ fn the_lock_tells_a_starting_server_from_a_stopped_home() {
         "{not_ready_while_free}"
     );
 }
+
+/// `install.sh` asks `server status` after it replaced the binary and promises to write nothing else: with no data
+/// folder, `server status` and `server stop` answer that nothing runs and leave the account's home as it was.
+#[test]
+fn status_and_stop_without_a_data_folder_create_nothing() {
+    let home = Home::new();
+    let missing = home.path().join("data").join("quadratique");
+    let run = |args: &[&str]| {
+        home.quadratique(outside().path())
+            .env("QUADRATIQUE_HOME", &missing.display().to_string())
+            .args(args)
+            .run()
+            .ok()
+    };
+    let before = entries(home.path());
+
+    let status = run(&["server", "status"]);
+    let stopped = run(&["server", "stop"]);
+
+    assert_eq!(entries(home.path()), before);
+    assert!(!home.path().join("data").exists());
+    assert_eq!(
+        (
+            &status["running"],
+            &status["addressKept"],
+            &status["database"]
+        ),
+        (
+            &json!(false),
+            &json!(false),
+            &json!(missing.join("workspace.db"))
+        ),
+        "{status}"
+    );
+    assert_eq!(stopped["stopped"], false, "{stopped}");
+}
+
+fn entries(folder: &Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = std::fs::read_dir(folder)
+        .expect("the folder")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    names.sort();
+    names
+}

@@ -111,13 +111,20 @@ pub fn home() -> Result<Home, background::LifeError> {
 /// no server and no store.
 pub fn existing_home() -> Result<Option<Home>, String> {
     let paths = Paths::from_env().map_err(|error| error.to_string())?;
-    let folder = paths.database.parent().unwrap_or(std::path::Path::new("/"));
-    match std::fs::symlink_metadata(folder) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        _ => Home::new(paths)
-            .map(Some)
-            .map_err(|error| error.to_string()),
+    if data_folder_missing(&paths) {
+        return Ok(None);
     }
+    Home::new(paths)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn data_folder_missing(paths: &Paths) -> bool {
+    let folder = paths.database.parent().unwrap_or(std::path::Path::new("/"));
+    matches!(
+        std::fs::symlink_metadata(folder),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 const TAKE_OVER_FLAG: &str = "--take-over";
@@ -196,6 +203,10 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
 }
 
 async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
+    if let Some(answer) = without_a_data_folder(&words(&args)) {
+        print_json(io, &answer);
+        return exit::VALUE;
+    }
     let home = match home() {
         Ok(home) => home,
         Err(background::LifeError::Unreachable { reason }) => {
@@ -245,6 +256,25 @@ async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
             exit::VALUE
         }
         Err(error) => report(io, Kind::Unavailable, error.to_string()),
+    }
+}
+
+/// `server status` and `server stop` create nothing: with no data folder there is no server, and no address that a
+/// start would keep.
+fn without_a_data_folder(words: &[&str]) -> Option<Value> {
+    let paths = Paths::from_env().ok()?;
+    if !data_folder_missing(&paths) {
+        return None;
+    }
+    match words {
+        ["status"] => Some(json!({
+            "running": false,
+            "database": paths.database,
+            "addressKept": false,
+            "dataFolder": "missing",
+        })),
+        ["stop"] => Some(json!({ "stopped": false, "dataFolder": "missing" })),
+        _ => None,
     }
 }
 
