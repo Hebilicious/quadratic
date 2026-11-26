@@ -134,8 +134,12 @@ impl Repository {
 
     pub fn stall_ref_reads(&self) -> StalledRefs {
         let fifo = self.root.join(".git/packed-refs");
-        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::RUSR | Mode::WUSR)
-            .expect("the stalled refs are made");
+        let made = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the stalled refs are made");
         StalledRefs { fifo }
     }
 

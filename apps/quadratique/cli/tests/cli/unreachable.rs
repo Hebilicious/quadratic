@@ -4,12 +4,13 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use quadratique_server::serve::OWNER_ONLY;
 use serde_json::json;
 
 use crate::support::{Home, Repository, Run, outside};
 
 const UNAVAILABLE: i32 = 4;
+/// What a server of releases 0.1 to 0.3 answered on TCP to a process of another account.
+const OWNER_ONLY: &str = "This server answers only processes of its own account.";
 
 fn of_another_account(home: &Home) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");

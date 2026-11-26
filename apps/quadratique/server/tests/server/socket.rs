@@ -4,6 +4,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use quadratique_server::home::{self, HomeError, SOCKET_FILE};
+#[cfg(target_os = "linux")]
 use quadratique_server::serve;
 use quadratique_server::server::{self, CONTROL, Paths, ServerError, Started};
 
@@ -79,15 +80,18 @@ async fn each_refusal_of_the_home_policy_comes_before_the_server_opens_its_lock_
         "{refusal}"
     );
 
-    let with_acl = base.join("with-acl");
-    std::fs::create_dir(&with_acl).expect("a home");
-    set_mode(&with_acl, 0o700);
-    write_named_user_acl(&with_acl);
-    let refusal = refusal_before_the_lock(&with_acl).await;
-    assert!(
-        matches!(&refusal, HomeError::SharedAccess { .. }),
-        "{refusal}"
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let with_acl = base.join("with-acl");
+        std::fs::create_dir(&with_acl).expect("a home");
+        set_mode(&with_acl, 0o700);
+        write_named_user_acl(&with_acl);
+        let refusal = refusal_before_the_lock(&with_acl).await;
+        assert!(
+            matches!(&refusal, HomeError::SharedAccess { .. }),
+            "{refusal}"
+        );
+    }
 
     let with_file = base.join("with-file");
     std::fs::create_dir(&with_file).expect("a home");
@@ -104,7 +108,8 @@ async fn each_refusal_of_the_home_policy_comes_before_the_server_opens_its_lock_
     );
 }
 
-/// User 65534 may read and enter the folder; the mask of `---` leaves its mode at 0700.
+/// User 65534 may read and enter the folder; the mask of `---` leaves its mode at 0700. A Linux ACL.
+#[cfg(target_os = "linux")]
 fn write_named_user_acl(path: &Path) {
     const UNDEFINED: u32 = u32::MAX;
     let mut value = 2u32.to_le_bytes().to_vec();
@@ -231,6 +236,8 @@ async fn a_socket_whose_mode_is_not_0600_is_not_trusted() {
 /// A hard link reaches the same socket as its name, and stays when the socket's name goes: through it, the test
 /// connects after the drop, while it holds a second descriptor of the listener, as a child between its `fork` and its
 /// `exec` holds one.
+/// Linux's `shutdown` takes a listening socket out of the listening state for every descriptor of it.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open() {
     use std::os::fd::AsFd;
@@ -248,7 +255,7 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
         listener,
         file,
         Vec::new(),
-        serve::SOCKET_REQUEST_LIMIT,
+        serve::REQUEST_LIMIT,
         &serve::Gate::default(),
     );
     let other_name = home.path().join("same-socket");
@@ -272,6 +279,7 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
 /// already inside `accept` at that moment sees only the shut-down socket. This test makes that state on purpose: it
 /// shuts the socket down through a second descriptor while the loop runs, on a runtime with one thread. Once the
 /// runtime has seen the shutdown, its thread must still run another task.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_accept_loop_on_a_socket_that_was_shut_down_leaves_its_thread_to_other_tasks() {
     use std::os::fd::AsFd;
@@ -295,7 +303,7 @@ fn an_accept_loop_on_a_socket_that_was_shut_down_leaves_its_thread_to_other_task
                 listener,
                 file,
                 Vec::new(),
-                serve::SOCKET_REQUEST_LIMIT,
+                serve::REQUEST_LIMIT,
                 &serve::Gate::default(),
             );
 
@@ -556,18 +564,23 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
 
     assert_eq!(accepted, StopAnswer::Accepted);
     within("the server's own stop", running.stop_requested()).await;
-    let socket_after = std::os::unix::net::UnixStream::connect(&socket);
-    assert_eq!(
-        socket_after.as_ref().err().map(std::io::Error::kind),
-        Some(std::io::ErrorKind::ConnectionRefused),
-        "{socket_after:?}"
-    );
-    let tcp_after = std::net::TcpStream::connect(web);
-    assert_eq!(
-        tcp_after.as_ref().err().map(std::io::Error::kind),
-        Some(std::io::ErrorKind::ConnectionRefused),
-        "{tcp_after:?}"
-    );
+    // Only Linux takes a listening socket out of the listening state while the server still holds it; elsewhere a
+    // connection made now waits in the backlog until the shutdown below drops the listeners.
+    #[cfg(target_os = "linux")]
+    {
+        let socket_after = std::os::unix::net::UnixStream::connect(&socket);
+        assert_eq!(
+            socket_after.as_ref().err().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionRefused),
+            "{socket_after:?}"
+        );
+        let tcp_after = std::net::TcpStream::connect(web);
+        assert_eq!(
+            tcp_after.as_ref().err().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionRefused),
+            "{tcp_after:?}"
+        );
+    }
     within(
         "the shutdown after the stop",
         running.shutdown_draining(server::DRAIN),
@@ -605,7 +618,7 @@ async fn answered_before_the_cut(running: &crate::support::Running, bytes: &[u8]
 async fn a_partial_control_request_is_cut_off_at_the_limit_and_stops_nothing() {
     use futures::FutureExt;
 
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
     let prepared = prepared_at(board.home());
     let generation = server::identity_over_socket(&prepared)
         .await
@@ -634,7 +647,7 @@ async fn a_partial_control_request_is_cut_off_at_the_limit_and_stops_nothing() {
 /// never arrives whole is cut off.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_request_whose_body_never_arrives_whole_is_cut_off_at_the_limit() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -650,7 +663,7 @@ async fn a_command_request_whose_body_never_arrives_whole_is_cut_off_at_the_limi
 /// it is cut off at the limit.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_connection_after_a_complete_answer_is_cut_off_at_the_limit() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -667,7 +680,7 @@ async fn an_idle_connection_after_a_complete_answer_is_cut_off_at_the_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_partial_request_after_a_complete_answer_on_the_same_connection_is_cut_off_at_the_limit()
 {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -731,7 +744,7 @@ async fn calls_and_their_event_stream_answer_on_the_socket_of_a_server_that_list
 /// off at the limit, and the stream still delivers the next occurrence.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_event_stream_on_the_socket_outlives_the_limit_of_a_request() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
     board.project("DEM").await;
     let mut live = within(
         "the subscription",

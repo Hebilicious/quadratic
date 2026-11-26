@@ -603,22 +603,10 @@ async fn running_server(home: &background::Home) -> Result<background::Endpoint,
     }
 }
 
-/// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
+/// No command reaches a server on Windows yet (QUA-61).
 #[cfg(not(unix))]
-async fn running_server(home: &background::Home) -> Result<background::Endpoint, String> {
-    use background::Found;
-
-    match background::find(home).await {
-        Ok(Found::Ours(runtime)) => Ok(background::Endpoint::over_tcp(&runtime)),
-        Ok(Found::Nobody) => {
-            Err("no Quadratique server runs, and a dry run starts none".to_owned())
-        }
-        Ok(Found::OtherInterface { .. }) => {
-            Err("the server that runs is of another build, and a dry run replaces none".to_owned())
-        }
-        Ok(Found::Refused { reason }) => Err(reason),
-        Err(error) => Err(error.to_string()),
-    }
+async fn running_server(_home: &background::Home) -> Result<background::Endpoint, String> {
+    Err(background::LifeError::Unsupported.to_string())
 }
 
 fn report_code(kind: Kind, message: String) -> i32 {

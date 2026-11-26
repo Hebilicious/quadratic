@@ -57,10 +57,10 @@ pub fn claim_from(binding: Binding, named: &str) -> Result<(Caller, String), Act
 }
 
 /// The client of every command, `quadratique mcp`, `init` and `upgrade --skills`: it carries the caller in its
-/// headers and reaches the server where `endpoint` says, on Unix only through the home's socket.
+/// headers and reaches the server only through the home's socket.
 pub struct Client {
     http: HttpClient,
-    socket: Option<PathBuf>,
+    socket: PathBuf,
 }
 
 /// The server was found on its socket, and then did not answer the call: it stopped in between.
@@ -95,12 +95,10 @@ impl Client {
     /// A call, or [`Lost`] when it failed to reach the server that was found on the socket.
     pub async fn invoke_or_lost(&self, id: &str, input: &Value) -> Result<Outcome, Lost> {
         let outcome = self.http.invoke(id, input).await;
-        match (&outcome, &self.socket) {
-            (Outcome::CallFailure(failure), Some(socket)) if self.unreachable(failure) => {
-                Err(Lost {
-                    socket: socket.clone(),
-                })
-            }
+        match &outcome {
+            Outcome::CallFailure(failure) if self.unreachable(failure) => Err(Lost {
+                socket: self.socket.clone(),
+            }),
             _ => Ok(outcome),
         }
     }
@@ -129,11 +127,7 @@ pub fn client(caller: &Caller, endpoint: &Endpoint) -> Result<Client, String> {
         (WORKTREE_HEADER, copy.worktree.clone()),
         (BRANCH_HEADER, copy.branch.clone()),
     ];
-    let client = HttpClient::new(&endpoint.base)?;
-    let client = match &endpoint.socket {
-        Some(socket) => client.unix_socket(socket),
-        None => client,
-    };
+    let client = HttpClient::new(&endpoint.base)?.unix_socket(&endpoint.socket);
     let http = headers
         .into_iter()
         .filter_map(|(name, value)| Some((name, value?)))
@@ -197,7 +191,7 @@ mod tests {
         let socket = folder.path().join("server.sock");
         let endpoint = Endpoint {
             base: quadratique_server::server::base_over_socket(),
-            socket: Some(socket.clone()),
+            socket: socket.clone(),
         };
         let caller = Caller {
             actor: Actor::human(Some("tester")),

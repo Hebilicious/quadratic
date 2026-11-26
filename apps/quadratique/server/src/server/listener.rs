@@ -16,7 +16,7 @@ use acid_cat_core::remote::Routes;
 use super::LISTEN_BACKLOG;
 use super::address::{self, Listen};
 use crate::home::Prepared;
-use crate::serve::{self, Admit, Gate, Served};
+use crate::serve::{self, Gate, Served};
 use crate::web::Origin;
 
 /// Where the web app listens once it is open, and whether that is the port its home keeps.
@@ -26,13 +26,13 @@ pub struct Listening {
     pub kept: bool,
 }
 
-/// What opening needs: the port policy as this start read it, the routes, and what admits and stops a connection.
+/// What opening needs: the port policy as this start read it, the routes, and what stops its connections.
 pub(super) struct Opening {
     pub home: Prepared,
     pub listen: Listen,
     pub strict: bool,
     pub routes: Routes,
-    pub admit: Admit,
+    pub request_limit: std::time::Duration,
     pub gate: Gate,
     pub origin: Origin,
 }
@@ -94,6 +94,14 @@ impl WebListener {
         }
     }
 
+    /// The TCP connections open now, none while the listener is not open.
+    pub(super) async fn open_connections(&self) -> usize {
+        match &*self.state.lock().await {
+            State::Open(served) => served.open_connections(),
+            State::Closed(_) | State::Stopped => 0,
+        }
+    }
+
     /// Opens no listener from now on, and gives the one that is open, for the server to end.
     pub(super) async fn stop(&self) -> Option<Served> {
         match std::mem::replace(&mut *self.state.lock().await, State::Stopped) {
@@ -109,8 +117,8 @@ fn listen(opening: &Opening) -> std::io::Result<(Served, address::Record)> {
     let served = serve::serve_on(
         listener,
         opening.routes.clone(),
-        Arc::clone(&opening.admit),
-        serve::REFUSALS,
+        serve::TCP_CONNECTIONS,
+        opening.request_limit,
     )?;
     Ok((served, record))
 }

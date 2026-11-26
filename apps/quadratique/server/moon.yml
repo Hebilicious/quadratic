@@ -28,7 +28,7 @@ tasks:
     inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]
     tags: ["candidate"]
   test-as-nobody:
-    description: "Needs `sudo -n` as root and as the account nobody, and /tmp, which nobody can traverse: runs the ignored tests in which the account nobody calls a server of this account, with curl over TCP (it must get the owner-only 403) and with connect on the Unix socket (EACCES, and a connection once the test loosens the home), and in which the server refuses a socket or a link that root gives to nobody; first `quadratique-cli:test-as-nobody`, in which nobody runs a command. Not part of `test`."
+    description: "Needs `sudo -n` as root and as the account nobody, and /tmp, which nobody can traverse: runs the ignored tests in which the account nobody connects to the Unix socket of a server of this account (EACCES, and a connection once the test loosens the home), holds more TCP connections than the web app serves at once (Linux), and in which the server refuses a socket or a link that root gives to nobody; first `quadratique-cli:test-as-nobody`, in which nobody runs a command. Not part of `test`."
     command: "cargo test -p quadratique-server --test server -- --ignored --nocapture another_account"
     deps: ["quadratique-cli:test-as-nobody"]
     inputs: ["$CFLAGS", "@group(sources)", "@group(workspace)", "tests/**/*"]

@@ -1,4 +1,5 @@
-//! AcidCat's `remote::serve` does not show the peer of a connection.
+//! The server's own accept loops, for its TCP listener and its Unix socket: AcidCat's `remote::serve` binds TCP
+//! only, and the socket's connections need a request limit.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -11,40 +12,23 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
-pub const OWNER_ONLY: &str = "This server answers only processes of its own account.";
-/// A refused peer's request is read and discarded after the answer, so that its client reads the `403` instead of a
-/// reset: up to `drain_bytes`, for up to `drain_for`, and for at most `draining` connections at once.
-#[derive(Clone, Copy, Debug)]
-pub struct Refusals {
-    pub draining: usize,
-    pub drain_bytes: u64,
-    pub drain_for: Duration,
-}
+/// How long a client has to send a whole request, head and body, from the moment its connection opens or its last
+/// answer ends, on the Unix socket and on TCP: a client that sends part of a request, or keeps the connection idle, is
+/// cut off. An answer has no limit once its request has arrived whole, because a call may wait and an event stream
+/// lasts.
+pub const REQUEST_LIMIT: Duration = Duration::from_secs(5);
 
-pub const REFUSALS: Refusals = Refusals {
-    draining: 16,
-    drain_bytes: 64 * 1024,
-    drain_for: Duration::from_secs(1),
-};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Connection {
-    pub local: SocketAddr,
-    pub peer: SocketAddr,
-}
-
-pub type Admit = Arc<dyn Fn(Connection) -> bool + Send + Sync>;
-
-/// How long a client of the Unix socket has to send a whole request, head and body, from the moment the connection
-/// opens or its last answer ends: a client that sends part of a request, or keeps the connection idle, is cut off. An
-/// answer has no limit once its request has arrived whole, because a call may wait and an event stream lasts. TCP has
-/// no such limit.
-pub const SOCKET_REQUEST_LIMIT: Duration = Duration::from_secs(5);
+/// The most TCP connections the web app serves at once; the next ones wait in the listener's backlog, where they hold
+/// no descriptor of the server, until one ends. A browser opens at most six connections to one address, each tab's
+/// live channel holding one, so this leaves room for several browsers and profiles; it is a quarter of the soft limit
+/// of descriptors that macOS gives a process (256) and a sixteenth of Linux's (1024), which leaves the rest to the
+/// socket's connections, the store and git. Whatever another account does through the TCP port, the socket's service
+/// keeps its descriptors.
+pub const TCP_CONNECTIONS: usize = 64;
 
 /// The listeners of one server, as its stop request sees them: [`Gate::close`] takes every registered listener out of
 /// the listening state at once, and [`Gate::request_stop`] tells the server to shut down.
@@ -116,8 +100,7 @@ impl StopAfterAnswer {
     }
 }
 
-/// Where a connection to the Unix socket is, for its request limit.
-#[cfg(unix)]
+/// Where a connection is, for its request limit.
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     /// A request is on its way: its head and its body must have arrived by `by`.
@@ -127,17 +110,15 @@ enum Phase {
     Answering,
 }
 
-/// The request limit of one connection to the Unix socket. The connection starts receiving; a request whose body has
+/// The request limit of one connection, to the Unix socket or on TCP. The connection starts receiving; a request whose body has
 /// arrived whole moves it to answering; the end of that answer moves it back to receiving, with a new deadline for
 /// the next request. A connection still receiving at its deadline is cut off.
-#[cfg(unix)]
 #[derive(Clone)]
 struct RequestLimit {
     phase: Arc<tokio::sync::watch::Sender<Phase>>,
     limit: Duration,
 }
 
-#[cfg(unix)]
 impl RequestLimit {
     fn starting(limit: Duration) -> RequestLimit {
         RequestLimit {
@@ -178,7 +159,6 @@ impl RequestLimit {
 
 /// Runs `at_end` once, when the body has given its last frame or is dropped, whichever comes first. It keeps the body's
 /// size, so that an answer of known length is still sent with its `Content-Length`.
-#[cfg(unix)]
 fn on_end<E: Send + 'static>(
     body: http_body_util::combinators::UnsyncBoxBody<Bytes, E>,
     at_end: impl FnOnce() + Send + Unpin + 'static,
@@ -190,13 +170,11 @@ fn on_end<E: Send + 'static>(
     .boxed_unsync()
 }
 
-#[cfg(unix)]
 struct OnEnd<B, F: FnOnce()> {
     body: B,
     at_end: Option<F>,
 }
 
-#[cfg(unix)]
 impl<B, F: FnOnce()> OnEnd<B, F> {
     fn fire(&mut self) {
         if let Some(at_end) = self.at_end.take() {
@@ -205,14 +183,12 @@ impl<B, F: FnOnce()> OnEnd<B, F> {
     }
 }
 
-#[cfg(unix)]
 impl<B, F: FnOnce()> Drop for OnEnd<B, F> {
     fn drop(&mut self) {
         self.fire();
     }
 }
 
-#[cfg(unix)]
 impl<B, F> hyper::body::Body for OnEnd<B, F>
 where
     B: hyper::body::Body + Unpin,
@@ -242,20 +218,21 @@ where
     }
 }
 
-/// What a connection to the Unix socket gives each of its requests and their answers.
-#[cfg(unix)]
+/// What a connection gives each of its requests and their answers: the request limit, and on the socket what a stop
+/// request sets.
 #[derive(Clone)]
-struct OnSocket {
-    stop_after: StopAfterAnswer,
+struct OnConnection {
+    stop_after: Option<StopAfterAnswer>,
     limit: RequestLimit,
 }
 
-#[cfg(unix)]
-impl OnSocket {
+impl OnConnection {
     fn receive(&self, mut request: Request<RequestBody>) -> Request<RequestBody> {
         use hyper::body::Body;
 
-        request.extensions_mut().insert(self.stop_after.clone());
+        if let Some(stop_after) = &self.stop_after {
+            request.extensions_mut().insert(stop_after.clone());
+        }
         if request.body().is_end_stream() {
             self.limit.received();
             return request;
@@ -311,10 +288,17 @@ impl Tasks {
 pub struct Served {
     pub address: SocketAddr,
     listener: Arc<TcpListener>,
+    slots: Arc<Semaphore>,
+    connections: usize,
     tasks: Tasks,
 }
 
 impl Served {
+    /// The connections open now, each a descriptor of the server; at most the bound it was served with.
+    pub fn open_connections(&self) -> usize {
+        self.connections - self.slots.available_permits()
+    }
+
     pub fn url(&self) -> String {
         format!("http://{}", self.address)
     }
@@ -400,63 +384,71 @@ fn stop_listening<L>(_listener: L) -> std::io::Result<()> {
     Ok(())
 }
 
-pub async fn serve(address: SocketAddr, routes: Routes, admit: Admit) -> std::io::Result<Served> {
-    serve_with(address, routes, admit, REFUSALS).await
-}
-
-pub async fn serve_with(
-    address: SocketAddr,
-    routes: Routes,
-    admit: Admit,
-    refusals: Refusals,
-) -> std::io::Result<Served> {
-    serve_on(TcpListener::bind(address).await?, routes, admit, refusals)
+pub async fn serve(address: SocketAddr, routes: Routes) -> std::io::Result<Served> {
+    serve_on(
+        TcpListener::bind(address).await?,
+        routes,
+        TCP_CONNECTIONS,
+        REQUEST_LIMIT,
+    )
 }
 
 /// Serves on a listener bound beforehand. From here the listener belongs to the returned `Served`, which stops it
-/// listening when it is dropped.
+/// listening when it is dropped. The routes decide what each request may do. At most `connections` are open at once:
+/// the loop accepts the next one only when one has ended, so the others wait in the listener's backlog. Each request
+/// must arrive whole within `limit`; an answer has no limit.
 pub fn serve_on(
     listener: TcpListener,
     routes: Routes,
-    admit: Admit,
-    refusals: Refusals,
+    connections: usize,
+    limit: Duration,
 ) -> std::io::Result<Served> {
     let listener = Arc::new(listener);
     let address = listener.local_addr()?;
     let mut routes = routes;
     routes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
     let routes = Arc::new(routes);
-    let draining = Arc::new(Semaphore::new(refusals.draining));
     let stop = CancellationToken::new();
     let accepting = stop.child_token();
     let (opened, open) = mpsc::channel(1);
     let stopped = stop.clone();
     let accepted_while = accepting.clone();
     let listening = Arc::clone(&listener);
+    let slots = Arc::new(Semaphore::new(connections));
+    let accepting_slots = Arc::clone(&slots);
     let task = tokio::spawn(async move {
         loop {
+            let slot = tokio::select! {
+                biased;
+                () = accepted_while.cancelled() => return,
+                slot = Arc::clone(&accepting_slots).acquire_owned() => slot,
+            };
+            let Ok(slot) = slot else {
+                return;
+            };
             let accepted = tokio::select! {
                 biased;
                 () = accepted_while.cancelled() => return,
                 accepted = listening.accept() => accepted,
             };
-            let Ok((stream, peer)) = accepted else {
+            let Ok((stream, _)) = accepted else {
                 continue;
             };
-            let Ok(local) = stream.local_addr() else {
-                continue;
-            };
-            let connection = Connection { local, peer };
             let routes = routes.clone();
-            let admit = admit.clone();
-            let draining = draining.clone();
             let stopped = stopped.clone();
             let open = opened.clone();
             tokio::spawn(async move {
+                let on_tcp = OnConnection {
+                    stop_after: None,
+                    limit: RequestLimit::starting(limit),
+                };
+                let limit = on_tcp.limit.clone();
                 tokio::select! {
-                    () = handle(stream, connection, routes, admit, Drain { refusals, slots: draining }) => {}
+                    () = answer(stream, routes, on_tcp) => {}
+                    () = limit.expired() => {}
                     () = stopped.cancelled() => {}
                 }
+                drop(slot);
                 drop(open);
             });
         }
@@ -464,6 +456,8 @@ pub fn serve_on(
     Ok(Served {
         address,
         listener,
+        slots,
+        connections,
         tasks: Tasks {
             accepting,
             stop,
@@ -512,7 +506,7 @@ impl Drop for ServedSocket {
 
 /// Accepts on a socket that `home::bind_socket` bound and checked. The socket is registered with `gate` before it
 /// accepts its first connection, and a handler that sets [`StopAfterAnswer`] stops the server through it. Each request
-/// must arrive whole within `limit` (the product's is [`SOCKET_REQUEST_LIMIT`]); an answer has no limit.
+/// must arrive whole within `limit` (the product's is [`REQUEST_LIMIT`]); an answer has no limit.
 #[cfg(unix)]
 pub fn serve_socket(
     listener: tokio::net::UnixListener,
@@ -559,13 +553,13 @@ pub fn serve_socket(
                 gate: gate.clone(),
             };
             tokio::spawn(async move {
-                let on_socket = OnSocket {
-                    stop_after: when_answered.after.clone(),
+                let on_socket = OnConnection {
+                    stop_after: Some(when_answered.after.clone()),
                     limit: RequestLimit::starting(limit),
                 };
                 let limit = on_socket.limit.clone();
                 tokio::select! {
-                    () = answer(stream, routes, Some(on_socket)) => {}
+                    () = answer(stream, routes, on_socket) => {}
                     () = limit.expired() => {}
                     () = stopped.cancelled() => {}
                 }
@@ -586,85 +580,22 @@ pub fn serve_socket(
     }
 }
 
-#[cfg(not(unix))]
-#[derive(Clone)]
-enum OnSocket {}
-
-#[cfg(not(unix))]
-impl OnSocket {
-    fn receive(&self, _request: Request<RequestBody>) -> Request<RequestBody> {
-        match *self {}
-    }
-
-    fn answer(&self, _response: Response<ResponseBody>) -> Response<ResponseBody> {
-        match *self {}
-    }
-}
-
-async fn answer<S>(stream: S, routes: Arc<Routes>, on_socket: Option<OnSocket>)
+async fn answer<S>(stream: S, routes: Arc<Routes>, on_connection: OnConnection)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
         let routes = routes.clone();
-        let on_socket = on_socket.clone();
-        let request = request_body(request);
-        let request = match &on_socket {
-            Some(on_socket) => on_socket.receive(request),
-            None => request,
-        };
+        let on_connection = on_connection.clone();
+        let request = on_connection.receive(request_body(request));
         async move {
             let response = route(&routes, request).await;
-            Ok::<_, Infallible>(match &on_socket {
-                Some(on_socket) => on_socket.answer(response),
-                None => response,
-            })
+            Ok::<_, Infallible>(on_connection.answer(response))
         }
     });
     let _ = hyper::server::conn::http1::Builder::new()
         .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
         .await;
-}
-
-async fn handle(
-    stream: TcpStream,
-    connection: Connection,
-    routes: Arc<Routes>,
-    admit: Admit,
-    drain: Drain,
-) {
-    if !admit(connection) {
-        refuse(stream, drain).await;
-        return;
-    }
-    answer(stream, routes, None).await;
-}
-
-struct Drain {
-    refusals: Refusals,
-    slots: Arc<Semaphore>,
-}
-
-/// Without a free draining slot the connection closes right after the answer, unread, and its client may see a reset.
-async fn refuse(mut stream: TcpStream, Drain { refusals, slots }: Drain) {
-    let answer = format!(
-        "HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\ncache-control: no-store\r\nconnection: close\r\n\r\n{OWNER_ONLY}",
-        OWNER_ONLY.len()
-    );
-    let slot = slots.try_acquire_owned();
-    if stream.write_all(answer.as_bytes()).await.is_err() {
-        return;
-    }
-    let Ok(_slot) = slot else {
-        return;
-    };
-    if stream.shutdown().await.is_err() {
-        return;
-    }
-    let mut request = (&mut stream).take(refusals.drain_bytes);
-    let mut discarded = tokio::io::sink();
-    let drain = tokio::io::copy(&mut request, &mut discarded);
-    let _ = tokio::time::timeout(refusals.drain_for, drain).await;
 }
 
 fn route(

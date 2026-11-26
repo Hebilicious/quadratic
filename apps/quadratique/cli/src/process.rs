@@ -20,22 +20,6 @@ pub fn detach(command: &mut Command) -> &mut Command {
     command.creation_flags(CREATE_NEW_PROCESS_GROUP)
 }
 
-/// Windows has no SIGTERM, and the server does not serve there yet: QUA-61 chooses how to stop it.
-#[cfg(windows)]
-pub fn ask_to_stop(_pid: u32) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "stopping the server is not supported on Windows yet (QUA-61)",
-    ))
-}
-
-/// Without a safe way to ask Windows yet, every pid counts as alive, so a runtime file is never removed while its
-/// server may run.
-#[cfg(windows)]
-pub fn alive(_pid: u32) -> bool {
-    true
-}
-
 /// The device and inode of a file.
 #[cfg(unix)]
 pub type FileId = (u64, u64);

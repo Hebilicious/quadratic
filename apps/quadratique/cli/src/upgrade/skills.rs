@@ -72,20 +72,10 @@ async fn from_the_server(home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
     list_projects(&home.endpoint()).await.map(Some)
 }
 
-/// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
+/// No server runs on Windows yet (QUA-61): the store file tells.
 #[cfg(not(unix))]
-async fn from_the_server(home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
-    use background::Found;
-
-    let runtime = match background::find(home).await {
-        Ok(Found::Ours(runtime)) | Ok(Found::OtherInterface { runtime, .. }) => runtime,
-        Ok(Found::Nobody) => return Ok(None),
-        Ok(Found::Refused { reason }) => return Err(reason),
-        Err(error) => return Err(error.to_string()),
-    };
-    list_projects(&background::Endpoint::over_tcp(&runtime))
-        .await
-        .map(Some)
+async fn from_the_server(_home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
+    Ok(None)
 }
 
 async fn list_projects(endpoint: &background::Endpoint) -> Result<Vec<PathBuf>, String> {

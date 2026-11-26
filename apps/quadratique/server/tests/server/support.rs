@@ -38,8 +38,10 @@ pub fn private_home() -> TempDir {
 /// refused. A plain drop closes one descriptor, while a child that another test spawns holds a copy of each descriptor
 /// of this process between its `fork` and its `exec`, and so keeps the socket listening for that moment.
 pub fn stop_listening(listener: std::os::unix::net::UnixListener) {
+    #[cfg(target_os = "linux")]
     rustix::net::shutdown(&listener, rustix::net::Shutdown::Both)
         .expect("the socket stops listening");
+    drop(listener);
 }
 
 /// Opens the web app's listener of `server`, as the first `quadratique ui` does, and gives its address.
@@ -57,11 +59,11 @@ pub async fn start_looking_every(every: Duration) -> Running {
     start_with(every, Waits::default()).await
 }
 
-/// A server whose socket gives a client `limit` to send a whole request, for a test that shows what the limit cuts off
+/// A server that gives a client of its socket or its web app `limit` to send a whole request, for a test that shows what the limit cuts off
 /// without waiting for the product's limit.
-pub async fn start_with_socket_limit(limit: Duration) -> Running {
+pub async fn start_with_request_limit(limit: Duration) -> Running {
     let waits = Waits {
-        socket_request: limit,
+        request: limit,
         ..Waits::default()
     };
     start_with(watcher::EVERY, waits).await

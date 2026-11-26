@@ -21,7 +21,7 @@ use crate::git::repository::GIT_LIMIT;
 use crate::git::watcher::{self, Watcher};
 use crate::home::{self, HomeError, Prepared};
 use crate::pairing::{self, Pairing};
-use crate::serve::{self, Admit, Connection, OWNER_ONLY};
+use crate::serve;
 use crate::store::{Store, StoreError, canonical_folder};
 use crate::web::Origin;
 use crate::web::{self, WebApp};
@@ -57,7 +57,7 @@ pub(crate) const DATABASE_FILE: &str = "workspace.db";
 /// Written by the servers of releases 0.1 to 0.3, which served the command line on TCP: a hint, for the command line,
 /// that one of them may hold the home. No server writes it any more.
 pub(crate) const RUNTIME_FILE: &str = "server.json";
-pub(crate) const LOCK_FILE: &str = "server.lock";
+pub const LOCK_FILE: &str = "server.lock";
 const DIRECTORY: &str = "quadratique";
 /// How long a server may take to start: a command waits this long for the server it started, and a server waits
 /// this long for a holder of the lock that is not a server to let go.
@@ -76,8 +76,8 @@ const LISTEN_BACKLOG: u32 = 1024;
 pub struct Waits {
     pub start: Duration,
     pub probe: Duration,
-    /// How long a client of the socket has to send a whole request.
-    pub socket_request: Duration,
+    /// How long a client, of the socket or of the web app on TCP, has to send a whole request.
+    pub request: Duration,
 }
 
 impl Default for Waits {
@@ -85,7 +85,7 @@ impl Default for Waits {
         Waits {
             start: START_LIMIT,
             probe: PROBE_LIMIT,
-            socket_request: serve::SOCKET_REQUEST_LIMIT,
+            request: serve::REQUEST_LIMIT,
         }
     }
 }
@@ -108,8 +108,10 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("the application breaks the rules of AcidCat: {}", .0.join("; "))]
     Application(Vec<String>),
-    #[error("{0}")]
-    CallersUnknown(String),
+    #[error(
+        "the server does not run on Windows yet: commands reach it only through a socket for one account, which Windows lacks (QUA-61)"
+    )]
+    Unsupported,
     #[error("the agent tokens cannot load: {0}")]
     Credentials(#[from] CredentialsError),
     #[error("the Quadratique home is refused: {0}")]
@@ -511,7 +513,6 @@ fn json_answer(status: StatusCode, body: Bytes) -> Response<ResponseBody> {
 }
 
 pub struct Server {
-    admit: Admit,
     credentials: Credentials,
     gate: serve::Gate,
     #[cfg(unix)]
@@ -530,14 +531,14 @@ impl Server {
         self.web.listening()
     }
 
+    /// The web app's TCP connections open now, each a descriptor of the server.
+    pub async fn web_connections(&self) -> usize {
+        self.web.open_connections().await
+    }
+
     /// Opens the web app's listener, as the first `quadratique ui` does, and gives its address.
     pub async fn open_web(&self) -> std::io::Result<SocketAddr> {
         self.web.open().await
-    }
-
-    /// What this server's admission decides for a connection, as its accept loop asks it.
-    pub fn admits(&self, connection: Connection) -> bool {
-        (self.admit)(connection)
     }
 
     pub fn credentials(&self) -> &Credentials {
@@ -697,19 +698,19 @@ async fn start_listening(
     started: Started,
 ) -> Result<Server, ServerError> {
     refuse_other_than_loopback(listen)?;
-    let own_account = callers::own_account()?;
-    callers::check_own_connection(&own_account)?;
+    refuse_without_a_socket()?;
     let home = home::prepare(paths)?;
-    start_checked(
-        &home,
-        own_account,
-        listen,
-        web_app,
-        look_every,
-        waits,
-        started,
-    )
-    .await
+    start_checked(&home, listen, web_app, look_every, waits, started).await
+}
+
+/// Commands and agents reach the server only on its Unix socket, which Windows does not have yet: a named pipe for
+/// one account is QUA-61.
+fn refuse_without_a_socket() -> Result<(), ServerError> {
+    if cfg!(unix) {
+        Ok(())
+    } else {
+        Err(ServerError::Unsupported)
+    }
 }
 
 fn refuse_other_than_loopback(listen: Listen) -> Result<(), ServerError> {
@@ -730,25 +731,13 @@ async fn start_prepared(
     started: Started,
 ) -> Result<Server, ServerError> {
     refuse_other_than_loopback(listen)?;
-    let own_account = callers::own_account()?;
-    callers::check_own_connection(&own_account)?;
-    start_checked(
-        home,
-        own_account,
-        listen,
-        web_app,
-        look_every,
-        waits,
-        started,
-    )
-    .await
+    refuse_without_a_socket()?;
+    start_checked(home, listen, web_app, look_every, waits, started).await
 }
 
 /// Every file of the home is named through `home`, which only `home::prepare` makes.
-#[allow(clippy::too_many_arguments)]
 async fn start_checked(
     home: &Prepared,
-    own_account: callers::Account,
     listen: Listen,
     web_app: WebApp,
     look_every: Duration,
@@ -796,14 +785,13 @@ async fn start_checked(
         vec![(pairing::SESSION.into(), session)],
         web::OriginHeader::Required,
     ));
-    let admit = callers::owner_only(own_account);
     let gate = serve::Gate::default();
     let web = listener::WebListener::new(listener::Opening {
         home: home.clone(),
         listen,
         strict,
         routes: web_routes,
-        admit: Arc::clone(&admit),
+        request_limit: waits.request,
         gate: gate.clone(),
         origin,
     });
@@ -849,7 +837,7 @@ async fn start_checked(
             socket_listener,
             socket_file,
             vec![(IDENTITY.into(), control), (BASE.into(), surface)],
-            waits.socket_request,
+            waits.request,
             &gate,
         )
     };
@@ -862,64 +850,8 @@ async fn start_checked(
         web,
         watcher,
         _home: owner,
-        admit,
         credentials,
     })
-}
-
-#[cfg(target_os = "linux")]
-mod callers {
-    use super::ServerError;
-    use crate::peer;
-    use crate::serve::Admit;
-
-    pub type Account = u32;
-
-    fn unknown(error: peer::CallersUnknown) -> ServerError {
-        ServerError::CallersUnknown(error.to_string())
-    }
-
-    pub fn own_account() -> Result<u32, ServerError> {
-        peer::own_account().map_err(unknown)
-    }
-
-    pub fn owner_only(own_uid: u32) -> Admit {
-        peer::owner_only(own_uid)
-    }
-
-    pub fn check_own_connection(own_uid: &u32) -> Result<(), ServerError> {
-        peer::check_own_connection(*own_uid).map_err(unknown)
-    }
-}
-
-/// Only Linux tells this server which account owns the other end of a loopback connection. Elsewhere it refuses to
-/// start rather than answer another account of the machine: docs/decisions/0003-the-caller-check-on-macos-and-windows.md.
-#[cfg(not(target_os = "linux"))]
-mod callers {
-    use std::sync::Arc;
-
-    use super::ServerError;
-    use crate::serve::Admit;
-
-    /// Never made: `own_account` always fails here.
-    pub struct NoAccount;
-
-    pub type Account = NoAccount;
-
-    pub fn own_account() -> Result<NoAccount, ServerError> {
-        Err(ServerError::CallersUnknown(format!(
-            "Quadratique cannot yet tell which account connects to its local listener on {}, so it does not serve there: another account of this machine could read and change your issues. Linux is supported; macOS is QUA-33, Windows QUA-34",
-            std::env::consts::OS
-        )))
-    }
-
-    pub fn owner_only(_: NoAccount) -> Admit {
-        Arc::new(|_| false)
-    }
-
-    pub fn check_own_connection(_: &NoAccount) -> Result<(), ServerError> {
-        Ok(())
-    }
 }
 
 /// Every child process between its `fork` and its `exec` holds the lock too, because a `flock` stays taken while any
@@ -980,7 +912,6 @@ pub enum Unanswered {
     PathError(std::io::Error),
     /// The entry at the socket's name is not one to trust yet: not a socket of this account with mode 0600.
     NotReady(String),
-    OwnerOnly,
     /// It accepted the connection and gave no full answer within the probe limit.
     Stalled,
     /// It answered with something that is not an identity.
@@ -1004,7 +935,6 @@ impl Unanswered {
             | Unanswered::NotPermitted(error)
             | Unanswered::PathError(error) => error.to_string(),
             Unanswered::NotReady(why) | Unanswered::Malformed(why) => why.clone(),
-            Unanswered::OwnerOnly => OWNER_ONLY.to_owned(),
             Unanswered::Stalled => "no full answer".to_owned(),
         }
     }
@@ -1243,7 +1173,6 @@ async fn ask_identity_on(
     match status.as_str() {
         "200" => serde_json::from_str(&body)
             .map_err(|error| Unanswered::Malformed(format!("the identity is not valid: {error}"))),
-        "403" if body == OWNER_ONLY => Err(Unanswered::OwnerOnly),
         status => Err(Unanswered::Malformed(format!(
             "the answer has status {status}"
         ))),
