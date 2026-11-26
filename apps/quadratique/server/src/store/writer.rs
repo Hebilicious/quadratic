@@ -47,6 +47,8 @@ pub(crate) struct Writer {
     fail_next_index: bool,
     #[cfg(test)]
     pause_after_seal: Option<Pause>,
+    #[cfg(test)]
+    next_commit_at: Option<String>,
     held: Vec<Held>,
 }
 
@@ -84,6 +86,8 @@ impl Writer {
             fail_next_index: false,
             #[cfg(test)]
             pause_after_seal: None,
+            #[cfg(test)]
+            next_commit_at: None,
             held: Vec::new(),
         };
         writer.prepare(path, migrations)?;
@@ -192,7 +196,7 @@ impl Writer {
         F: for<'c> FnOnce(&mut Tx<'c>) -> Result<T, E>,
     {
         self.reconcile()?;
-        let at = self.clock.next();
+        let at = self.commit_time();
         self.connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(StoreError::from)?;
@@ -258,6 +262,14 @@ impl Writer {
             value,
             commit: Some(commit),
         })
+    }
+
+    fn commit_time(&mut self) -> String {
+        #[cfg(test)]
+        if let Some(at) = self.next_commit_at.take() {
+            return at;
+        }
+        self.clock.next()
     }
 
     fn run<T, E, F>(&self, at: &str, work: F) -> Result<(T, Option<String>), E>
@@ -350,5 +362,9 @@ impl Writer {
 
     pub(crate) fn pause_after_next_seal(&mut self, pause: Pause) {
         self.pause_after_seal = Some(pause);
+    }
+
+    pub(crate) fn date_next_commit(&mut self, at: jiff::Timestamp) {
+        self.next_commit_at = Some(super::clock::format(at));
     }
 }

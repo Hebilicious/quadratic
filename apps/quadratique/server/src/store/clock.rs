@@ -31,6 +31,6 @@ pub(crate) fn parse(text: &str) -> Result<String, StoreError> {
         .map_err(|_| StoreError::InvalidTime(text.to_owned()))
 }
 
-fn format(moment: Timestamp) -> String {
+pub(crate) fn format(moment: Timestamp) -> String {
     moment.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }

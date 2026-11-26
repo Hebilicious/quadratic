@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0](https://github.com/Hebilicious/quadratique/compare/v0.2.0...v0.3.0) (2026-11-26)
+
+
+### Features
+
+* an agent moves an issue assigned to the human on the human's words, at high confidence ([#44](https://github.com/Hebilicious/quadratique/issues/44)) ([cc8051e](https://github.com/Hebilicious/quadratique/commit/cc8051ee581e3b357e0db6a8355a39279d606504))
+* quadratique ui pairs the web app with a token the page saves and sends on every request ([#43](https://github.com/Hebilicious/quadratique/issues/43)) ([1196fce](https://github.com/Hebilicious/quadratique/commit/1196fce59d8b86c7d7ecfda7b18b41502a8f4480))
+* the web app keeps its address across restarts by default ([#41](https://github.com/Hebilicious/quadratique/issues/41)) ([a90d71e](https://github.com/Hebilicious/quadratique/commit/a90d71e46933b7c6af671044bf647ada39576b04))
+
 ## [0.2.0](https://github.com/Hebilicious/quadratique/compare/v0.1.0...v0.2.0) (2026-11-26)
 
 
