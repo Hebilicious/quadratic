@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""A fake `curl` for the release workflow's steps. It answers a read of crates.io's sparse index
+(https://index.crates.io/qu/ad/<crate>) from the crates in $FAKE_GH/state.json, under "crates" (name: versions),
+writes what `--write-out` asks for after the body, and logs every call to $FAKE_GH/calls."""
+import json, os, sys
+
+root = os.environ["FAKE_GH"]
+state = json.load(open(os.path.join(root, "state.json")))
+args = sys.argv[1:]
+open(os.path.join(root, "calls"), "a").write("curl " + " ".join(args) + "\n")
+
+url = args[-1]
+prefix = "https://index.crates.io/qu/ad/"
+assert url.startswith(prefix), url
+crate = url[len(prefix):]
+write_out = args[args.index("--write-out") + 1] if "--write-out" in args else ""
+
+if "index_status" in state:
+    status, body = state["index_status"], "Internal Server Error"
+elif "index_body" in state:
+    status, body = 200, state["index_body"]
+elif crate in state["crates"]:
+    status = 200
+    body = "\n".join(json.dumps({"name": crate, "vers": version, "deps": [], "cksum": state.get("cksums", {}).get(f"{crate}@{version}", "0" * 64), "features": {},
+                                 "yanked": False}) for version in state["crates"][crate])
+else:
+    status, body = 404, "Not Found"
+sys.stdout.write(body + write_out.replace("\\n", "\n").replace("%{http_code}", str(status)))
