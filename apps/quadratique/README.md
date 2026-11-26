@@ -320,7 +320,12 @@ The server also listens on the Unix socket `server.sock` in the data folder, wit
 the folder and does not answer yet), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
 command line), `reachable: false` with the reason, or `legacy: true` for a server from before the
 socket (release 0.1), which only TCP reaches. `server stop` and `serve --take-over` ask the server on
-the socket to stop, and never signal it. The other commands still use the TCP listener.
+the socket to stop, and never signal it. Every other command, `quadratique mcp`, `init` and
+`upgrade --skills` call the server on the socket too, and never over TCP: the command finds the
+server there first, as `server status` does, and only then sends its call through the same socket.
+So file permissions decide who can use the server from the command line: the socket's mode `0600`
+in a folder of mode `0700`. The TCP listener still serves the command line's routes until the
+next release (QUA-58), which leaves it to the web app; no command uses them.
 
 ### A server of release 0.1
 
@@ -383,7 +388,11 @@ its supervisor, or `ps -p <pid> -o args` first). For `405`, it adds that the ser
 
 ### The control protocol
 
-The socket serves two requests, with any `Host` (use `quadratique.invalid`). Each server start has a
+The socket serves the command line's routes under `/cli`, as the commands call them (for example
+`curl --unix-socket "$QUADRATIQUE_HOME/server.sock" http://quadratique.invalid/cli/capabilities`),
+and two control requests, with any `Host` (use `quadratique.invalid`). A connection that sends only
+control requests must send each one whole within 5 seconds; one that calls `/cli` has no such limit,
+because a call may wait and `watch` keeps its stream open. Each server start has a
 **generation**, 32 hexadecimal digits that are new at each start. The protocol has a version,
 `control`, apart from the interface of the commands. A server keeps answering every control version
 it ever served, and lists them in `controls`. Two fields keep their meaning in every version:
@@ -392,7 +401,7 @@ it stops a newer server only in its own folder and only by its generation. This 
 
 | Request | Answer |
 | --- | --- |
-| `GET /server` | `200` and the identity: `pid`, `database`, `interface`, `schema`, `generation`, `control`, `controls`, `executable` (`path`, `device`, `inode`), `started` (`on-demand` or `serve`), `url` (the TCP address of the command line's routes). |
+| `GET /server` | `200` and the identity: `pid`, `database`, `interface`, `schema`, `generation`, `control`, `controls`, `executable` (`path`, `device`, `inode`), `started` (`on-demand` or `serve`), `url` (the TCP address of the command line's routes, which no command uses). |
 | `POST /server/stop` with `{"generation": "<generation>"}` | `202 {"generation": …}` if it names this server's generation: the server has closed its listeners, and starts to shut down once this answer is sent. Open connections get up to 2 seconds, then the server closes its store and frees the folder. `409 {"generation": <the serving one>}` for any other generation: nothing stops. `400` for a body that is not that JSON. |
 
 ```sh
@@ -419,18 +428,21 @@ exits with status 5 (`RestartPreventExitStatus`). Fix the cause, then
 `systemctl --user restart quadratique.service`. `quadratique upgrade` checks the folder before it
 looks for a release, and stops there with the reason and "Nothing was changed".
 
-Some agent sandboxes forbid connections to the loopback interface, and some make the file system
-read-only, so that a command can neither reach the server nor start or stop one in the data
-folder. A command run in such a sandbox, or by another account, fails, and starts, creates and
+Some agent sandboxes forbid connections to the server's socket, hide the data folder, or make the
+file system read-only, so that a command can neither reach the server nor start or stop one in the
+data folder. A command run in such a sandbox, or by another account, fails, and starts, creates and
 stops nothing:
 
 ```text
 Cannot reach the Quadratique server from here: <reason>. Nothing was started. Call the Quadratique MCP tool `<tool>` with the same inputs instead. The MCP tools act from the folder this session started in; for work in another worktree, pass its absolute path as `worktree` to `issue.claim`; once that claim succeeds, later calls act from it. If this session has no Quadratique MCP tools, tell the human that its harness must start `quadratique mcp` as an MCP server.
 ```
 
-The reason is the one the command met, for example "connecting to 127.0.0.1:40091 is not
-permitted" or "this process cannot write /home/you/.local/share/quadratique: Read-only file
-system; a sandbox may be blocking it". This is the answer of a command whose capability is also
+The reason is the one the command met, for example "connecting to
+/home/you/.local/share/quadratique/server.sock is not permitted", "this process cannot use
+/home/you/.local/share/quadratique: Permission denied; a sandbox may be blocking it" (a sandbox
+that hides the folder, or another account whose home folder is closed to it) or "this process
+cannot write /home/you/.local/share/quadratique: Read-only file system; a sandbox may be blocking
+it". Each exits with status 4. This is the answer of a command whose capability is also
 an MCP tool, and `<tool>` names that tool. Every other command that needs the server ends with
 "Nothing was started. This command works only on the command line: run it outside the sandbox,
 or ask the human to." Input the command line cannot match to a command (a typo after a group
@@ -444,13 +456,19 @@ below says how to let such an agent work.
 
 ## Agents in a sandbox
 
-A Codex session that runs its commands in Codex's sandbox cannot use the `quadratique` command:
-the sandbox blocks connections to `127.0.0.1`, so every command that needs the server answers
-"Cannot reach the Quadratique server from here"; `--help`, `--version` and `server status` still
-answer. Codex starts its MCP servers outside the sandbox, so the same session can use Quadratique
-through `quadratique mcp`. The command's refusal names the MCP tool to call instead, and tells the
-agent to ask you for the tools when the session has none. A command that has no MCP tool says
-that it works only on the command line, to run outside the sandbox.
+Where an agent's shell runs decides whether the `quadratique` command works there:
+
+| Where the command runs | What happens |
+| --- | --- |
+| A Claude Code shell without a sandbox | Every command works: it reaches the server on its socket, as in your own terminal. |
+| Codex's sandbox, default policy | No command that needs the data folder works; `--help` and `--version` answer. The sandbox refuses to make a Unix socket (`Operation not permitted`), and before that, Quadratique refuses the data folder: the sandbox shows every folder of root, such as `/home`, as owned by the account 65534, so the command answers "another account can replace /home: it belongs to another account (uid 65534) …" and exits with status 5 (QUA-84). |
+| Codex's sandbox with `network_access = true` | The socket and the loopback interface both connect, but the command still meets the same refusal of the data folder, and exits with status 5 (QUA-84). |
+
+Codex starts its MCP servers outside the sandbox, so a Codex session can use Quadratique through
+`quadratique mcp`. A command whose sandbox blocks the socket, hides the data folder or makes it
+read-only answers "Cannot reach the Quadratique server from here", names the MCP tool to call
+instead, and tells the agent to ask you for the tools when the session has none. A command that
+has no MCP tool says that it works only on the command line, to run outside the sandbox.
 
 Give Codex the tools once, for every session of your account:
 
@@ -475,22 +493,18 @@ recorded while the session acts from the old folder. Read the issue (`issue.get`
 the claim is recorded, then repeat the same claim: the server changes nothing, and the session
 moves to the worktree.
 
-The other way is to let the sandbox reach the network. In `~/.codex/config.toml`:
+Letting the sandbox reach the network (`network_access = true` under `[sandbox_workspace_write]`
+in `~/.codex/config.toml`) does not make the command work in it today, as the table says, and it
+lets every sandboxed command of every Codex session reach the network. Use the MCP tools.
 
-```toml
-[sandbox_workspace_write]
-network_access = true
-```
-
-The `quadratique` command then works in the sandbox. The cost: every sandboxed command of every
-Codex session can reach the network, not only Quadratique's server.
-
-These facts were measured with codex-cli 0.171.0 and its default sandbox policy:
-the blocked loopback, the MCP tools working in a sandboxed session while the command was
+The table was measured on 2026-11-26 on Linux 7.2 with Claude Code 2.1.332, and with codex-cli
+0.172.0 through `codex sandbox`, which runs a command under the sandbox policy that a session
+uses, with Quadratique 0.2.0 from the main branch and with this release; both builds gave the same
+outcome in each place. These facts were measured earlier with codex-cli 0.171.0 in a Codex
+session and not again: the MCP tools working in a sandboxed session while the command was
 blocked, the project taken from the session's folder, the actor names with and without
-`AI_AGENT`, what `codex mcp add` writes, and the command working with `network_access = true`.
-A `.codex/config.toml` inside a project folder was not listed by `codex mcp list`, so this
-section names only the file in your home.
+`AI_AGENT`, and what `codex mcp add` writes. A `.codex/config.toml` inside a project folder was
+not listed by `codex mcp list`, so this section names only the file in your home.
 
 ## Agent tokens
 

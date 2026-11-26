@@ -60,6 +60,7 @@ earlier measurements, and the reviewer.
 | `nobody` connects. Folder `0700`, socket `0777` / folder `0755`, socket `0600` / both loose | `EACCES` / `EACCES` / connected |
 | Another account that can write a non-sticky **parent** renames a `0700` folder without entering it | confirmed by the reviewer on Linux |
 | A plain Claude Code shell, then `codex sandbox` (default policy), connect to a `0600` socket in the data folder | connects, then fails (loopback TCP fails there too) |
+| The same, measured again in QUA-53 (2026-11-26, Claude Code 2.1.332, codex-cli 0.172.0); and `codex sandbox` with `network_access = true` | connects; `socket(AF_UNIX)` gives `EPERM`; the socket and loopback TCP both connect. In both Codex cases the home policy refuses first: the sandbox's user namespace leaves root unmapped, so `/home` shows as uid 65534 (QUA-84) |
 
 ## What AcidCat gives
 
@@ -163,6 +164,20 @@ for stop. `PROBE_LIMIT` (5 s) bounds one identity request.
 | Answers, same database, same interface | `running: true` | use it | stop the generation | stop the generation, wait for release, serve |
 | Two starters at once | — | the second waits on `start.lock`, then observes again and finds the first one's server | — | — |
 | `EACCES`/`EPERM`, path error | `reachable: false` and the reason | `Unreachable` (MCP advice as today); never spawn | `UnreachableToStop` | refuse |
+
+**As built in QUA-53 (2026-11-26).** Every command, `quadratique mcp`, `init` and `upgrade --skills`
+build their client in one place (`caller::client`) from the endpoint that `ensure` or `observe`
+gives: on Unix the home's socket, with acid-cat-core 0.9.0's `HttpClient::unix_socket` and the base
+`http://quadratique.invalid/cli`. That client dials only the socket, never TCP, and turns every dial
+error into one call failure, "The server at http://quadratique.invalid/cli does not answer."; it
+streams `watch` through the same connection. So the rows above stay Quadratique's: a command calls
+only after `observe` found the row "answers, same database, same interface", and that call failure
+is left only for a server that stops between the observation and the call. A data folder that this
+process may not enter (`EACCES` from the home policy: another account, or a sandbox that hides it)
+is `Unreachable` too, with the same advice and exit status as a socket it may not connect to. The
+socket serves the `cli` routes beside the control requests; a connection is held to the control
+requests' 5-second limit until it carries a `cli` request. Windows still finds its server over TCP
+(QUA-61).
 
 **A hung server** (stalled, or one that holds the lock past the deadline) gets a bounded outcome,
 never a signal. The message names the home, the log, and the unverified pid from the last identity
@@ -385,7 +400,7 @@ No `unsafe` on Linux or macOS: std, tokio and rustix give every call.
 | A tool that called `/cli` on TCP | It uses `curl --unix-socket <home>/server.sock http://quadratique.invalid/cli/...`. |
 | Bookmarks | None by default: they keep working across restarts and upgrades. In strict mode they need `ui` after each server start: an old bookmark's port is dead, and the deep link works after `ui`, on the new origin. |
 | `ui` over SSH | It prints the remote loopback address. Make a same-port forward before you redeem the code: run `ui` (no `--open`) remotely, then `ssh -L <port>:127.0.0.1:<port> <host>`, then open the link locally within 60 s. A forward of the socket (`ssh -L ./q.sock:<home>/server.sock`) acts as you: README "Who can talk to the server" (`README.md:235-249`) says so. |
-| Codex with `network_access = true` | Not measured for a socket (QUA-53). |
+| Codex with `network_access = true` | Measured in QUA-53: the socket connects, but the home policy refuses the data folder first, as with the default policy (QUA-84). |
 | The installed service | It becomes documentation. A 0.1 unit keeps working. |
 
 Breaking changes, released together as one minor release: QUA-58 (`feat!`) and QUA-60 (`feat!`).
