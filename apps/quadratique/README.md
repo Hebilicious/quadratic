@@ -833,9 +833,11 @@ runs on every push to `main`:
    - "crates to publish" reads crates.io's index and names the crates that lack the release's
      version. When both are there, the next two jobs do not run.
    - "build the crates" checks out the tag's commit by its SHA, checks that both crates have the
-     release's version, runs `moon run quadratique-server:preflight` and
-     `cargo package --workspace`, which builds each crate from its package, and records the
-     SHA-256 of each package. It runs project code, so it holds no token.
+     release's version, builds the web app, stages it in the server crate and runs
+     `preflight.sh` (the steps of the task `quadratique-server:preflight`, which moon does not
+     run in a workflow), then runs `cargo package --workspace`, which builds each crate from its
+     package, and records the SHA-256 of each package. It runs project code, so it holds no
+     token.
    - "publish the crates to crates.io" runs the checkout, rustup and cargo, and no project code:
      no install script, no moon task, no build. It reads the index again, packages the missing
      crates with `cargo package --no-verify` and the staged web app of the build job, and stops
@@ -940,7 +942,9 @@ repository without asking:
 `moon run quadratique-server:preflight` first builds the web app and stages it (it depends on
 `stage-web`), then fails when a crate lacks the staged web app (or it is not the current build of
 `web/dist`), the catalog JSON, a skill file or the licence. It also catches a checkout without
-symbolic links, where git writes each link as a plain file holding a path.
+symbolic links, where git writes each link as a plain file holding a path. It is a task for a
+person's machine: `stage-web` and `preflight` have `runInCI: false`, so in a workflow moon answers
+"No tasks found" for them, and the Release workflow runs their steps itself.
 `moon run quadratique-server:package-test` checks the preflight's cases and each case of
 `build.rs`, on a copy of the crates that it stages and packages itself: it leaves this checkout's
 `server/web-dist` as it was.
