@@ -320,15 +320,47 @@ async fn the_server_refuses_a_data_folder_that_other_accounts_may_use_and_leaves
     assert!(error.to_string().contains("chmod 700"), "{error}");
 }
 
-/// Waits until `ended` says every held connection was cut off, and gives the most TCP connections that `server` had
-/// open at once meanwhile, each a descriptor of the server. Each look is a few milliseconds apart: a sample, not a
-/// deadline.
+/// The descriptors of this process that are accepted connections of the web app on `port`: sockets whose inode
+/// `/proc/net/tcp` or `/proc/net/tcp6` lists with that local port, in any state but listening. The server runs in the
+/// test process, so these are its descriptors. Counting all of `/proc/self/fd` against a baseline would count the
+/// test's own clients and the descriptors of the tests that run beside it.
 #[cfg(target_os = "linux")]
-async fn most_open_until(server: &server::Server, mut ended: impl FnMut() -> bool) -> usize {
+fn accepted_descriptors(port: u16) -> usize {
+    const LISTEN: &str = "0A";
+    let mut accepted = std::collections::HashSet::new();
+    for table in ["/proc/self/net/tcp", "/proc/self/net/tcp6"] {
+        let text = std::fs::read_to_string(table).unwrap_or_default();
+        for line in text.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (Some(local), Some(state), Some(inode)) =
+                (fields.get(1), fields.get(3), fields.get(9))
+            else {
+                continue;
+            };
+            let local_port = local
+                .rsplit_once(':')
+                .and_then(|(_, port)| u16::from_str_radix(port, 16).ok());
+            if local_port == Some(port) && *state != LISTEN {
+                accepted.insert(format!("socket:[{inode}]"));
+            }
+        }
+    }
+    std::fs::read_dir("/proc/self/fd")
+        .expect("this process's descriptors")
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter(|target| accepted.contains(&*target.to_string_lossy()))
+        .count()
+}
+
+/// Waits until `ended` says every held connection was cut off, and gives the most descriptors of accepted web
+/// connections on `port` that this process held at once meanwhile. Each look is a few milliseconds apart: a sample,
+/// not a deadline.
+#[cfg(target_os = "linux")]
+async fn most_open_until(port: u16, mut ended: impl FnMut() -> bool) -> usize {
     within("the cut-off of every held connection", async {
-        let mut most = server.web_connections().await;
+        let mut most = accepted_descriptors(port);
         while !ended() {
-            most = most.max(server.web_connections().await);
+            most = most.max(accepted_descriptors(port));
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         most
@@ -356,8 +388,11 @@ async fn tcp_connections_beyond_the_bound_hold_no_descriptor_and_partial_request
             client
         })
         .collect();
+    let home = quadratique_server::home::prepare(&Paths::in_home(running.home()).expect("a home"))
+        .expect("the home");
 
-    let most = most_open_until(&running.server, || {
+    let answered = server::identity_over_socket(&home).await;
+    let most = most_open_until(address.port(), || {
         held.retain_mut(|client| {
             let mut bytes = [0u8; 64];
             match client.read(&mut bytes) {
@@ -368,14 +403,10 @@ async fn tcp_connections_beyond_the_bound_hold_no_descriptor_and_partial_request
         held.is_empty()
     })
     .await;
-    let answered = server::identity_over_socket(
-        &quadratique_server::home::prepare(&Paths::in_home(running.home()).expect("a home"))
-            .expect("the home"),
-    )
-    .await;
     running.server.shutdown().await;
 
     assert!(answered.is_ok(), "{answered:?}");
+    assert!(most > 0, "no accepted connection was seen");
     assert!(
         most <= serve::TCP_CONNECTIONS,
         "the server had {most} of {held_count} connections open at once, more than the bound of {}",
@@ -433,7 +464,7 @@ async fn another_account_that_holds_tcp_connections_takes_no_descriptor_beyond_t
 
     let answered = server::identity_over_socket(&home).await;
     let mut ended = false;
-    let most = most_open_until(&running.server, || {
+    let most = most_open_until(address.port(), || {
         ended = ended || holder.try_wait().is_ok_and(|status| status.is_some());
         ended
     })
@@ -441,6 +472,7 @@ async fn another_account_that_holds_tcp_connections_takes_no_descriptor_beyond_t
     running.server.shutdown().await;
 
     assert!(answered.is_ok(), "{answered:?}");
+    assert!(most > 0, "no accepted connection was seen");
     assert!(
         most <= serve::TCP_CONNECTIONS,
         "the server had {most} of another account's {held_count} connections open at once, more than the bound of {}",
