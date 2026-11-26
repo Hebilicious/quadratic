@@ -12,7 +12,8 @@
 use sha2::{Digest, Sha256};
 
 /// `.agents/skills/quadratique/SKILL.md`, oldest first: 3b8a755, 57e4140, f4e2319, acbb941,
-/// f0b3930 (QUA-30, pull request 20), and the text of QUA-64 and QUA-66 (`finish`).
+/// f0b3930 (QUA-30, pull request 20), 9104b31 (QUA-64 and QUA-66, `finish`), and the text of
+/// QUA-65.
 pub const SKILL_MD: &[&str] = &[
     "fab0cd822aae542fe583f3ded982e56a7f00a651b662539cff800df8416ae0aa",
     "436608de203dc8c8fb0704c8ac70ca3fad2fc7bf04a7b5055072bb9c70322f2b",
@@ -20,6 +21,7 @@ pub const SKILL_MD: &[&str] = &[
     "3c07040a22b65572f0bb7e63494b6ac6b3d79a09785b8794935596136f432616",
     "1ef8092a26716c8a466e7a1bf332e0424a3f29f7f9540c699b530d2272a39942",
     "0ff8156c178f3e82508b380c93583bf73647b48d58b77c58ac422e6573f3e747",
+    "4999d96a0a48372b5e0b9b25583ceadbaa7c93fefbe9b46ac4b951c40060436c",
 ];
 
 /// `.agents/skills/quadratique/planning.md`, oldest first: 3b8a755.

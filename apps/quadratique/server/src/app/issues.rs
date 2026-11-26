@@ -8,13 +8,15 @@ use super::ancestry::{Scope, verified};
 use super::board::{self, Board, all_issues, caller_project, require_issue};
 use super::catalog::capability;
 use super::cursor::Listing;
+use super::human_word::HumanWord;
 use super::lifecycle::apply;
 use super::model::{
     self, Issue, IssueAnswer, IssueSummary, LandedCommit, Note, Relation, Source, Work,
 };
 use super::{Context, Refused, finish};
 use crate::domain::{
-    Assignee, Caller, Category, Event, Link, Outcome, RelationChange, create_status, decide,
+    Assignee, Caller, Category, Confidence, Event, Link, Outcome, RelationChange, create_status,
+    decide_on_word, uses_human_word,
 };
 use crate::git::remote;
 use crate::git::repository::{GIT_LIMIT, Repository as GitRepository};
@@ -250,7 +252,7 @@ async fn get_issue(context: &Context, input: GetInput) -> Result<IssueAnswer<Iss
         })
         .await?;
     issue.work = git.work().await;
-    Ok(IssueAnswer { issue })
+    Ok(IssueAnswer::of(issue))
 }
 
 /// What the store knows of an issue's work in git, before the repository is read.
@@ -526,6 +528,8 @@ pub(super) struct UpdateInput {
     clear: Vec<String>,
     order: Option<f64>,
     reason: Option<String>,
+    human_words: Option<String>,
+    confidence: Option<Confidence>,
 }
 
 impl UpdateInput {
@@ -553,43 +557,51 @@ async fn update_issue(
 ) -> Result<IssueAnswer<IssueSummary>, Refused> {
     let caller = context.caller.clone();
     let author = serde_json::to_string(&caller.actor).map_err(Refused::defect)?;
+    let word = HumanWord::given(&caller, input.human_words.clone(), input.confidence);
     let reason = input.reason.clone();
-    let ((), issue) = context
+    let (left_for_human, issue) = context
         .write_issue("issue.update", reason, move |tx| {
             let record = board::issue(tx, &input.issue)?;
             let project = model::domain_project(&board::project(tx, &record.project)?)?;
             let issue = Board::load(tx)?.issue(&record)?;
             let assignee = input.given_or_cleared("assignee", &input.assignee);
+            let changes_assignee = assignee
+                .as_ref()
+                .is_some_and(|assignee| *assignee != issue.assignee);
             let event = Event::Update {
                 revision: input.revision,
                 status: input.status.clone(),
-                changes_assignee: assignee
-                    .as_ref()
-                    .is_some_and(|assignee| *assignee != issue.assignee),
+                changes_assignee,
             };
-            let outcome = decide(&event, &issue, &caller, &project)?;
-            match input.given_or_cleared("parent", &input.parent) {
-                Some(Some(parent)) => {
-                    require_issue(tx, &parent)?;
-                    Board::load(tx)?.check(&RelationChange::Parent {
-                        child: record.id.clone(),
-                        parent: parent.clone(),
-                    })?;
-                    tx.set_parent(&record.id, Some(&parent))?;
+            let word = word.filter(|_| uses_human_word(&issue, &caller));
+            let confidence = HumanWord::confidence(word.as_ref());
+            let outcome = decide_on_word(&event, &issue, &caller, &project, confidence)?;
+            let parent = input.given_or_cleared("parent", &input.parent);
+            if let Some(Some(parent)) = &parent {
+                require_issue(tx, parent)?;
+                Board::load(tx)?.check(&RelationChange::Parent {
+                    child: record.id.clone(),
+                    parent: parent.clone(),
+                })?;
+            }
+            let assignee = assignee
+                .map(|assignee| assignee.as_ref().map(model::assignee_text).transpose())
+                .transpose()?;
+            if outcome == Outcome::LeftForHuman {
+                if let Some(word) = &word {
+                    word.record_left(tx, &record.id, &caller, input.reason.as_deref())?;
                 }
-                Some(None) => {
-                    tx.set_parent(&record.id, None)?;
-                }
-                None => {}
+                return Ok((true, record.id));
+            }
+            if let Some(parent) = parent {
+                tx.set_parent(&record.id, parent.as_deref())?;
             }
             tx.update_fields(
                 &record.id,
                 &IssueFields {
                     title: input.title.clone(),
                     priority: input.priority,
-                    assignee: assignee
-                        .map(|assignee| assignee.as_ref().map(model::assignee_text).transpose())
-                        .transpose()?,
+                    assignee,
                     milestone: input.given_or_cleared("milestone", &input.milestone),
                     due: input.given_or_cleared("due", &input.due),
                     description: input.given_or_cleared("description", &input.description),
@@ -606,11 +618,23 @@ async fn update_issue(
             if let Some(order) = input.order {
                 tx.set_order(&record.id, order)?;
             }
-            if let Outcome::Changed(change) = outcome {
-                apply(tx, &record.id, &change, None)?;
+            let moved_status = match outcome {
+                Outcome::Changed(change) => {
+                    apply(tx, &record.id, &change, None)?;
+                    Some(change.status)
+                }
+                Outcome::Unchanged | Outcome::LeftForHuman => {
+                    changes_assignee.then(|| issue.status.clone())
+                }
+            };
+            if let (Some(word), Some(status)) = (&word, moved_status) {
+                word.record_moved(tx, &record.id, &caller, &status, input.reason.as_deref())?;
             }
-            Ok(((), record.id))
+            Ok((false, record.id))
         })
         .await?;
-    Ok(IssueAnswer { issue })
+    Ok(IssueAnswer {
+        issue,
+        left_for_human,
+    })
 }

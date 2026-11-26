@@ -193,17 +193,28 @@ impl Writer {
     {
         self.reconcile()?;
         let at = self.clock.next();
-        let message = Message::of(call, &at).encode();
         self.connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(StoreError::from)?;
-        let value = match self.run(&at, work) {
-            Ok(value) => value,
+        let (value, reason) = match self.run(&at, work) {
+            Ok(ran) => ran,
             Err(error) => {
                 self.rollback();
                 return Err(error);
             }
         };
+        let decided;
+        let call = match reason {
+            Some(reason) => {
+                decided = Call {
+                    reason: Some(reason),
+                    ..call.clone()
+                };
+                &decided
+            }
+            None => call,
+        };
+        let message = Message::of(call, &at).encode();
         let durable = match self.seal(call, &message) {
             Ok(Some(durable)) => durable,
             Ok(None) => {
@@ -249,15 +260,15 @@ impl Writer {
         })
     }
 
-    fn run<T, E, F>(&self, at: &str, work: F) -> Result<T, E>
+    fn run<T, E, F>(&self, at: &str, work: F) -> Result<(T, Option<String>), E>
     where
         E: From<StoreError>,
         F: for<'c> FnOnce(&mut Tx<'c>) -> Result<T, E>,
     {
         let mut tx = Tx::new(View::now(&self.connection), at.to_owned());
         let value = work(&mut tx)?;
-        tx.finish()?;
-        Ok(value)
+        let reason = tx.finish()?;
+        Ok((value, reason))
     }
 
     fn seal(&mut self, call: &Call, message: &str) -> Result<Option<Durable>, StoreError> {

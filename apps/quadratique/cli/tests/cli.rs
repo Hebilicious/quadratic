@@ -15,6 +15,8 @@ mod callers;
 mod claims;
 #[path = "cli/create.rs"]
 mod create;
+#[path = "cli/human_word.rs"]
+mod human_word;
 #[path = "cli/import.rs"]
 mod import;
 #[path = "cli/init.rs"]
