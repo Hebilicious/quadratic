@@ -20,11 +20,15 @@ use crate::credentials::{CREDENTIALS_FILE, Credentials, CredentialsError};
 use crate::git::repository::GIT_LIMIT;
 use crate::git::watcher::{self, Watcher};
 use crate::home::{self, HomeError, Prepared};
+use crate::pairing::{self, Pairing};
 use crate::serve::{self, Admit, Connection, OWNER_ONLY};
 use crate::store::{Store, StoreError, canonical_folder};
 use crate::web::{self, WebApp};
 
+mod address;
 mod closing;
+
+pub use address::{Listen, address_kept, kept_port, set_strict, strict};
 
 pub const TARGET: &str = "cli";
 pub const BASE: &str = "/cli";
@@ -51,6 +55,8 @@ pub const DRAIN: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const STOP_REQUEST_LIMIT: usize = 1024;
 const POLL: Duration = Duration::from_millis(20);
+/// The backlog `TcpListener::bind` gives a listener.
+const LISTEN_BACKLOG: u32 = 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Waits {
@@ -91,6 +97,8 @@ pub enum ServerError {
     Credentials(#[from] CredentialsError),
     #[error("the Quadratique home is refused: {0}")]
     Home(#[from] HomeError),
+    #[error("the web app cannot be served: {0}")]
+    WebApp(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +200,13 @@ pub struct Identity {
     /// The address of the command line's routes on TCP, as the runtime file names it.
     #[serde(default)]
     pub url: Option<String>,
+    /// Whether the server listens on the port its home keeps, so that the next start asks for the same address.
+    #[serde(
+        default,
+        rename = "addressKept",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub address_kept: Option<bool>,
 }
 
 /// The file the server runs, as it found it at its start.
@@ -266,6 +281,29 @@ struct Control {
     identify: Arc<dyn Handler>,
     generation: String,
     gate: serve::Gate,
+    pairing: Arc<Pairing>,
+    web: SocketAddr,
+}
+
+/// The body of `POST /server/pair`: whether `ui` opens the link through a bootstrap file.
+#[derive(Serialize, Deserialize)]
+pub struct PairRequest {
+    pub open: bool,
+}
+
+/// The answer of `POST /server/sign-out`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignedOut {
+    #[serde(rename = "signedOut")]
+    pub signed_out: bool,
+    /// Whether the new bearer lasts across restarts (false in strict mode).
+    pub lasting: bool,
+}
+
+#[cfg(unix)]
+#[derive(Serialize, Deserialize)]
+struct Refusal {
+    reason: String,
 }
 
 #[cfg(unix)]
@@ -282,8 +320,11 @@ pub struct StopAnswerBody {
 #[cfg(unix)]
 impl Handler for Control {
     fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
-        if request.uri().path() != STOP {
-            return self.identify.handle(request);
+        match request.uri().path() {
+            STOP => {}
+            pairing::PAIR => return self.pair(request),
+            pairing::SIGN_OUT => return self.sign_out(request),
+            _ => return self.identify.handle(request),
         }
         if request.method() != Method::POST {
             return Box::pin(std::future::ready(json_answer(
@@ -328,20 +369,78 @@ impl Handler for Control {
     }
 }
 
-/// The body, or nothing when it fails or is longer than `limit`.
 #[cfg(unix)]
-async fn read_bounded(mut body: RequestBody, limit: usize) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    while let Some(frame) = body.frame().await {
-        if let Ok(data) = frame.ok()?.into_data() {
-            if data.len() > limit - bytes.len() {
-                return None;
-            }
-            bytes.extend_from_slice(&data);
+impl Control {
+    /// A one-time code for the web app. The TCP listener and its routes are served before the socket accepts its
+    /// first connection, so the address and the code that go back together name this server's own listener.
+    fn pair(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
+        if request.method() != Method::POST {
+            return Box::pin(std::future::ready(json_answer(
+                StatusCode::METHOD_NOT_ALLOWED,
+                Bytes::new(),
+            )));
         }
+        let pairing = Arc::clone(&self.pairing);
+        let web = self.web;
+        Box::pin(async move {
+            let Some(asked) = read_bounded(request.into_body(), pairing::BODY_LIMIT)
+                .await
+                .and_then(|body| serde_json::from_slice::<PairRequest>(&body).ok())
+            else {
+                return json_answer(StatusCode::BAD_REQUEST, Bytes::new());
+            };
+            match pairing.issue(web, asked.open) {
+                Ok(issued) => json_answer(StatusCode::OK, to_json(&issued)),
+                Err(error @ pairing::IssueError::TooMany) => json_answer(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    to_json(&Refusal {
+                        reason: error.to_string(),
+                    }),
+                ),
+                Err(error) => json_answer(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    to_json(&Refusal {
+                        reason: error.to_string(),
+                    }),
+                ),
+            }
+        })
     }
-    Some(bytes)
+
+    fn sign_out(
+        &self,
+        request: Request<RequestBody>,
+    ) -> BoxFuture<'static, Response<ResponseBody>> {
+        let answer = if request.method() != Method::POST {
+            json_answer(StatusCode::METHOD_NOT_ALLOWED, Bytes::new())
+        } else {
+            match self.pairing.rotate() {
+                Ok(()) => json_answer(
+                    StatusCode::OK,
+                    to_json(&SignedOut {
+                        signed_out: true,
+                        lasting: self.pairing.lasting(),
+                    }),
+                ),
+                Err(error) => json_answer(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    to_json(&Refusal {
+                        reason: format!("a new token could not be made: {error}"),
+                    }),
+                ),
+            }
+        };
+        Box::pin(std::future::ready(answer))
+    }
 }
+
+#[cfg(unix)]
+fn to_json(value: &impl Serialize) -> Bytes {
+    Bytes::from(serde_json::to_vec(value).unwrap_or_default())
+}
+
+#[cfg(unix)]
+use pairing::read_bounded;
 
 #[cfg(unix)]
 fn json_answer(status: StatusCode, body: Bytes) -> Response<ResponseBody> {
@@ -435,15 +534,29 @@ pub async fn start(paths: &Paths, address: SocketAddr) -> Result<Server, ServerE
     .await
 }
 
+/// As `start`, where the home's setting says: on the kept port by default (when it is free), on a fresh one in strict
+/// mode.
+pub async fn start_in_home(paths: &Paths) -> Result<Server, ServerError> {
+    start_listening(
+        paths,
+        Listen::Home,
+        WebApp::from_env(),
+        watcher::EVERY,
+        Waits::default(),
+        Started::Serve,
+    )
+    .await
+}
+
 /// As `start`, in a home that the caller prepared, saying who started the server.
 pub async fn start_by(
     home: &Prepared,
-    address: SocketAddr,
+    listen: Listen,
     started: Started,
 ) -> Result<Server, ServerError> {
     start_prepared(
         home,
-        address,
+        listen,
         WebApp::from_env(),
         watcher::EVERY,
         Waits::default(),
@@ -456,7 +569,7 @@ pub async fn start_by(
 /// whole command keeps one deadline.
 pub async fn start_by_within(
     home: &Prepared,
-    address: SocketAddr,
+    listen: Listen,
     started: Started,
     left: Duration,
 ) -> Result<Server, ServerError> {
@@ -466,7 +579,7 @@ pub async fn start_by_within(
     };
     start_prepared(
         home,
-        address,
+        listen,
         WebApp::from_env(),
         watcher::EVERY,
         waits,
@@ -493,16 +606,9 @@ pub async fn start_as(
     waits: Waits,
     started: Started,
 ) -> Result<Server, ServerError> {
-    if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
-        return Err(ServerError::NotLoopback(address));
-    }
-    let own_account = callers::own_account()?;
-    callers::check_own_connection(&own_account)?;
-    let home = home::prepare(paths)?;
-    start_checked(
-        &home,
-        own_account,
-        address,
+    start_listening(
+        paths,
+        Listen::On(address),
         web_app,
         look_every,
         waits,
@@ -511,23 +617,54 @@ pub async fn start_as(
     .await
 }
 
-async fn start_prepared(
-    home: &Prepared,
-    address: SocketAddr,
+async fn start_listening(
+    paths: &Paths,
+    listen: Listen,
     web_app: WebApp,
     look_every: Duration,
     waits: Waits,
     started: Started,
 ) -> Result<Server, ServerError> {
-    if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) {
-        return Err(ServerError::NotLoopback(address));
+    refuse_other_than_loopback(listen)?;
+    let own_account = callers::own_account()?;
+    callers::check_own_connection(&own_account)?;
+    let home = home::prepare(paths)?;
+    start_checked(
+        &home,
+        own_account,
+        listen,
+        web_app,
+        look_every,
+        waits,
+        started,
+    )
+    .await
+}
+
+fn refuse_other_than_loopback(listen: Listen) -> Result<(), ServerError> {
+    match listen {
+        Listen::On(address) if !matches!(address, SocketAddr::V4(v4) if v4.ip().is_loopback()) => {
+            Err(ServerError::NotLoopback(address))
+        }
+        _ => Ok(()),
     }
+}
+
+async fn start_prepared(
+    home: &Prepared,
+    listen: Listen,
+    web_app: WebApp,
+    look_every: Duration,
+    waits: Waits,
+    started: Started,
+) -> Result<Server, ServerError> {
+    refuse_other_than_loopback(listen)?;
     let own_account = callers::own_account()?;
     callers::check_own_connection(&own_account)?;
     start_checked(
         home,
         own_account,
-        address,
+        listen,
         web_app,
         look_every,
         waits,
@@ -541,13 +678,16 @@ async fn start_prepared(
 async fn start_checked(
     home: &Prepared,
     own_account: callers::Account,
-    address: SocketAddr,
+    listen: Listen,
     web_app: WebApp,
     look_every: Duration,
     waits: Waits,
     started: Started,
 ) -> Result<Server, ServerError> {
+    web::refuse_overlap(&web_app, home.folder()).map_err(ServerError::WebApp)?;
     let owner: closing::HomeLock = Arc::new(own(home, waits).await?);
+    // Read once, under the home's lock: everything this start does follows this one value.
+    let strict = address::strict(home);
     #[cfg(unix)]
     let (socket_listener, socket_file) = home::bind_socket(home).await?;
     let credentials = Credentials::open(home.credentials())?.holding(Arc::clone(&owner));
@@ -566,15 +706,17 @@ async fn start_checked(
         executable: Executable::of_this_process(),
         started: Some(started),
         url: None,
+        address_kept: None,
     };
     let answer = Arc::new(OnceLock::new());
     let identify: Arc<dyn Handler> = Arc::new(Identify {
         answer: Arc::clone(&answer),
     });
+    let pairing = Pairing::open(home, strict)?;
     let watcher = Watcher::start(store.clone(), look_every, GIT_LIMIT, watcher::READ_WAIT);
     let looks = watcher.looks();
     let origin = web::Origin::default();
-    let web_routes = web::routes(&app, &store, web_app);
+    let web_routes = web::routes(&app, &store, web_app, &pairing);
     let command_line_credentials = credentials.clone();
     let surface = HttpSurface::with_request_context(
         app,
@@ -601,14 +743,28 @@ async fn start_checked(
         web_routes,
         web::OriginHeader::OwnOnly,
     ));
+    let session: Arc<dyn Handler> = Arc::new(pairing::SessionRoute {
+        pairing: Arc::clone(&pairing),
+    });
+    routes.extend(web::guarded(
+        &origin,
+        vec![(pairing::SESSION.into(), session)],
+        web::OriginHeader::Required,
+    ));
     let admit = callers::owner_only(own_account);
-    let served = match serve::serve(address, routes, Arc::clone(&admit)).await {
-        Ok(served) => served,
+    let listening = address::bind(home, listen, strict).and_then(|bound| {
+        let (listener, record) = address::listen(bound, LISTEN_BACKLOG)?;
+        let served = serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS)?;
+        Ok((served, record))
+    });
+    let (served, record) = match listening {
+        Ok(listening) => listening,
         Err(error) => {
             watcher.stop().await;
             return Err(error.into());
         }
     };
+    identity.address_kept = Some(address::record(home, &record, served.address.port()));
     origin.set(served.address);
     let gate = serve::Gate::default();
     served.close_with(&gate);
@@ -634,6 +790,8 @@ async fn start_checked(
             identify,
             generation: identity.generation.clone().unwrap_or_default(),
             gate: gate.clone(),
+            pairing: Arc::clone(&pairing),
+            web: served.address,
         });
         serve::serve_socket(
             socket_listener,
@@ -923,6 +1081,63 @@ pub async fn stop_over_socket(
         ))),
         Err(_) => Err(Unanswered::Stalled),
     }
+}
+
+/// What a server answered to a request of the command line that it may refuse.
+#[derive(Debug)]
+pub enum Asked<T> {
+    Answered(T),
+    /// Refused, and why, in words for the person.
+    Refused(String),
+}
+
+/// A one-time link to the web app of the server of `home`, with a bootstrap file when `open`. The socket is checked as
+/// for [`identity_over_socket`].
+#[cfg(unix)]
+pub async fn pair_over_socket(
+    home: &Prepared,
+    open: bool,
+) -> Result<Asked<pairing::Issued>, Unanswered> {
+    let body = serde_json::to_string(&PairRequest { open }).unwrap_or_default();
+    ask_over_socket(home, pairing::PAIR, &body).await
+}
+
+/// Makes a new bearer for the web app of the server of `home`: every paired browser is signed out.
+#[cfg(unix)]
+pub async fn sign_out_over_socket(home: &Prepared) -> Result<Asked<SignedOut>, Unanswered> {
+    ask_over_socket(home, pairing::SIGN_OUT, "{}").await
+}
+
+#[cfg(unix)]
+async fn ask_over_socket<T: serde::de::DeserializeOwned>(
+    home: &Prepared,
+    path: &str,
+    body: &str,
+) -> Result<Asked<T>, Unanswered> {
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {SOCKET_AUTHORITY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let asking = async {
+        let stream = connect_socket(home).await?;
+        let (status, answer) = exchange(stream, &request).await?;
+        Ok(match status.as_str() {
+            "200" => Asked::Answered(serde_json::from_str(&answer).map_err(|error| {
+                Unanswered::Malformed(format!("the answer is not valid: {error}"))
+            })?),
+            "404" | "405" => Asked::Refused(
+                "the server of this home was built before this command: run `quadratique server stop`, then run this command again".to_owned(),
+            ),
+            status => Asked::Refused(
+                serde_json::from_str::<Refusal>(&answer)
+                    .map(|refusal| refusal.reason)
+                    .unwrap_or_else(|_| format!("the server answered with status {status}")),
+            ),
+        })
+    };
+    tokio::time::timeout(PROBE_LIMIT, asking)
+        .await
+        .unwrap_or(Err(Unanswered::Stalled))
 }
 
 /// A connection to the socket of `home`, trusted only as a socket of this account with mode 0600. `EINTR` and `EAGAIN`

@@ -162,7 +162,8 @@ test("the human filters the list by label and readiness, sees it follow the agen
       "It is done.",
       ...labels.flatMap((label) => ["--labels", label]),
     );
-    await page.goto(workspace.url("/projects/DEM"));
+    // The page shows this address and is paired already: the bookmark loads it again.
+    await page.goto(workspace.bookmark("/projects/DEM"));
     await expect(page.getByRole("status")).toHaveText("Live");
     await page.locator("summary", { hasText: /^Label/u }).click();
     const panel = page.getByRole("group", { name: "Label" });

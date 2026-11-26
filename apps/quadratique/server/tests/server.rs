@@ -8,6 +8,8 @@ mod repository;
 #[path = "server/support.rs"]
 mod support;
 
+#[path = "server/address.rs"]
+mod address;
 #[path = "server/advance.rs"]
 mod advance;
 #[path = "server/changed.rs"]
@@ -38,6 +40,8 @@ mod instructions;
 mod links;
 #[path = "server/notes.rs"]
 mod notes;
+#[path = "server/pairing.rs"]
+mod pairing;
 #[path = "server/process.rs"]
 mod process;
 #[path = "server/projects.rs"]

@@ -8,7 +8,7 @@
         "cli",
         "http"
       ],
-      "description": "The `quadratique` command line, for the human and for agents in their worktrees. It is a client of the server's HTTP binding of this target.",
+      "description": "The `quadratique` command line, for the human and for agents in their worktrees. It is a client of the server's HTTP surface of this target.",
       "options": {
         "cli": {
           "aliases": {
