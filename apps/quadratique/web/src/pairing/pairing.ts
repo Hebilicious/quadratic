@@ -6,11 +6,12 @@ export const NOT_PAIRED_BEFORE = "To open Quadratique in this browser, run ";
 export const PAIR_COMMAND = "quadratique ui --open";
 export const NOT_PAIRED_AFTER = " in a terminal.";
 
-const PAIR_FRAGMENT = /^#pair=([A-Za-z0-9_-]{1,128})$/u;
+const PAIR_FRAGMENT = /^#pair=([A-Za-z0-9_-]{1,128})(?:&(.*))?$/u;
 
 /**
  * The one-time code of `#pair=<code>`, read and cleared from the address before anything else reads it, so that it
- * stays neither in the address bar nor in the session history.
+ * stays neither in the address bar nor in the session history. The page's own fragment may follow the code
+ * (`#pair=<code>&finish`): it stays in the address as `#finish`.
  */
 export function takeCode(view: {
   readonly location: Pick<Location, "hash" | "pathname" | "search">;
@@ -20,8 +21,14 @@ export function takeCode(view: {
   if (!hash.startsWith("#pair=")) {
     return undefined;
   }
-  view.history.replaceState(view.history.state, "", pathname + search);
-  return PAIR_FRAGMENT.exec(hash)?.[1];
+  const found = PAIR_FRAGMENT.exec(hash);
+  const own = found?.[2];
+  view.history.replaceState(
+    view.history.state,
+    "",
+    pathname + search + (own === undefined || own === "" ? "" : `#${own}`),
+  );
+  return found?.[1];
 }
 
 /** The browser's storage may refuse access (a private window, a policy): the token then lives in this tab only. */

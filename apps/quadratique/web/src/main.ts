@@ -242,6 +242,8 @@ window.addEventListener("storage", (event) => {
 window.addEventListener("hashchange", () => {
   const next = takeCode(window);
   if (next !== undefined) {
+    // The router read the address with the code in it: it reads it again without.
+    router.replace(location.pathname + location.search + location.hash);
     pairing.send({ type: "code", code: next });
   }
 });

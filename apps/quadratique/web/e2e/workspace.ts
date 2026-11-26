@@ -133,7 +133,8 @@ export class Workspace {
       throw new Error("quadratique ui gave a link without a code");
     }
     const url = new URL(path, answer.url);
-    url.hash = code;
+    // The page's own fragment, such as `#finish`, follows the code.
+    url.hash = url.hash === "" ? code : `${code}&${url.hash.slice(1)}`;
     return url.href;
   }
 

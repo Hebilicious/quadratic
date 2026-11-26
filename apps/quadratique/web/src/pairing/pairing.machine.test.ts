@@ -252,6 +252,22 @@ test("a second code that arrives while the first is redeemed replaces it", async
 });
 
 describe("the code in the address", () => {
+  test("may carry the page's own fragment after it, which stays in the address", () => {
+    const replaced: string[] = [];
+    const view = {
+      location: { hash: "#pair=abc&finish", pathname: "/issues/DEM-1", search: "" },
+      history: {
+        state: null,
+        replaceState: (_state: unknown, _unused: string, url?: string | URL | null) => {
+          replaced.push(String(url));
+        },
+      },
+    };
+
+    expect(takeCode(view)).toBe("abc");
+    expect(replaced).toEqual(["/issues/DEM-1#finish"]);
+  });
+
   test("is read and cleared from the address, keeping the path and the query", () => {
     const replaced: string[] = [];
     const view = {
