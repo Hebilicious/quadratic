@@ -94,7 +94,7 @@ async fn advance_to(context: &Context, input: AdvanceInput) -> Result<Advanced, 
                         apply(tx, &id, &change, None)?;
                         moved.push(id);
                     }
-                    Ok(Outcome::Unchanged)
+                    Ok(Outcome::Unchanged | Outcome::LeftForHuman)
                     | Err(
                         Failure::HumanOnly | Failure::Held { .. } | Failure::BaseNotMerged { .. },
                     ) => {

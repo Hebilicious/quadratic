@@ -5,11 +5,13 @@ use serde_json::{Value, json};
 use super::ancestry::{Scope, verified};
 use super::board::{self, Board};
 use super::catalog::capability;
+use super::human_word::HumanWord;
 use super::issues::whole_issue;
 use super::model::{self, Issue, IssueAnswer, IssueSummary};
 use super::{Context, IssueReader, Refused, finish};
 use crate::domain::{
-    Actor, Caller, Change, Claim, ClaimAfter, Event, Failure, Landing, Outcome, WorkingCopy, decide,
+    Actor, Caller, Change, Claim, ClaimAfter, Confidence, Event, Failure, Landing, Outcome,
+    WorkingCopy, decide, decide_on_word, uses_human_word,
 };
 use crate::git::repository::{GIT_LIMIT, Repository};
 use crate::store::{AsOf, ClaimStart, IssueFields, Tx};
@@ -84,7 +86,7 @@ pub(super) fn release_held(tx: &mut Tx<'_>, issues: Vec<String>) -> Result<(), R
                 tx.end_held_merge(&id)?;
                 apply(tx, &id, &change, None)?;
             }
-            Ok(Outcome::Unchanged) => {
+            Ok(Outcome::Unchanged | Outcome::LeftForHuman) => {
                 tx.end_held_merge(&id)?;
             }
             Err(Failure::BaseNotMerged { .. }) => {}
@@ -96,9 +98,17 @@ pub(super) fn release_held(tx: &mut Tx<'_>, issues: Vec<String>) -> Result<(), R
 
 #[derive(Clone)]
 enum Request {
-    Claim { worktree: Option<String> },
-    Release { reason: Option<String> },
-    Finish { evidence: String },
+    Claim {
+        worktree: Option<String>,
+    },
+    Release {
+        reason: Option<String>,
+        word: Option<HumanWord>,
+    },
+    Finish {
+        evidence: String,
+        word: Option<HumanWord>,
+    },
 }
 
 impl Request {
@@ -124,8 +134,22 @@ impl Request {
 
     fn evidence(&self) -> Option<&str> {
         match self {
-            Request::Finish { evidence } => Some(evidence),
+            Request::Finish { evidence, .. } => Some(evidence),
             Request::Claim { .. } | Request::Release { .. } => None,
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Request::Release { reason, .. } => reason.as_deref(),
+            Request::Claim { .. } | Request::Finish { .. } => None,
+        }
+    }
+
+    fn word(&self) -> Option<&HumanWord> {
+        match self {
+            Request::Release { word, .. } | Request::Finish { word, .. } => word.as_ref(),
+            Request::Claim { .. } => None,
         }
     }
 }
@@ -137,39 +161,52 @@ async fn move_issue<R: Send + 'static>(
     request: Request,
     answer: IssueReader<R>,
 ) -> Result<IssueAnswer<R>, Refused> {
-    let reason = match &request {
-        Request::Release { reason } => reason.clone(),
-        Request::Claim { .. } | Request::Finish { .. } => None,
-    };
-    let (started, answered) = context
+    let ((started, left_for_human), answered) = context
         .write_then_read(
             request.operation(),
-            reason.clone(),
+            request.reason().map(str::to_owned),
             move |tx| {
                 let record = board::issue(tx, &id)?;
                 let project = model::domain_project(&board::project(tx, &record.project)?)?;
                 let board = Board::load(tx)?;
                 let issue = board.issue(&record)?;
                 let event = request.event(tx, &board, &id);
+                let word = request.word().filter(|_| uses_human_word(&issue, &caller));
+                let reason = request.reason();
+                let confidence = HumanWord::confidence(word);
                 let mut started = None;
-                if let Outcome::Changed(change) = decide(&event, &issue, &caller, &project)? {
-                    apply(tx, &id, &change, request.evidence())?;
-                    if let ClaimAfter::Freed(former) = &change.claim {
-                        note_freed(tx, &id, &caller, former, &change.status, reason.as_deref())?;
+                match decide_on_word(&event, &issue, &caller, &project, confidence)? {
+                    Outcome::Unchanged => {}
+                    Outcome::LeftForHuman => {
+                        if let Some(word) = word {
+                            word.record_left(tx, &id, &caller, reason)?;
+                        }
+                        return Ok(((None, true), id));
                     }
-                    let in_bound_repository = project.repository.is_some()
-                        && project.repository == caller.working_copy.repository;
-                    if let ClaimAfter::Started(claim) = &change.claim
-                        && in_bound_repository
-                    {
-                        started = Some(Started {
-                            issue: id.clone(),
-                            claim_key: claim.holder_key().as_str().to_owned(),
-                            since: tx.now().to_owned(),
-                        });
+                    Outcome::Changed(change) => {
+                        apply(tx, &id, &change, request.evidence())?;
+                        if let ClaimAfter::Freed(former) = &change.claim {
+                            note_freed(tx, &id, &caller, former, &change.status, reason)?;
+                        }
+                        if let Some(word) = word {
+                            let freed = matches!(change.claim, ClaimAfter::Freed(_));
+                            let reason = reason.filter(|_| !freed);
+                            word.record_moved(tx, &id, &caller, &change.status, reason)?;
+                        }
+                        let in_bound_repository = project.repository.is_some()
+                            && project.repository == caller.working_copy.repository;
+                        if let ClaimAfter::Started(claim) = &change.claim
+                            && in_bound_repository
+                        {
+                            started = Some(Started {
+                                issue: id.clone(),
+                                claim_key: claim.holder_key().as_str().to_owned(),
+                                since: tx.now().to_owned(),
+                            });
+                        }
                     }
                 }
-                Ok((started, id))
+                Ok(((started, false), id))
             },
             answer,
         )
@@ -177,7 +214,10 @@ async fn move_issue<R: Send + 'static>(
     if let Some(started) = started {
         record_start(context, started).await;
     }
-    Ok(IssueAnswer { issue: answered })
+    Ok(IssueAnswer {
+        issue: answered,
+        left_for_human,
+    })
 }
 
 /// The note an issue keeps when an agent that did not hold its claim released it.
@@ -277,17 +317,22 @@ fn refused_for_stacked(failure: &Value) -> bool {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ReleaseInput {
     issue: String,
     reason: Option<String>,
+    human_words: Option<String>,
+    confidence: Option<Confidence>,
 }
 
 pub(super) fn release()
 -> CapabilityDefinition<Context, ReleaseInput, IssueAnswer<IssueSummary>, Value> {
     capability::<ReleaseInput, IssueAnswer<IssueSummary>>("issue.release").run(
         |input, call| async move {
+            let caller = &call.context().caller;
             let request = Request::Release {
                 reason: input.reason,
+                word: HumanWord::given(caller, input.human_words, input.confidence),
             };
             finish(
                 move_issue(
@@ -308,17 +353,22 @@ pub(super) fn release()
 const FINISH: &str = "issue.finish";
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct FinishInput {
     issue: String,
     evidence: String,
+    human_words: Option<String>,
+    confidence: Option<Confidence>,
 }
 
 pub(super) fn finish_one(
     id: &'static str,
 ) -> CapabilityDefinition<Context, FinishInput, IssueAnswer<Issue>, Value> {
     capability::<FinishInput, IssueAnswer<Issue>>(id).run(|input, call| async move {
+        let caller = &call.context().caller;
         let request = Request::Finish {
             evidence: input.evidence,
+            word: HumanWord::given(caller, input.human_words, input.confidence),
         };
         finish(
             move_issue(

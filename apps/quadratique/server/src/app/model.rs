@@ -266,6 +266,19 @@ impl Note {
 #[derive(Serialize)]
 pub(crate) struct IssueAnswer<T> {
     pub(crate) issue: T,
+    /// True when an agent gave the human's words with less than high confidence: nothing
+    /// moved, and the issue waits for the human.
+    #[serde(rename = "leftForHuman", skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) left_for_human: bool,
+}
+
+impl<T> IssueAnswer<T> {
+    pub(crate) fn of(issue: T) -> IssueAnswer<T> {
+        IssueAnswer {
+            issue,
+            left_for_human: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
