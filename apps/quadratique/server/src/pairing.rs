@@ -557,7 +557,12 @@ impl Body for EndsWhenReplaced {
         if self.replaced.as_mut().poll(context).is_ready() {
             return Poll::Ready(None);
         }
-        Pin::new(&mut self.inner).poll_frame(context)
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        // The bearer may be replaced while the inner body is polled: a frame made then is not handed over.
+        if frame.is_ready() && self.replaced.as_mut().poll(context).is_ready() {
+            return Poll::Ready(None);
+        }
+        frame
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -982,5 +987,63 @@ mod tests {
         let shown = format!("{issued:?} {:?}", fixture.pairing);
 
         assert!(!shown.contains(&code), "{shown}");
+    }
+
+    /// A body that never has a frame, as an event stream with no event and no heartbeat due.
+    struct Idle;
+
+    impl hyper::body::Body for Idle {
+        type Data = bytes::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<bytes::Bytes>, Self::Error>>>
+        {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_event_stream_ends_when_its_bearer_is_replaced_without_waiting_for_a_frame() {
+        use http_body_util::BodyExt;
+        use hyper::body::Body as _;
+
+        let replaced = tokio_util::sync::CancellationToken::new();
+        let mut response = http::Response::new(Idle.boxed_unsync());
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        let mut body = super::ends_when_replaced(response, replaced.clone()).into_body();
+        let (waiting, is_waiting) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let mut waiting = Some(waiting);
+            std::future::poll_fn(|context| {
+                let frame = std::pin::Pin::new(&mut body).poll_frame(context);
+                if let Some(waiting) = waiting.take() {
+                    let _ = waiting.send(frame.is_pending());
+                }
+                frame
+            })
+            .await
+            .is_none()
+        });
+        assert!(
+            is_waiting.await.expect("the reader polls the body"),
+            "an idle stream had a frame"
+        );
+
+        replaced.cancel();
+
+        let ended = tokio::time::timeout(Duration::from_secs(60), reader)
+            .await
+            .expect("the idle stream did not end after its bearer was replaced")
+            .expect("the reader ends");
+        assert!(
+            ended,
+            "the stream had a frame after its bearer was replaced"
+        );
     }
 }
