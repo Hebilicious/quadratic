@@ -270,6 +270,61 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
     drop(copy);
 }
 
+/// Once a listening Unix socket is shut down, Linux reports it readable and hung up for good, and `accept` answers
+/// `EAGAIN`. Both ways the server stops shut the socket down just after they cancel its accept loop; a loop that is
+/// already inside `accept` at that moment sees only the shut-down socket. This test makes that state on purpose: it
+/// shuts the socket down through a second descriptor while the loop runs, on a runtime with one thread. Once the
+/// runtime has seen the shutdown, its thread must still run another task.
+#[test]
+fn an_accept_loop_on_a_socket_that_was_shut_down_leaves_its_thread_to_other_tasks() {
+    use std::os::fd::AsFd;
+
+    let (ran, other_task_ran) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let home = crate::support::private_home();
+            let (listener, file) = home::bind_socket(&prepared_at(home.path()))
+                .await
+                .expect("the socket binds");
+            let copy = listener
+                .as_fd()
+                .try_clone_to_owned()
+                .expect("a second descriptor of the listener");
+            let served = serve::serve_socket(
+                listener,
+                file,
+                Vec::new(),
+                serve::SOCKET_REQUEST_LIMIT,
+                &serve::Gate::default(),
+            );
+
+            rustix::net::shutdown(&copy, rustix::net::Shutdown::Both)
+                .expect("the socket stops listening");
+            // tokio waits for the readiness of a stream, not of a listener: only that wait is asked of this copy.
+            let copy = tokio::net::UnixStream::from_std(std::os::unix::net::UnixStream::from(copy))
+                .expect("a watched copy");
+            copy.readable()
+                .await
+                .expect("the shutdown, as the runtime sees it");
+            tokio::task::yield_now().await;
+
+            let _ = ran.send(());
+            drop(served);
+        });
+    });
+
+    assert!(
+        other_task_ran
+            .recv_timeout(crate::support::HANG_GUARD)
+            .is_ok(),
+        "the accept loop held the runtime's only thread after its socket was shut down"
+    );
+}
+
 /// A process of this account that listens on the socket's name without the home's lock keeps its socket: the server
 /// removes a socket only after a connection to it is refused.
 #[tokio::test]
