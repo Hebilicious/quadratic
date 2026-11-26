@@ -288,13 +288,11 @@ fn generation() -> std::io::Result<String> {
 }
 
 /// `GET /server`: the identity fixed at the start, with where the web app listens once it does.
-#[cfg(unix)]
 struct Identify {
     identity: Identity,
     web: Arc<listener::WebListener>,
 }
 
-#[cfg(unix)]
 impl Identify {
     fn answer(&self) -> Bytes {
         let mut identity = self.identity.clone();
@@ -306,7 +304,6 @@ impl Identify {
     }
 }
 
-#[cfg(unix)]
 impl Handler for Identify {
     fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
         let (status, body) = if request.method() == Method::GET {
@@ -833,15 +830,17 @@ async fn start_checked(
             ..HttpOptions::default()
         },
     );
+    let generation = identity.generation.clone().unwrap_or_default();
+    let identify: Arc<dyn Handler> = Arc::new(Identify {
+        identity,
+        web: Arc::clone(&web),
+    });
     #[cfg(unix)]
     let socket = {
         let surface: Arc<dyn Handler> = Arc::new(surface);
         let control: Arc<dyn Handler> = Arc::new(Control {
-            generation: identity.generation.clone().unwrap_or_default(),
-            identify: Arc::new(Identify {
-                identity,
-                web: Arc::clone(&web),
-            }),
+            generation,
+            identify,
             gate: gate.clone(),
             pairing: Arc::clone(&pairing),
             web: Arc::clone(&web),
@@ -855,7 +854,7 @@ async fn start_checked(
         )
     };
     #[cfg(not(unix))]
-    let _ = (surface, identity);
+    let _ = (surface, identify, generation);
     Ok(Server {
         gate,
         #[cfg(unix)]
