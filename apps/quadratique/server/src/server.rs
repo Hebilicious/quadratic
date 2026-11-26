@@ -2,11 +2,11 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use acid_cat_core::http::{HttpOptions, HttpSurface};
-use acid_cat_core::remote::{self, Handler, RequestBody, ResponseBody};
+use acid_cat_core::remote::{Handler, RequestBody, ResponseBody};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{Method, Request, Response, StatusCode, header};
@@ -23,12 +23,14 @@ use crate::home::{self, HomeError, Prepared};
 use crate::pairing::{self, Pairing};
 use crate::serve::{self, Admit, Connection, OWNER_ONLY};
 use crate::store::{Store, StoreError, canonical_folder};
+use crate::web::Origin;
 use crate::web::{self, WebApp};
 
 mod address;
-mod closing;
+mod listener;
 
 pub use address::{Listen, address_kept, kept_port, set_strict, strict};
+pub use listener::Listening;
 
 pub const TARGET: &str = "cli";
 pub const BASE: &str = "/cli";
@@ -48,7 +50,13 @@ pub fn base_over_socket() -> String {
     format!("http://{SOCKET_AUTHORITY}{BASE}")
 }
 pub(crate) const DATABASE_FILE: &str = "workspace.db";
+/// Written by the servers of releases 0.1 to 0.3, which served the command line on TCP: a hint, for the command line,
+/// that one of them may hold the home. No server writes it any more.
 pub(crate) const RUNTIME_FILE: &str = "server.json";
+/// The `url` of every identity. Releases 0.2 and 0.3 take an identity only with a loopback address of the command
+/// line's routes there, and their `quadratique upgrade` waits for that identity from the new build (record 0004, §6).
+/// No route answers at it: the command line's routes are on the socket only, and port 0 is no port.
+pub const COMPATIBLE_URL: &str = "http://127.0.0.1:0/cli";
 pub(crate) const LOCK_FILE: &str = "server.lock";
 const DIRECTORY: &str = "quadratique";
 /// How long a server may take to start: a command waits this long for the server it started, and a server waits
@@ -96,7 +104,7 @@ pub enum ServerError {
     Owned(PathBuf),
     #[error("the store cannot open: {0}")]
     Store(#[from] StoreError),
-    #[error("the runtime file or the listener failed: {0}")]
+    #[error("a file of the home or a listener failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("the application breaks the rules of AcidCat: {}", .0.join("; "))]
     Application(Vec<String>),
@@ -170,6 +178,7 @@ impl Paths {
     }
 }
 
+/// The runtime file of a server of releases 0.1 to 0.3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeFile {
     pub pid: u32,
@@ -206,16 +215,32 @@ pub struct Identity {
     pub executable: Option<Executable>,
     #[serde(default)]
     pub started: Option<Started>,
-    /// The address of the command line's routes on TCP, as the runtime file names it.
+    /// [`COMPATIBLE_URL`] from this build on; a server of releases 0.2 and 0.3 named the command line's routes on TCP.
     #[serde(default)]
     pub url: Option<String>,
-    /// Whether the server listens on the port its home keeps, so that the next start asks for the same address.
+    /// The address of the web app, `http://127.0.0.1:<port>/`, once its listener is open: at the start of a server whose
+    /// home was paired before, otherwise at the first `quadratique ui`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<String>,
+    /// Whether the web app listens on the port its home keeps, so that the next start asks for the same address.
     #[serde(
         default,
         rename = "addressKept",
         skip_serializing_if = "Option::is_none"
     )]
     pub address_kept: Option<bool>,
+}
+
+impl Identity {
+    /// The web app's address that this identity names.
+    pub fn web_address(&self) -> Option<SocketAddr> {
+        self.web
+            .as_deref()?
+            .strip_prefix("http://")?
+            .strip_suffix('/')?
+            .parse()
+            .ok()
+    }
 }
 
 /// The file the server runs, as it found it at its start.
@@ -262,17 +287,29 @@ fn generation() -> std::io::Result<String> {
     Ok(bits.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// The answer is complete once the TCP listener's address is known; until then the route answers `503`.
+/// `GET /server`: the identity fixed at the start, with where the web app listens once it does.
 struct Identify {
-    answer: Arc<OnceLock<Bytes>>,
+    identity: Identity,
+    web: Arc<listener::WebListener>,
+}
+
+impl Identify {
+    fn answer(&self) -> Bytes {
+        let mut identity = self.identity.clone();
+        if let Some(listening) = self.web.listening() {
+            identity.web = Some(format!("http://{}/", listening.address));
+            identity.address_kept = Some(listening.kept);
+        }
+        Bytes::from(serde_json::to_vec(&identity).unwrap_or_default())
+    }
 }
 
 impl Handler for Identify {
     fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
-        let (status, body) = match (request.method() == Method::GET, self.answer.get()) {
-            (false, _) => (StatusCode::METHOD_NOT_ALLOWED, Bytes::new()),
-            (true, Some(answer)) => (StatusCode::OK, answer.clone()),
-            (true, None) => (StatusCode::SERVICE_UNAVAILABLE, Bytes::new()),
+        let (status, body) = if request.method() == Method::GET {
+            (StatusCode::OK, self.answer())
+        } else {
+            (StatusCode::METHOD_NOT_ALLOWED, Bytes::new())
         };
         let mut response = Response::new(Full::new(body).boxed_unsync());
         *response.status_mut() = status;
@@ -291,7 +328,7 @@ struct Control {
     generation: String,
     gate: serve::Gate,
     pairing: Arc<Pairing>,
-    web: SocketAddr,
+    web: Arc<listener::WebListener>,
 }
 
 /// The body of `POST /server/pair`: whether `ui` opens the link through a bootstrap file.
@@ -380,8 +417,8 @@ impl Handler for Control {
 
 #[cfg(unix)]
 impl Control {
-    /// A one-time code for the web app. The TCP listener and its routes are served before the socket accepts its
-    /// first connection, so the address and the code that go back together name this server's own listener.
+    /// A one-time code for the web app. The TCP listener and its routes are served before the code is made, so the
+    /// address and the code that go back together name this server's own listener.
     fn pair(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
         if request.method() != Method::POST {
             return Box::pin(std::future::ready(json_answer(
@@ -390,13 +427,24 @@ impl Control {
             )));
         }
         let pairing = Arc::clone(&self.pairing);
-        let web = self.web;
+        let web = Arc::clone(&self.web);
         Box::pin(async move {
             let Some(asked) = read_bounded(request.into_body(), pairing::BODY_LIMIT)
                 .await
                 .and_then(|body| serde_json::from_slice::<PairRequest>(&body).ok())
             else {
                 return json_answer(StatusCode::BAD_REQUEST, Bytes::new());
+            };
+            let web = match web.open().await {
+                Ok(web) => web,
+                Err(error) => {
+                    return json_answer(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        to_json(&Refusal {
+                            reason: format!("the web app cannot listen: {error}"),
+                        }),
+                    );
+                }
             };
             match pairing.issue(web, asked.open) {
                 Ok(issued) => json_answer(StatusCode::OK, to_json(&issued)),
@@ -468,20 +516,23 @@ pub struct Server {
     gate: serve::Gate,
     #[cfg(unix)]
     socket: serve::ServedSocket,
-    served: serve::Served,
+    web: Arc<listener::WebListener>,
     watcher: Watcher,
-    runtime: RuntimeFile,
-    published: closing::Published,
-    _home: closing::HomeLock,
+    _home: HomeLock,
 }
 
+/// The home's lock, held by the server and by everything that must close before another server may take the home.
+type HomeLock = Arc<File>;
+
 impl Server {
-    pub fn address(&self) -> SocketAddr {
-        self.runtime.address
+    /// Where the web app listens, once it does.
+    pub fn web(&self) -> Option<Listening> {
+        self.web.listening()
     }
 
-    pub fn url(&self) -> &str {
-        &self.runtime.url
+    /// Opens the web app's listener, as the first `quadratique ui` does, and gives its address.
+    pub async fn open_web(&self) -> std::io::Result<SocketAddr> {
+        self.web.open().await
     }
 
     /// What this server's admission decides for a connection, as its accept loop asks it.
@@ -493,19 +544,9 @@ impl Server {
         &self.credentials
     }
 
-    pub fn runtime_path(&self) -> &Path {
-        self.published.path()
-    }
-
     #[cfg(unix)]
     pub fn socket_path(&self) -> &Path {
         self.socket.path()
-    }
-
-    /// Takes the TCP listener out of the listening state, as a stop does, and leaves the socket serving: every later
-    /// connection to the TCP address is refused. A test uses it to show what works without TCP.
-    pub fn stop_listening_on_tcp(&self) {
-        self.served.stop_listening();
     }
 
     pub async fn look_at_repositories(&self) {
@@ -521,16 +562,29 @@ impl Server {
         self.watcher.stop().await;
         #[cfg(unix)]
         self.socket.close().await;
-        self.served.close().await;
+        if let Some(served) = self.web.stop().await {
+            served.close().await;
+        }
     }
 
-    /// Stops accepting on both listeners, lets open connections finish for up to `within`, then shuts down.
+    /// Stops accepting on every listener, lets open connections finish for up to `within`, then shuts down.
     pub async fn shutdown_draining(mut self, within: Duration) {
+        let mut web = self.web.stop().await;
+        let draining_web = async {
+            if let Some(served) = web.as_mut() {
+                served.drain(within).await;
+            }
+        };
         #[cfg(unix)]
-        tokio::join!(self.socket.drain(within), self.served.drain(within));
+        tokio::join!(self.socket.drain(within), draining_web);
         #[cfg(not(unix))]
-        self.served.drain(within).await;
-        self.shutdown().await;
+        draining_web.await;
+        self.watcher.stop().await;
+        #[cfg(unix)]
+        self.socket.close().await;
+        if let Some(served) = web {
+            served.close().await;
+        }
     }
 }
 
@@ -701,7 +755,7 @@ async fn start_checked(
     started: Started,
 ) -> Result<Server, ServerError> {
     web::refuse_overlap(&web_app, home.folder()).map_err(ServerError::WebApp)?;
-    let owner: closing::HomeLock = Arc::new(own(home, waits).await?);
+    let owner: HomeLock = Arc::new(own(home, waits).await?);
     // Read once, under the home's lock: everything this start does follows this one value.
     let strict = address::strict(home);
     #[cfg(unix)]
@@ -709,11 +763,10 @@ async fn start_checked(
     let credentials = Credentials::open(home.credentials())?.holding(Arc::clone(&owner));
     let store = Store::open(home.database())?;
     store.hold_until_closed(Arc::clone(&owner));
-    let database = store.path().to_path_buf();
     let app = application().map_err(ServerError::Application)?;
-    let mut identity = Identity {
+    let identity = Identity {
         pid: std::process::id(),
-        database: database.clone(),
+        database: store.path().to_path_buf(),
         interface: Some(interface()),
         schema: Some(crate::store::SCHEMA_VERSION),
         generation: Some(generation()?),
@@ -721,18 +774,45 @@ async fn start_checked(
         controls: Some(CONTROLS.to_vec()),
         executable: Executable::of_this_process(),
         started: Some(started),
-        url: None,
+        url: Some(COMPATIBLE_URL.to_owned()),
+        web: None,
         address_kept: None,
     };
-    let answer = Arc::new(OnceLock::new());
-    let identify: Arc<dyn Handler> = Arc::new(Identify {
-        answer: Arc::clone(&answer),
-    });
     let pairing = Pairing::open(home, strict)?;
     let watcher = Watcher::start(store.clone(), look_every, GIT_LIMIT, watcher::READ_WAIT);
     let looks = watcher.looks();
-    let origin = web::Origin::default();
-    let web_routes = web::routes(&app, &store, web_app, &pairing);
+    let origin = Origin::default();
+    let mut web_routes = web::guarded(
+        &origin,
+        web::routes(&app, &store, web_app, &pairing),
+        web::OriginHeader::OwnOnly,
+    );
+    let session: Arc<dyn Handler> = Arc::new(pairing::SessionRoute {
+        pairing: Arc::clone(&pairing),
+    });
+    web_routes.extend(web::guarded(
+        &origin,
+        vec![(pairing::SESSION.into(), session)],
+        web::OriginHeader::Required,
+    ));
+    let admit = callers::owner_only(own_account);
+    let gate = serve::Gate::default();
+    let web = listener::WebListener::new(listener::Opening {
+        home: home.clone(),
+        listen,
+        strict,
+        routes: web_routes,
+        admit: Arc::clone(&admit),
+        gate: gate.clone(),
+        origin,
+    });
+    // A browser may hold the token of an earlier pairing: its bookmarks and open tabs must find the web app.
+    if pairing.paired()
+        && let Err(error) = web.open().await
+    {
+        watcher.stop().await;
+        return Err(error.into());
+    }
     let command_line_credentials = credentials.clone();
     let surface = HttpSurface::with_request_context(
         app,
@@ -749,66 +829,18 @@ async fn start_checked(
             ..HttpOptions::default()
         },
     );
-    let surface: Arc<dyn Handler> = Arc::new(surface);
-    let command_line: remote::Routes = vec![
-        (BASE.into(), Arc::clone(&surface)),
-        (IDENTITY.into(), Arc::clone(&identify)),
-    ];
-    let mut routes = web::guarded(&origin, command_line, web::OriginHeader::Refused);
-    routes.extend(web::guarded(
-        &origin,
-        web_routes,
-        web::OriginHeader::OwnOnly,
-    ));
-    let session: Arc<dyn Handler> = Arc::new(pairing::SessionRoute {
-        pairing: Arc::clone(&pairing),
-    });
-    routes.extend(web::guarded(
-        &origin,
-        vec![(pairing::SESSION.into(), session)],
-        web::OriginHeader::Required,
-    ));
-    let admit = callers::owner_only(own_account);
-    let listening = address::bind(home, listen, strict).and_then(|bound| {
-        let (listener, record) = address::listen(bound, LISTEN_BACKLOG)?;
-        let served = serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS)?;
-        Ok((served, record))
-    });
-    let (served, record) = match listening {
-        Ok(listening) => listening,
-        Err(error) => {
-            watcher.stop().await;
-            return Err(error.into());
-        }
-    };
-    identity.address_kept = Some(address::record(home, &record, served.address.port()));
-    origin.set(served.address);
-    let gate = serve::Gate::default();
-    served.close_with(&gate);
-    let runtime = RuntimeFile {
-        pid: std::process::id(),
-        address: served.address,
-        url: format!("{}{BASE}", served.url()),
-        database,
-        control: Some(CONTROL),
-    };
-    identity.url = Some(runtime.url.clone());
-    let _ = answer.set(Bytes::from(
-        serde_json::to_vec(&identity).map_err(std::io::Error::from)?,
-    ));
-    if let Err(error) = write_runtime(&home.runtime(), &runtime) {
-        watcher.stop().await;
-        served.close().await;
-        return Err(error.into());
-    }
     #[cfg(unix)]
     let socket = {
+        let surface: Arc<dyn Handler> = Arc::new(surface);
         let control: Arc<dyn Handler> = Arc::new(Control {
-            identify,
             generation: identity.generation.clone().unwrap_or_default(),
+            identify: Arc::new(Identify {
+                identity,
+                web: Arc::clone(&web),
+            }),
             gate: gate.clone(),
             pairing: Arc::clone(&pairing),
-            web: served.address,
+            web: Arc::clone(&web),
         });
         serve::serve_socket(
             socket_listener,
@@ -818,13 +850,13 @@ async fn start_checked(
             &gate,
         )
     };
+    #[cfg(not(unix))]
+    let _ = (surface, identity);
     Ok(Server {
         gate,
         #[cfg(unix)]
         socket,
-        served,
-        published: closing::Published::new(home.runtime(), &runtime),
-        runtime,
+        web,
         watcher,
         _home: owner,
         admit,
@@ -904,15 +936,24 @@ async fn own(home: &Prepared, waits: Waits) -> Result<File, ServerError> {
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() || answers_for(&home.runtime(), &database, waits.probe.min(left)).await {
+        if left.is_zero() || answers_for(home, &database, waits.probe.min(left)).await {
             return Err(ServerError::Owned(home.database()));
         }
         tokio::time::sleep(POLL).await;
     }
 }
 
-async fn answers_for(runtime: &Path, database: &Path, limit: Duration) -> bool {
-    let Some(runtime) = std::fs::read(runtime)
+/// Whether a server of this database holds the home: it answers on the socket, or, for a server of releases 0.1 to 0.3,
+/// at the TCP address of its runtime file.
+async fn answers_for(home: &Prepared, database: &Path, limit: Duration) -> bool {
+    #[cfg(unix)]
+    if identity_over_socket_within(home, limit)
+        .await
+        .is_ok_and(|identity| identity.database == database)
+    {
+        return true;
+    }
+    let Some(runtime) = std::fs::read(home.runtime())
         .ok()
         .and_then(|text| serde_json::from_slice::<RuntimeFile>(&text).ok())
     else {
@@ -1245,15 +1286,6 @@ async fn read_answer(mut stream: impl AsyncRead + Unpin) -> Result<(String, Stri
         Some(status) => Ok((status.to_owned(), body.to_owned())),
         None => Err(malformed("the answer has no status")),
     }
-}
-
-fn write_runtime(path: &Path, runtime: &RuntimeFile) -> std::io::Result<()> {
-    if let Some(directory) = path.parent() {
-        std::fs::create_dir_all(directory)?;
-    }
-    let partial = path.with_extension(format!("json.{}", runtime.pid));
-    std::fs::write(&partial, serde_json::to_vec_pretty(runtime)?)?;
-    std::fs::rename(&partial, path)
 }
 
 pub async fn run(paths: &Paths, address: SocketAddr) -> Result<(), ServerError> {

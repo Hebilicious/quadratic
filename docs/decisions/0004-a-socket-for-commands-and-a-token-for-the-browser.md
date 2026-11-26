@@ -322,6 +322,18 @@ Decision (owner, 2026-11-26): the kept port and the lasting bearer by default; s
 | Open live channels | A sign-out refuses every new request and ends every event stream admitted with the earlier token (QUA-79). Each admitted stream holds the cancellation token of the bearer it was admitted with; `Pairing::rotate` cancels it under the same lock that changes the file and the memory, so once `sign-out` answers, no stream of the earlier token produces another event. An event already handed to the connection before then may still reach the page. The page's stream reconnects, gets `401`, and the page shows the sentence. A stream opened without a token, served until QUA-58, is bound to no token, and a sign-out leaves it open; once the token is required, no such stream exists. A strict restart ends every stream with the server. |
 | A link opened in a tab of the same address | The browser changes only the fragment and loads nothing. The page reads `#pair=` on `hashchange` too, and clears it. A paired tab exchanges the code while the app keeps running (`paired.exchanging`), so nothing typed is lost; a refused code, a fake one included, changes nothing. A new token from the code is saved and goes to the running app, whose clients read the token at each request: the server holds one token, so the old one is stale, and nothing restarts. A `401` or a cleared token during the exchange drops the old token and waits for it: its token keeps the app running, its refusal leaves the tab unpaired. A later code replaces one that is being redeemed. |
 
+**As built in QUA-58 (2026-11-26), the cutover's first step.**
+
+| Point | What was built |
+| --- | --- |
+| Routes on TCP | Only the web app's: the guarded `/web` and `/webmcp`, `/session`, and the files and deep links. `/cli`, `/server` and every path below them answer `404` for every method, before the single-page fallback; any other path that is neither a file nor a deep link answers `404` for every method, and a deep link or a file answers `405` to a method other than `GET` and `HEAD`. The exact numeric `Host` is checked first on every route (`403`). |
+| The bearer | Required on `/web`, `/webmcp` and the event stream: a request without it gets the same `401` as one with another (`Requirement` and `REQUIRED` are gone). No stream without a token exists, so a sign-out ends every stream. |
+| When the listener opens | Not at every start. The bearer is made at the first pairing (the record's "made the first time it is needed"): by default it is then written to `web-token`, in strict mode kept in memory. A start opens the TCP listener only when the home already has a bearer, that is, by default, after any earlier pairing, so bookmarks and open tabs work after a restart with nothing to run. Otherwise the first `POST /server/pair` opens it, then makes the code. A server that only agents use listens on no TCP port. The port policy is unchanged and applies when the listener opens; the strict setting is still read once per start. A sign-out with no bearer replaces nothing. |
+| `server.json` | No longer written. The server's own fast refusal of a second server (`Owned`) asks the socket for the identity, and still asks the TCP address of a `server.json` that a server of releases 0.1 to 0.3 wrote. |
+| The identity | It gains `web` (`http://127.0.0.1:<port>/`) and `addressKept` once the listener is open. `url` stays, always `http://127.0.0.1:0/cli`: see the correction in §6. `server status` loses `url` and `runtime`, and gives `web` only while the web app listens. |
+| Windows | Its command line still looks for a server through `server.json` and TCP (`background/over_tcp.rs`); no server writes that file, and none starts on Windows. QUA-59 deletes that path with the signal paths it uses. |
+| A Windows browser on a server in WSL | Not measured: this machine has no Windows. The bearer no longer depends on the kernel, so the WSL relay is no obstacle in principle. |
+
 ## 5. Remote access (PRD §6, M7)
 
 The plan does not change, and one rule becomes clearer: "on the machine that runs the server" means
@@ -356,6 +368,17 @@ the new binary. The upgrader then runs the **new** `server status` until it repo
 | `serve --take-over` exists, and works with no server running | the unit runs it |
 | the server runs as the unit's main process (no fork into the background) | `pid` must equal `MainPID` |
 | `server status` keeps `running`, `sameInterface` and `pid` (the server's own pid), permanently | the old upgrader and the old `install.sh` (`install/install.sh:84-92`) check them |
+
+**Correction (QUA-58, 2026-11-26).** The upgrade code of releases 0.2 and 0.3 does not run the new
+`server status`: after it starts the unit again, it waits on its own look at the socket
+(`upgrade/server.rs` `ready`, through `background::observe`). That look takes an identity as a
+server only when `started` is present and `url` is a loopback address of the command line's routes,
+`http://<address>/cli` (`background.rs:660` and `runtime_of`, the same in 0.2.0 and 0.3.0);
+anything else is `Malformed`, and the upgrade reports that the new build did not answer. So the new
+binary must also keep, on the socket, an identity with `started`, a 32-digit `generation`, `control`
+1, the `pid` of the server itself, its `executable`, and a `url` of that form. From QUA-58 on, `url`
+is always `http://127.0.0.1:0/cli`: no route answers there, and port 0 is no port, so a command
+line of 0.2 or 0.3 that calls it fails at once instead of reaching another program.
 
 That evidence is from the upgrade code on `main`, which first ships in 0.2. Only v0.1.0 is
 published, and it has no `upgrade`. The 0.2 path needs evidence from the real 0.2 artifact once it

@@ -42,6 +42,13 @@ pub fn stop_listening(listener: std::os::unix::net::UnixListener) {
         .expect("the socket stops listening");
 }
 
+/// Opens the web app's listener of `server`, as the first `quadratique ui` does, and gives its address.
+pub async fn web_address(server: &Server) -> std::net::SocketAddr {
+    within("the web app's listener", server.open_web())
+        .await
+        .expect("the web app listens")
+}
+
 pub async fn start() -> Running {
     start_looking_every(watcher::EVERY).await
 }
@@ -166,6 +173,19 @@ impl Running {
             }
         }
         client
+    }
+
+    /// A client of the web app's target at `base` (`/web` or `/webmcp`), as the server's own page sends its calls once
+    /// a link of `quadratique ui` let it in.
+    pub async fn page(&self, base: &str) -> HttpClient {
+        let (address, bearer) = crate::web::paired(self.home()).await;
+        let origin = format!("http://{address}");
+        HttpClient::new(&format!("{origin}{base}"))
+            .expect("the web target's URL")
+            .header("Origin", &origin)
+            .expect("a valid header")
+            .header("Authorization", &format!("Bearer {bearer}"))
+            .expect("a valid header")
     }
 
     pub async fn call(&self, who: &Who, id: &str, input: Value) -> Result<Value, Value> {

@@ -104,7 +104,7 @@ fn an_invalid_role_fails_before_any_call_to_the_server() {
 
     assert_eq!(refused.code, 3, "{refused:?}");
     assert!(refused.stderr.contains("QUADRATIQUE_ROLE"), "{refused:?}");
-    assert!(home.runtime().is_none());
+    assert!(home.served().is_none());
     assert!(home.servers().is_empty());
 }
 

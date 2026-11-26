@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -119,6 +120,18 @@ def system_path() -> str:
     return ":".join(dict.fromkeys(folders))
 
 
+# The longest path of the server's socket, `<QUADRATIQUE_HOME>/server.sock`, that Linux accepts.
+SOCKET_PATH_LIMIT = 107
+
+
+def quadratique_home(root: Path) -> Path:
+    """The Quadratique data folder of the sandbox at `root`: a short folder of its own in the system's temporary folder,
+    because the server's socket in it must have a short path, and a run folder can be deep. The same root always gets
+    the same folder, so a later analysis of the run finds its store while the folder exists."""
+    digest = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"qeval-{os.getuid()}-{digest}"
+
+
 @dataclass
 class Sandbox:
     root: Path
@@ -129,6 +142,10 @@ class Sandbox:
     @property
     def home(self) -> Path:
         return self.root / "home"
+
+    @property
+    def qhome(self) -> Path:
+        return quadratique_home(self.root)
 
     @property
     def bin(self) -> Path:
@@ -144,16 +161,21 @@ class Sandbox:
             "XDG_CACHE_HOME": str(home / ".cache"),
             "XDG_RUNTIME_DIR": str(home / "run"),
             "DO_NOT_TRACK": "1",
-            "QUADRATIQUE_HOME": str(self.root / "qhome"),
+            "QUADRATIQUE_HOME": str(self.qhome),
             "UV_CACHE_DIR": str(home / ".cache" / "uv"),
         }
 
     def create(self) -> "Sandbox":
-        for sub in ("home/.config", "home/.local/share", "home/.local/state", "home/.cache", "home/run", "qhome", "bin"):
+        for sub in ("home/.config", "home/.local/share", "home/.local/state", "home/.cache", "home/run", "bin"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         (self.home / "run").chmod(0o700)
-        # Quadratique refuses a home that a group or other accounts may use.
-        (self.root / "qhome").chmod(0o700)
+        # Quadratique refuses a home that a group or other accounts may use, and a socket path that is too long.
+        self.qhome.mkdir(mode=0o700, exist_ok=True)
+        self.qhome.chmod(0o700)
+        socket = len(str(self.qhome / "server.sock").encode())
+        if socket > SOCKET_PATH_LIMIT:
+            raise SystemExit(f"qeval: the Quadratique socket in {self.qhome} would be {socket} bytes long, more than "
+                             f"{SOCKET_PATH_LIMIT}: set TMPDIR to a shorter folder.")
         exports = " ".join(f'{k}="{v}"' for k, v in self.tool_env().items())
         for name, real in self.binaries.items():
             wrapper = self.bin / name

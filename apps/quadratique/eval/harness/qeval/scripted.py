@@ -73,7 +73,7 @@ def measure_setup(p: Prepared) -> dict:
         "commits": commits,
         "git_config_added": [line.strip() for line in config_after.splitlines() if line not in p.config_before.splitlines()],
         "home_files": sandbox.home_files(p.sb.home),
-        "tool_home_files": sandbox.home_files(p.sb.root / "qhome"),
+        "tool_home_files": sandbox.home_files(p.sb.qhome),
     }
 
 

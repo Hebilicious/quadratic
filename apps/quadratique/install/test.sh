@@ -31,7 +31,6 @@ fail() {
   show_file "$systemd_state/service.log"
   show_file "$systemd_state/calls"
   show_file "$data_home/quadratique/server.log"
-  show_file "$data_home/quadratique/server.json"
   show_file "$scratch/install.log"
   exit 1
 }

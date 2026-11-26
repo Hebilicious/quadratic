@@ -7,11 +7,11 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use quadratique_server::home::{self, Prepared};
 use quadratique_server::serve::Connection;
-use quadratique_server::server::{self, Paths, RuntimeFile};
+use quadratique_server::server::{self, Paths};
 use tempfile::TempDir;
 use tokio::net::TcpSocket;
 
-use crate::support::{HANG_GUARD, private_home, within};
+use crate::support::{HANG_GUARD, private_home, web_address, within};
 
 struct Home {
     paths: Paths,
@@ -59,11 +59,12 @@ impl Home {
             .collect()
     }
 
-    fn published(&self) -> Option<SocketAddr> {
-        let text = std::fs::read(self.prepared.runtime()).ok()?;
-        serde_json::from_slice::<RuntimeFile>(&text)
-            .ok()
-            .map(|runtime| runtime.address)
+    /// The web app's address that the server's identity names, on its socket.
+    async fn published(&self) -> Option<SocketAddr> {
+        server::identity_over_socket(&self.prepared)
+            .await
+            .ok()?
+            .web_address()
     }
 }
 
@@ -88,15 +89,16 @@ fn held_port() -> HeldPort {
     }
 }
 
-fn admits_only_its_owner(running: &server::Server) -> bool {
-    let client = std::net::TcpStream::connect(running.address()).expect("a connection");
+async fn admits_only_its_owner(running: &server::Server) -> bool {
+    let address = web_address(running).await;
+    let client = std::net::TcpStream::connect(address).expect("a connection");
     let own = Connection {
-        local: running.address(),
+        local: address,
         peer: client.local_addr().expect("the client's address"),
     };
     let unconnected = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     let nobody_connected = Connection {
-        local: running.address(),
+        local: address,
         peer: unconnected.local_addr().expect("its address"),
     };
     running.admits(own) && !running.admits(nobody_connected)
@@ -110,7 +112,7 @@ async fn the_server_takes_the_kept_port_even_while_a_socket_that_does_not_listen
 
     let running = home.start().await;
 
-    let port = running.address().port();
+    let port = web_address(&running).await.port();
     running.shutdown().await;
     assert_eq!(port, held.port, "the tests below rely on this");
 }
@@ -119,13 +121,16 @@ async fn the_server_takes_the_kept_port_even_while_a_socket_that_does_not_listen
 async fn by_default_the_server_restarts_on_its_address_and_still_admits_only_its_owner() {
     let home = Home::new();
     let first = home.start().await;
-    let address = first.address();
+    let address = web_address(&first).await;
     first.shutdown().await;
     assert_eq!(home.kept(), Some(format!("{}\n", address.port())));
 
     let restarted = home.start().await;
 
-    let again = (restarted.address(), admits_only_its_owner(&restarted));
+    let again = (
+        web_address(&restarted).await,
+        admits_only_its_owner(&restarted).await,
+    );
     restarted.shutdown().await;
     assert_eq!(again, (address, true));
 }
@@ -134,15 +139,15 @@ async fn by_default_the_server_restarts_on_its_address_and_still_admits_only_its
 async fn when_the_kept_port_is_taken_the_server_listens_on_another_publishes_it_and_keeps_it() {
     let home = Home::new();
     let first = home.start().await;
-    let address = first.address();
+    let address = web_address(&first).await;
     first.shutdown().await;
     let squatter = std::net::TcpListener::bind(address).expect("the kept port, now free");
 
     let restarted = home.start().await;
 
-    let moved = restarted.address();
-    let published = home.published();
-    let admits = admits_only_its_owner(&restarted);
+    let moved = web_address(&restarted).await;
+    let published = home.published().await;
+    let admits = admits_only_its_owner(&restarted).await;
     restarted.shutdown().await;
     drop(squatter);
     assert_ne!(moved, address);
@@ -160,7 +165,7 @@ async fn a_given_port_even_zero_never_reads_or_writes_the_kept_port() {
     let any = server::start(&home.paths, server::loopback())
         .await
         .expect("the server starts on a port the system chooses");
-    let chosen = any.address().port();
+    let chosen = web_address(&any).await.port();
     any.shutdown().await;
     let given = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
@@ -169,7 +174,7 @@ async fn a_given_port_even_zero_never_reads_or_writes_the_kept_port() {
     let named = server::start(&home.paths, SocketAddr::from((Ipv4Addr::LOCALHOST, given)))
         .await
         .expect("the server starts on the given port");
-    let on = named.address().port();
+    let on = web_address(&named).await.port();
     named.shutdown().await;
 
     assert_ne!(chosen, held.port, "--port 0 read server.port");
@@ -184,10 +189,10 @@ async fn a_strict_home_never_takes_a_kept_port_forgets_it_and_lists_the_ports_it
     home.write_kept(&format!("{}\n", held.port));
 
     let first = home.start().await;
-    let one = first.address().port();
+    let one = web_address(&first).await.port();
     first.shutdown().await;
     let second = home.start().await;
-    let two = second.address().port();
+    let two = web_address(&second).await.port();
     second.shutdown().await;
 
     assert_ne!(one, held.port, "a strict home read server.port");
@@ -258,7 +263,7 @@ async fn a_kept_port_is_read_only_from_a_small_regular_file() {
                 );
             }
         };
-        ports.push((kind, started.address().port()));
+        ports.push((kind, web_address(&started).await.port()));
         started.shutdown().await;
     }
 
@@ -274,9 +279,16 @@ async fn a_kept_port_that_cannot_be_written_leaves_the_server_serving_and_no_par
 
     let running = home.start().await;
 
-    let answered = server::identity(running.address()).await;
+    let address = web_address(&running).await;
+    let answered = server::identity_over_socket(&home.prepared).await;
     running.shutdown().await;
-    assert!(answered.is_ok(), "{answered:?}");
+    assert_eq!(
+        answered
+            .map(|identity| identity.web_address())
+            .ok()
+            .flatten(),
+        Some(address)
+    );
     let partial: Vec<String> = std::fs::read_dir(home.prepared.folder())
         .expect("the data folder")
         .flatten()

@@ -272,11 +272,8 @@ fn a_stale_runtime_file_that_names_a_server_of_another_account_does_not_stop_a_s
         .ok();
 
     assert_eq!(projects, json!({ "items": [] }));
-    let runtime = home.runtime().expect("the new server's runtime file");
-    assert_eq!(
-        home.servers(),
-        vec![runtime["pid"].as_u64().expect("a pid") as u32]
-    );
+    let pid = home.served_pid().expect("the new server answers");
+    assert_eq!(home.servers(), vec![pid]);
 }
 
 /// The home and the files in it stay read-only for this test's process, as on a read-only file system, until the

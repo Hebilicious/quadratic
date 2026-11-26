@@ -668,8 +668,8 @@ async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
         Some(control) if control != CONTROL => return OnSocket::Newer(identity),
         Some(_) => {}
     }
-    if identity.started.is_none() || identity.url.is_none() {
-        return OnSocket::Malformed("the identity lacks its start or its url".to_owned());
+    if identity.started.is_none() {
+        return OnSocket::Malformed("the identity lacks its start".to_owned());
     }
     OnSocket::Serving(identity)
 }

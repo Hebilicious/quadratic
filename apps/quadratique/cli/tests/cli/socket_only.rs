@@ -1,5 +1,5 @@
-//! A command reaches the server only through the socket of its home (record 0004, §2): the server's TCP listener is
-//! not needed by any command, `quadratique mcp`, `init` or `upgrade --skills`.
+//! A command reaches the server only through the socket of its home (record 0004, §2): no command, `quadratique mcp`,
+//! `init` or `upgrade --skills` needs a TCP listener, and a server that no browser used has none.
 
 use serde_json::json;
 
@@ -8,8 +8,7 @@ use quadratique_server::server::{self, Paths, Server};
 use crate::mcp::Client;
 use crate::support::{Home, Lines, Repository, outside};
 
-/// The home's server, run by this test, with its TCP listener out of the listening state: every TCP connection to it
-/// is refused, and its socket serves.
+/// The home's server, run by this test, which no browser used: it listens on no TCP port, and its socket serves.
 struct ServerWithoutTcp {
     runtime: tokio::runtime::Runtime,
     server: Option<Server>,
@@ -22,12 +21,10 @@ impl ServerWithoutTcp {
         let server = runtime
             .block_on(server::start(&paths, server::loopback()))
             .expect("the server starts");
-        server.stop_listening_on_tcp();
-        let refused = std::net::TcpStream::connect(server.address());
         assert_eq!(
-            refused.as_ref().map_err(std::io::Error::kind).err(),
-            Some(std::io::ErrorKind::ConnectionRefused),
-            "{refused:?}"
+            server.web(),
+            None,
+            "a server that no browser used listens on TCP"
         );
         ServerWithoutTcp {
             runtime,
@@ -45,8 +42,7 @@ impl Drop for ServerWithoutTcp {
 }
 
 #[test]
-fn a_command_watch_an_mcp_tool_call_init_and_upgrade_skills_work_while_tcp_refuses_every_connection()
- {
+fn a_command_watch_an_mcp_tool_call_init_and_upgrade_skills_work_with_no_tcp_listener() {
     let home = Home::new();
     let repository = Repository::new();
     let elsewhere = outside();
@@ -133,7 +129,8 @@ impl FoundThenGone {
             controls: Some(vec![CONTROL]),
             executable: None,
             started: Some(Started::Serve),
-            url: Some("http://127.0.0.1:9/cli".to_owned()),
+            url: Some(server::COMPATIBLE_URL.to_owned()),
+            web: None,
             address_kept: None,
         };
         let body = serde_json::to_string(&identity).expect("the identity as JSON");

@@ -6,7 +6,7 @@ use crate::support::{Home, Process, Repository, await_exit, kill, outside};
 fn a_command_in_a_fresh_home_starts_the_server_the_next_reuses_it_and_stop_ends_it() {
     let home = Home::new();
     let elsewhere = outside();
-    assert!(home.runtime().is_none());
+    assert!(home.served().is_none());
 
     let projects = home
         .quadratique(elsewhere.path())
@@ -14,10 +14,7 @@ fn a_command_in_a_fresh_home_starts_the_server_the_next_reuses_it_and_stop_ends_
         .run()
         .ok();
     assert_eq!(projects, json!({ "items": [] }));
-    let first = home
-        .runtime()
-        .expect("the server published its runtime file");
-    let pid = first["pid"].as_u64().expect("a pid") as u32;
+    let pid = home.served_pid().expect("the server answers on its socket");
     assert_eq!(home.servers(), vec![pid]);
 
     let status = home
@@ -32,7 +29,7 @@ fn a_command_in_a_fresh_home_starts_the_server_the_next_reuses_it_and_stop_ends_
         .args(["project", "list", "--json"])
         .run()
         .ok();
-    assert_eq!(home.runtime().expect("the runtime file")["pid"], pid);
+    assert_eq!(home.served_pid(), Some(pid));
     assert_eq!(home.servers(), vec![pid]);
 
     let stopped = home
@@ -42,7 +39,8 @@ fn a_command_in_a_fresh_home_starts_the_server_the_next_reuses_it_and_stop_ends_
         .ok();
     assert_eq!(stopped["stopped"], true);
     assert_eq!(stopped["pid"], pid);
-    assert!(home.runtime().is_none());
+    assert!(home.served().is_none());
+    assert!(!home.runtime_path().exists(), "a server wrote server.json");
     await_exit(pid);
     assert!(home.servers().is_empty());
 
@@ -70,22 +68,19 @@ fn a_server_that_died_is_replaced_by_the_next_command_which_opens_the_same_data(
         "It is done.",
     ])
     .ok();
-    let dead = home.runtime().expect("the runtime file")["pid"]
-        .as_u64()
-        .expect("a pid") as u32;
+    let dead = home.served_pid().expect("the server answers");
 
     kill(dead);
     await_exit(dead);
-    assert_eq!(
-        home.runtime().expect("the stale runtime file stays")["pid"],
-        dead
+    assert!(
+        home.path().join("server.sock").exists(),
+        "the stale socket stays"
     );
+    assert!(home.served().is_none());
 
     let shown = run(&["show", "--issue", "KEEP-1", "--json"]).ok();
     assert_eq!(shown["issue"]["title"], "Survives");
-    let replaced = home.runtime().expect("a new runtime file")["pid"]
-        .as_u64()
-        .expect("a pid") as u32;
+    let replaced = home.served_pid().expect("a new server answers");
     assert_ne!(replaced, dead);
     assert_eq!(home.servers(), vec![replaced]);
     let history = run(&["history", "query", "--issue", "KEEP-1"]).ok();
@@ -116,9 +111,7 @@ fn commands_that_start_together_in_a_fresh_home_share_one_server() {
         assert!(run.json()["text"].is_string(), "{run:?}");
     }
 
-    let pid = home.runtime().expect("the runtime file")["pid"]
-        .as_u64()
-        .expect("a pid") as u32;
+    let pid = home.served_pid().expect("the server answers");
     assert_eq!(home.servers(), vec![pid]);
 }
 
@@ -198,8 +191,13 @@ fn a_stale_runtime_file_that_points_at_another_homes_server_is_not_used() {
         .args(["project", "create", "--key", "OTH", "--name", "Theirs"])
         .run()
         .ok();
-    let mut stale = theirs.runtime().expect("their runtime file");
-    stale["database"] = json!(ours.path().canonicalize().unwrap().join("workspace.db"));
+    let theirs_pid = theirs.served_pid().expect("their server answers");
+    let stale = json!({
+        "pid": theirs_pid,
+        "address": "127.0.0.1:9",
+        "url": "http://127.0.0.1:9/cli",
+        "database": ours.path().canonicalize().unwrap().join("workspace.db"),
+    });
     std::fs::write(ours.runtime_path(), stale.to_string()).expect("the stale runtime file");
 
     let projects = ours
@@ -209,41 +207,39 @@ fn a_stale_runtime_file_that_points_at_another_homes_server_is_not_used() {
         .ok();
 
     assert_eq!(projects, json!({ "items": [] }));
-    let started = ours.runtime().expect("our own runtime file")["pid"].clone();
-    assert_ne!(started, stale["pid"]);
+    let started = ours.served_pid().expect("our own server answers");
+    assert_ne!(started, theirs_pid);
 }
 
+/// The port given to `serve` is the web app's: it listens there once `quadratique ui` asks.
 #[test]
-fn serve_with_a_port_listens_on_that_loopback_port() {
+fn serve_with_a_port_gives_that_loopback_port_to_the_web_app() {
     let home = Home::new();
     let elsewhere = outside();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .expect("a free loopback port")
         .port();
-
-    let _server = home
+    let mut server = home
         .quadratique(elsewhere.path())
         .args(["serve", "--port", &port.to_string()])
         .spawn();
-    let deadline = std::time::Instant::now() + crate::support::HANG_GUARD;
-    let runtime = loop {
-        if let Some(runtime) = home.runtime() {
-            break runtime;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the server published no runtime file within the hang guard"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
-    assert_eq!(runtime["address"], format!("127.0.0.1:{port}"));
-    let status = home
+    home.await_served_by(server.id());
+    let before = home
         .quadratique(elsewhere.path())
         .args(["server", "status"])
         .run()
         .ok();
-    assert_eq!(status["url"], format!("http://127.0.0.1:{port}/cli"));
+    let paired = home.quadratique(elsewhere.path()).args(["ui"]).run().ok();
+    let after = home
+        .quadratique(elsewhere.path())
+        .args(["server", "status"])
+        .run()
+        .ok();
+
+    assert_eq!(before.get("web"), None, "{before}");
+    assert_eq!(paired["url"], format!("http://127.0.0.1:{port}/"));
+    assert_eq!(after["web"], format!("http://127.0.0.1:{port}/"));
 }
 
 #[test]
@@ -284,7 +280,7 @@ fn commands_with_and_without_a_runtime_directory_find_the_same_server_of_the_def
     assert_eq!(home.servers().len(), 1);
 }
 
-/// Without its runtime file, the command line has no TCP address to try: the answer can come only over the socket.
+/// No server writes a runtime file: the answer comes over the socket, and names no TCP address of the command line.
 #[test]
 fn server_status_reaches_the_server_over_its_socket_and_reports_its_generation_and_control_version()
 {
@@ -296,8 +292,7 @@ fn server_status_reaches_the_server_over_its_socket_and_reports_its_generation_a
         .args(["project", "list"])
         .run()
         .ok();
-    let runtime = home.runtime().expect("the runtime file");
-    std::fs::remove_file(home.runtime_path()).expect("the runtime file goes");
+    let pid = home.served_pid().expect("the server answers");
     let socket = home.path().join("server.sock");
     let socket_meta = std::fs::symlink_metadata(&socket).expect("the socket");
     assert!(socket_meta.file_type().is_socket());
@@ -311,8 +306,10 @@ fn server_status_reaches_the_server_over_its_socket_and_reports_its_generation_a
 
     assert_eq!(status["running"], true, "{status}");
     assert_eq!(status["sameInterface"], true, "{status}");
-    assert_eq!(status["pid"], runtime["pid"], "{status}");
-    assert_eq!(status["url"], runtime["url"], "{status}");
+    assert_eq!(status["pid"], pid, "{status}");
+    assert_eq!(status.get("url"), None, "{status}");
+    assert_eq!(status.get("runtime"), None, "{status}");
+    assert_eq!(status.get("web"), None, "{status}");
     assert_eq!(status["control"], 1, "{status}");
     assert_eq!(status["started"], "on-demand", "{status}");
     let generation = status["generation"].as_str().expect("a generation");
@@ -321,8 +318,6 @@ fn server_status_reaches_the_server_over_its_socket_and_reports_its_generation_a
         "{status}"
     );
 
-    std::fs::write(home.runtime_path(), runtime.to_string())
-        .expect("the runtime file, which stop still reads until QUA-54");
     let stopped = home
         .quadratique(elsewhere.path())
         .args(["server", "stop"])
@@ -392,15 +387,12 @@ fn a_missing_default_home_is_made_private_with_the_folders_above_it() {
 fn sigterm_and_sigint_still_stop_a_server_started_with_serve() {
     use rustix::process::{Pid, Signal, kill_process};
 
-    use crate::support::{Step, Watch};
-
     for signal in [Signal::TERM, Signal::INT] {
         let home = Home::new();
         let elsewhere = outside();
-        let mut watch = Watch::of(&home);
         let mut server = home.quadratique(elsewhere.path()).args(["serve"]).spawn();
         let pid = server.id();
-        watch.await_steps(&[Step::Published("server.json")]);
+        home.await_served_by(pid);
         assert_eq!(
             home.quadratique(elsewhere.path())
                 .args(["server", "status"])
@@ -418,7 +410,7 @@ fn sigterm_and_sigint_still_stop_a_server_started_with_serve() {
 
         assert_eq!(ended.code, 0, "{signal:?}: {ended:?}");
         assert!(!home.path().join("server.sock").exists(), "{signal:?}");
-        assert!(home.runtime().is_none(), "{signal:?}");
+        assert!(!home.runtime_path().exists(), "{signal:?}");
         let status = home
             .quadratique(elsewhere.path())
             .args(["server", "status"])

@@ -118,9 +118,11 @@ fn listed_with(url: &str, token: &str) -> u16 {
     .0
 }
 
-fn client(url: &str, route: &str, claimed: &Value) -> HttpClient {
+/// A client of the web app's `route`, as the page sends its calls with the bearer `token`, claiming to be `claimed`.
+fn client(url: &str, token: &str, route: &str, claimed: &Value) -> HttpClient {
     HttpClient::new(&format!("{}{route}", origin(url)))
         .and_then(|client| client.header("Origin", origin(url)))
+        .and_then(|client| client.header("Authorization", &format!("Bearer {token}")))
         .and_then(|client| client.header("Quadratique-Actor", &claimed.to_string()))
         .expect("a client of the route")
 }
@@ -219,21 +221,26 @@ fn the_web_route_acts_as_the_servers_login_and_webmcp_as_the_agent_browser_whate
 {
     let home = Home::new();
     let elsewhere = outside();
-    let url = home
+    let printed = home
         .quadratique(elsewhere.path())
         .env("USER", "ada")
         .args(["ui"])
         .run()
-        .ok()["url"]
-        .as_str()
-        .expect("a URL")
-        .to_owned();
+        .ok();
+    let url = printed["url"].as_str().expect("a URL").to_owned();
+    let token = redeem(&link_of(&printed));
     let page = client(
         &url,
+        &token,
         "/web",
         &json!({ "kind": "agent", "name": "claude-code@elsewhere", "harness": "claude-code" }),
     );
-    let agent = client(&url, "/webmcp", &json!({ "kind": "human", "name": "sam" }));
+    let agent = client(
+        &url,
+        &token,
+        "/webmcp",
+        &json!({ "kind": "human", "name": "sam" }),
+    );
 
     ok(
         &page,

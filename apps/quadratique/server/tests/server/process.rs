@@ -9,7 +9,7 @@ use quadratique_server::serve;
 use quadratique_server::server::{self, Paths, RuntimeFile, Waits};
 use quadratique_server::web::WebApp;
 
-use crate::support::{HANG_GUARD, within};
+use crate::support::{HANG_GUARD, web_address, within};
 
 const LONGER_THAN_THE_TEST: Duration = Duration::from_secs(3600);
 const _: () = assert!(LONGER_THAN_THE_TEST.as_secs() > HANG_GUARD.as_secs());
@@ -26,27 +26,19 @@ async fn start_waiting(paths: &Paths, waits: Waits) -> Result<server::Server, se
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_server_publishes_its_loopback_address_while_it_runs_and_removes_it_on_shutdown() {
+async fn the_server_writes_no_runtime_file_and_its_web_app_listens_only_on_loopback() {
     let home = crate::support::private_home();
     let paths = Paths::in_home(home.path()).expect("an absolute home");
     let running = server::start(&paths, server::loopback())
         .await
         .expect("the server starts");
 
-    let written: RuntimeFile =
-        serde_json::from_slice(&std::fs::read(&paths.runtime).expect("the runtime file exists"))
-            .expect("the runtime file is JSON");
-    assert_eq!(written.pid, std::process::id());
-    assert!(written.address.ip().is_loopback());
-    assert_eq!(written.url, format!("http://{}/cli", written.address));
-    assert_eq!(written.url, running.url());
-    assert_eq!(
-        written.database,
-        home.path().canonicalize().unwrap().join("workspace.db")
-    );
-
+    let address = web_address(&running).await;
+    let written = paths.runtime.exists();
     running.shutdown().await;
-    assert!(!paths.runtime.exists());
+
+    assert!(address.ip().is_loopback(), "{address}");
+    assert!(!written, "the server wrote server.json");
     for elsewhere in ["0.0.0.0:0", "[::1]:0"] {
         let refused = server::start(&paths, elsewhere.parse().unwrap()).await;
         assert!(
@@ -160,66 +152,6 @@ async fn no_identity_probe_outlasts_the_wait_of_a_starting_server() {
     drop(holder);
 }
 
-async fn written_runtime(paths: &Paths) -> Option<RuntimeFile> {
-    let text = std::fs::read(&paths.runtime).ok()?;
-    serde_json::from_slice(&text).ok()
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_server_that_stops_never_removes_the_runtime_file_of_its_replacement() {
-    use std::io::Write;
-
-    let home = crate::support::private_home();
-    let paths = Paths::in_home(home.path()).expect("an absolute home");
-    let old = server::start(&paths, server::loopback())
-        .await
-        .expect("the old server starts");
-    let old_runtime = std::fs::read(&paths.runtime).expect("the old server's runtime file");
-    std::fs::remove_file(&paths.runtime).expect("the runtime file moves aside");
-    let made = std::process::Command::new("mkfifo")
-        .arg(&paths.runtime)
-        .status()
-        .expect("mkfifo runs");
-    assert!(made.success());
-    let stopping = tokio::spawn(old.shutdown());
-    let fifo = paths.runtime.clone();
-    let mut held_read = within(
-        "the old server's read of its runtime file",
-        tokio::task::spawn_blocking(move || {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(fifo)
-                .expect("the other end of the old server's read")
-        }),
-    )
-    .await
-    .expect("the opening thread");
-
-    let no_wait = Waits {
-        start: Duration::ZERO,
-        ..Waits::default()
-    };
-    let during = start_waiting(&paths, no_wait).await;
-    held_read
-        .write_all(&old_runtime)
-        .expect("the old server's read gets its own runtime");
-    drop(held_read);
-    within("the old server's shutdown", stopping)
-        .await
-        .expect("the shutdown's task");
-
-    let replacement = match during {
-        Ok(replacement) => replacement,
-        Err(server::ServerError::Owned(_)) => server::start(&paths, server::loopback())
-            .await
-            .expect("the replacement starts once the old server is gone"),
-        Err(error) => panic!("{error}"),
-    };
-    let named = written_runtime(&paths).await.map(|runtime| runtime.address);
-    assert_eq!(named, Some(replacement.address()));
-    replacement.shutdown().await;
-}
-
 /// Once the server's listener is closed, any socket of the machine may bind its port, so a connection to the port
 /// cannot tell whether the server still listens: the test looks for the server's own socket in the kernel's table.
 #[cfg(target_os = "linux")]
@@ -230,7 +162,7 @@ async fn a_server_dropped_without_a_shutdown_frees_its_home_and_its_port() {
     let running = server::start(&paths, server::loopback())
         .await
         .expect("the server starts");
-    let address = running.address();
+    let address = web_address(&running).await;
     let listener = kernel_sockets::listening_on(address).expect("the server's listening socket");
     let lock = std::fs::OpenOptions::new()
         .write(true)
@@ -390,7 +322,7 @@ async fn a_process_of_another_account_is_refused() {
     let running = server::start(&paths, server::loopback())
         .await
         .expect("the server starts");
-    let url = format!("http://{}/server", running.address());
+    let url = format!("http://{}/", web_address(&running).await);
 
     let answer = tokio::process::Command::new("sudo")
         .args([
@@ -439,6 +371,7 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
     let running = server::start(&paths, server::loopback())
         .await
         .expect("the server starts");
+    let address = web_address(&running).await;
     let other = std::net::TcpListener::bind("127.0.0.1:0").expect("another listener");
     let other_address = other.local_addr().expect("its address");
     let probed = Arc::new(AtomicUsize::new(0));
@@ -475,11 +408,11 @@ async fn the_owner_is_admitted_while_other_sockets_open_and_close() {
         async {
             let mut refused = Vec::new();
             for probe in 0..OWNER_CONNECTIONS {
-                let client = tokio::net::TcpStream::connect(running.address())
+                let client = tokio::net::TcpStream::connect(address)
                     .await
                     .expect("a connection to the server");
                 let own = Connection {
-                    local: running.address(),
+                    local: address,
                     peer: client.local_addr().expect("the client's address"),
                 };
                 if !running.admits(own) {
@@ -515,14 +448,15 @@ async fn a_started_server_admits_its_own_account_and_refuses_a_peer_with_no_conn
     let running = server::start(&paths, server::loopback())
         .await
         .expect("the server starts");
-    let client = std::net::TcpStream::connect(running.address()).expect("a connection");
+    let address = web_address(&running).await;
+    let client = std::net::TcpStream::connect(address).expect("a connection");
     let own = Connection {
-        local: running.address(),
+        local: address,
         peer: client.local_addr().expect("the client's address"),
     };
     let unconnected = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     let nobody_connected = Connection {
-        local: running.address(),
+        local: address,
         peer: unconnected.local_addr().expect("its address"),
     };
 

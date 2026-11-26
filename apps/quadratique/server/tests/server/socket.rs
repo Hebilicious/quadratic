@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use quadratique_server::home::{self, HomeError, SOCKET_FILE};
 use quadratique_server::serve;
-use quadratique_server::server::{self, CONTROL, Paths, RuntimeFile, ServerError, Started};
+use quadratique_server::server::{self, CONTROL, Paths, ServerError, Started};
 
 use crate::support::{stop_listening, within};
 
@@ -136,9 +136,6 @@ async fn the_socket_answers_the_identity_with_the_generation_and_the_control_ver
         .await
         .expect("the server starts");
     let socket = running.socket_path().to_path_buf();
-    let runtime: RuntimeFile =
-        serde_json::from_slice(&std::fs::read(&paths.runtime).expect("the runtime file"))
-            .expect("JSON");
 
     let identity = within(
         "the identity over the socket",
@@ -158,7 +155,11 @@ async fn the_socket_answers_the_identity_with_the_generation_and_the_control_ver
     assert_eq!(identity.pid, std::process::id());
     assert_eq!(identity.control, Some(CONTROL));
     assert_eq!(identity.started, Some(Started::Serve));
-    assert_eq!(identity.url.as_deref(), Some(runtime.url.as_str()));
+    assert_eq!(identity.url.as_deref(), Some(server::COMPATIBLE_URL));
+    assert_eq!(
+        identity.web, None,
+        "a server that no browser used names a web app"
+    );
     let generation = identity.generation.clone().expect("a generation");
     assert!(
         generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -172,11 +173,6 @@ async fn the_socket_answers_the_identity_with_the_generation_and_the_control_ver
         (executable.device, executable.inode),
         (this_meta.dev(), this_meta.ino())
     );
-    let over_tcp = server::identity(running.address())
-        .await
-        .expect("the identity over TCP");
-    assert_eq!(over_tcp, identity);
-
     running.shutdown().await;
     assert!(!socket.exists(), "the socket outlived its server");
     let again = server::start(&paths, server::loopback())
@@ -290,105 +286,6 @@ async fn a_socket_on_which_a_process_still_listens_is_not_removed() {
     assert!(what.contains("a process of this account listens"), "{what}");
     std::os::unix::net::UnixStream::connect(&socket).expect("the socket still reaches its process");
     drop(listening);
-}
-
-/// The runtime file is written through a FIFO whose pipe this test fills first, so the server's write blocks in the
-/// middle of publishing its runtime file. The test knows it has reached that point when a descriptor of this process
-/// other than its own two names the FIFO. Meanwhile the socket queues connections and answers none.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_socket_answers_only_once_the_runtime_file_is_written() {
-    use std::io::{Read, Write};
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let nonblocking = rustix::fs::OFlags::NONBLOCK.bits() as i32;
-    let home = crate::support::private_home();
-    let paths = Paths::in_home(home.path()).expect("an absolute home");
-    let partial = home
-        .path()
-        .join(format!("server.json.{}", std::process::id()));
-    let made = std::process::Command::new("mkfifo")
-        .arg(&partial)
-        .status()
-        .expect("mkfifo runs");
-    assert!(made.success());
-    let mut reader = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nonblocking)
-        .open(&partial)
-        .expect("the FIFO's reading end");
-    let mut filler = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(nonblocking)
-        .open(&partial)
-        .expect("a writing end of the test's own");
-    let chunk = [b' '; 4096];
-    let mut filled = 0;
-    loop {
-        match filler.write(&chunk) {
-            Ok(written) => filled += written,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) => panic!("filling the pipe: {error}"),
-        }
-    }
-    drop(filler);
-    let prepared = prepared_at(home.path());
-    // From a thread outside the runtime's workers, the tasks that the start spawns go to the shared queue: other
-    // workers run them while this thread blocks in the write, as they would in a server that is not under test.
-    let starting = {
-        let paths = paths.clone();
-        let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            runtime.block_on(server::start(&paths, server::loopback()))
-        })
-    };
-    within("the server's write into the full pipe", async {
-        while descriptors_of(&partial) < 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-
-    let while_publishing =
-        server::identity_over_socket_within(&prepared, std::time::Duration::from_millis(300)).await;
-
-    let mut written = Vec::new();
-    within("the runtime file's text", async {
-        let mut buffer = [0u8; 4096];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => written.extend_from_slice(&buffer[..read]),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => panic!("reading the pipe: {error}"),
-            }
-        }
-    })
-    .await;
-    let running = within("the start", starting)
-        .await
-        .expect("the start's task")
-        .expect("the server starts");
-    std::fs::remove_file(&paths.runtime).expect("the FIFO, renamed to the runtime file, goes");
-    std::fs::write(&paths.runtime, &written[filled..])
-        .expect("the runtime file, as a regular file");
-    let after = server::identity_over_socket(&prepared).await;
-    running.shutdown().await;
-    assert!(
-        matches!(while_publishing, Err(server::Unanswered::Stalled)),
-        "the socket answered before the runtime file was written: {while_publishing:?}"
-    );
-    assert!(after.is_ok(), "{after:?}");
-}
-
-/// How many descriptors of this process name `path`.
-fn descriptors_of(path: &Path) -> usize {
-    std::fs::read_dir("/proc/self/fd")
-        .expect("this process's descriptors")
-        .flatten()
-        .filter(|entry| std::fs::read_link(entry.path()).is_ok_and(|target| target == path))
-        .count()
 }
 
 /// An answer of one byte more than the limit is refused before it is parsed, even when it holds a valid identity.
@@ -563,6 +460,7 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
         .expect("the server starts");
     let prepared = prepared_at(home.path());
     let socket = prepared.socket();
+    let web = crate::support::web_address(&running).await;
     let generation = server::identity_over_socket(&prepared)
         .await
         .expect("the server answers")
@@ -591,9 +489,7 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
         .await
         .expect("the socket still answers");
     assert_eq!(still.generation.as_deref(), Some(generation.as_str()));
-    server::identity(running.address())
-        .await
-        .expect("TCP still answers");
+    std::net::TcpStream::connect(web).expect("TCP still answers");
 
     let accepted = within(
         "a stop of this generation",
@@ -610,7 +506,7 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
         Some(std::io::ErrorKind::ConnectionRefused),
         "{socket_after:?}"
     );
-    let tcp_after = std::net::TcpStream::connect(running.address());
+    let tcp_after = std::net::TcpStream::connect(web);
     assert_eq!(
         tcp_after.as_ref().err().map(std::io::Error::kind),
         Some(std::io::ErrorKind::ConnectionRefused),
@@ -622,10 +518,6 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
     )
     .await;
     assert!(!socket.exists(), "the socket outlived its server");
-    assert!(
-        !paths.runtime.exists(),
-        "the runtime file outlived its server"
-    );
 }
 
 /// A short limit for a client of the socket to send a whole request: the tests that show what it cuts off wait this
@@ -753,17 +645,11 @@ async fn occurrence_naming(occurrences: &mut Occurrences, issue: &str) -> serde_
 }
 
 /// The test helpers, as the command line, call the command line's routes and follow their event stream on the socket
-/// only: once the TCP listener refuses every connection, they still work.
+/// only: a server that no browser used listens on no TCP port, and they work.
 #[tokio::test(flavor = "multi_thread")]
-async fn calls_and_their_event_stream_answer_on_the_socket_while_tcp_refuses_every_connection() {
+async fn calls_and_their_event_stream_answer_on_the_socket_of_a_server_that_listens_on_no_tcp_port()
+{
     let board = crate::support::start().await;
-    board.server.stop_listening_on_tcp();
-    let tcp = tokio::net::TcpStream::connect(board.server.address()).await;
-    assert_eq!(
-        tcp.as_ref().map_err(std::io::Error::kind).err(),
-        Some(std::io::ErrorKind::ConnectionRefused),
-        "{tcp:?}"
-    );
 
     let mut live = within(
         "the subscription",
@@ -781,6 +667,7 @@ async fn calls_and_their_event_stream_answer_on_the_socket_while_tcp_refuses_eve
 
     let occurrence = occurrence_naming(&mut live, &issue).await;
     assert_eq!(occurrence["operation"], "issue.create", "{occurrence}");
+    assert_eq!(board.server.web(), None);
     within("the shutdown", board.server.shutdown()).await;
 }
 
@@ -813,4 +700,48 @@ async fn an_event_stream_on_the_socket_outlives_the_limit_of_a_request() {
     let occurrence = occurrence_naming(&mut live, &issue).await;
     assert_eq!(occurrence["operation"], "issue.create", "{occurrence}");
     within("the shutdown", board.server.shutdown()).await;
+}
+
+/// The command lines of releases 0.2 and 0.3 take an identity as a server only when it has these fields, the `url` as
+/// a loopback address of the command line's routes (`background.rs` `on_socket_within` and `runtime_of` at v0.2.0 and
+/// v0.3.0). Their `quadratique upgrade` waits for such an identity from the new build, with its own pid and
+/// executable, after it restarts the unit (record 0004, §6). Anything else is `Malformed` to them, and the upgrade
+/// fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_identity_is_one_that_the_command_lines_of_releases_0_2_and_0_3_take_as_a_server() {
+    let home = crate::support::private_home();
+    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let running = server::start(&paths, server::loopback())
+        .await
+        .expect("the server starts");
+    crate::support::web_address(&running).await;
+
+    let identity = server::identity_over_socket(&prepared_at(home.path()))
+        .await
+        .expect("the identity on the socket");
+    running.shutdown().await;
+
+    let generation = identity.generation.clone().unwrap_or_default();
+    assert!(
+        generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{identity:?}"
+    );
+    assert_eq!(
+        identity.database,
+        home.path().canonicalize().unwrap().join("workspace.db")
+    );
+    assert_eq!(identity.control, Some(1));
+    assert!(identity.started.is_some(), "{identity:?}");
+    assert_eq!(identity.pid, std::process::id());
+    assert!(identity.executable.is_some(), "{identity:?}");
+    let url = identity.url.clone().unwrap_or_default();
+    let (authority, path) = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'))
+        .unwrap_or_else(|| panic!("{url} is not http://<address>/<path>"));
+    let address: std::net::SocketAddr = authority
+        .parse()
+        .unwrap_or_else(|_| panic!("{authority} is not an address"));
+    assert!(address.ip().is_loopback(), "{url}");
+    assert_eq!(path, "cli", "{url}");
 }

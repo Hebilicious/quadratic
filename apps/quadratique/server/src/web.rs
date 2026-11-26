@@ -14,7 +14,7 @@ use http_body_util::{BodyExt, Full};
 use crate::app::Context;
 use crate::assets::media_type;
 use crate::domain::{Actor, Binding, Caller, WorkingCopy};
-use crate::pairing::{self, BearerGuard, Pairing};
+use crate::pairing::{BearerGuard, Pairing};
 use crate::store::Store;
 
 pub const WEB_TARGET: &str = "web";
@@ -127,7 +127,8 @@ pub fn caller(binding: Binding) -> Caller {
     }
 }
 
-/// The web app's routes on TCP: the two data targets behind the bearer, and the app's files.
+/// The web app's routes on TCP: the two data targets behind the bearer, and the app's files. Nothing else answers on
+/// TCP: the command line and the control requests use the socket.
 pub fn routes(
     app: &Arc<Application<Context>>,
     store: &Store,
@@ -144,7 +145,6 @@ pub fn routes(
         let surface = Arc::new(HttpSurface::new(app.clone(), context, options));
         Arc::new(BearerGuard {
             pairing: Arc::clone(pairing),
-            requirement: pairing::REQUIRED,
             inner: surface,
         }) as Arc<dyn Handler>
     };
@@ -234,29 +234,54 @@ struct Files(WebApp);
 
 impl Handler for Files {
     fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
-        let response = if request.method() == Method::GET || request.method() == Method::HEAD {
+        let path = request.uri().path();
+        let response = if answers_only_on_the_socket(path) {
+            not_found()
+        } else if request.method() == Method::GET || request.method() == Method::HEAD {
             let head = request.method() == Method::HEAD;
-            let mut response = self.answer(request.uri().path());
+            let mut response = self.answer(path);
             if head {
                 *response.body_mut() = Full::new(Bytes::new()).boxed_unsync();
             }
             response
-        } else {
+        } else if self.serves(path) {
             let mut response = text(StatusCode::METHOD_NOT_ALLOWED, "Only GET and HEAD.");
             response
                 .headers_mut()
                 .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
             response
+        } else {
+            not_found()
         };
         Box::pin(std::future::ready(response))
     }
 }
 
+/// The command line's routes and the server's control routes answer only on the socket. On TCP they are not found,
+/// before anything else: the app's shell never stands in for them.
+fn answers_only_on_the_socket(path: &str) -> bool {
+    [crate::server::BASE, crate::server::IDENTITY]
+        .iter()
+        .any(|base| path == *base || path.starts_with(&format!("{base}/")))
+}
+
+fn not_found() -> Response<ResponseBody> {
+    text(StatusCode::NOT_FOUND, "No such file.")
+}
+
 impl Files {
+    /// Whether a `GET` of `path` would answer a file or the app's shell.
+    fn serves(&self, path: &str) -> bool {
+        relative(path).is_some_and(|relative| {
+            (!relative.as_os_str().is_empty() && self.0.read(&relative).is_some())
+                || (relative.extension().is_none() && is_deep_link(path))
+        })
+    }
+
     fn answer(&self, path: &str) -> Response<ResponseBody> {
         let app = &self.0;
         let Some(relative) = relative(path) else {
-            return text(StatusCode::NOT_FOUND, "No such file.");
+            return not_found();
         };
         if !relative.as_os_str().is_empty()
             && let Some(file) = app.read(&relative)
@@ -264,7 +289,7 @@ impl Files {
             return file_response(file, relative.starts_with("assets"));
         }
         if relative.extension().is_some() || !is_deep_link(path) {
-            return text(StatusCode::NOT_FOUND, "No such file.");
+            return not_found();
         }
         if let Some(index) = app.read(Path::new(INDEX)) {
             return file_response(index, false);
@@ -277,15 +302,13 @@ impl Files {
                     directory.display()
                 ),
             ),
-            WebApp::Directory(_) | WebApp::Embedded(_) => {
-                text(StatusCode::NOT_FOUND, "No such file.")
-            }
+            WebApp::Directory(_) | WebApp::Embedded(_) => not_found(),
         }
     }
 }
 
-/// The paths of the app's pages (web/src/route.ts), which answer the app's shell. `/cli`, `/server`, `/session` and
-/// the data targets are never one of them, so no other route's path falls back to the shell.
+/// The paths of the app's pages (web/src/route.ts), which answer the app's shell. `/session` and the data targets are
+/// never one of them, so no other route's path falls back to the shell.
 fn is_deep_link(path: &str) -> bool {
     if path.contains("//") {
         return false;

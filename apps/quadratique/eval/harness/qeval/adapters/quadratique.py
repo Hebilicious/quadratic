@@ -223,7 +223,8 @@ def finding_states(sb: Sandbox, repo: Path) -> dict[str, bool]:
 
 
 def stop(sb: Sandbox, repo: Path) -> None:
-    q(sb, repo, "server", "stop", check=False)
+    """Stops the sandbox's server, and fails when it cannot: a server left running holds the sandbox's data folder."""
+    q(sb, repo, "server", "stop")
 
 
 WRITTEN_FIELDS = ("evidence", "description", "acceptance")

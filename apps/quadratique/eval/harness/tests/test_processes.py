@@ -145,6 +145,7 @@ class HarnessGit(unittest.TestCase):
             tracker.write_text(f'#!/bin/sh\nprintf %s "$QUADRATIQUE_HOME" > {marker}\n')
             tracker.chmod(0o755)
             sb = sandbox.Sandbox(Path(folder) / "beads", "beads", {"bd": tracker}).create()
+            self.addCleanup(shutil.rmtree, sb.qhome, ignore_errors=True)
             repo = sb.root / "tally"
             tally.create_repo(repo, sb.env())
             hook = repo / ".git" / "hooks" / "pre-commit"
@@ -152,7 +153,7 @@ class HarnessGit(unittest.TestCase):
             hook.chmod(0o755)
             (repo / "notes.txt").write_text("a change\n")
             tally.commit_all(repo, sb.env(), "A maintainer's commit")
-            self.assertEqual(marker.read_text(), str(sb.root / "qhome"))
+            self.assertEqual(marker.read_text(), str(sb.qhome))
 
 
 if __name__ == "__main__":

@@ -250,10 +250,11 @@ fn nothing_started(home: &Home) {
     assert!(home.servers().is_empty());
 }
 
-/// Waits until the server that `process` runs has published its runtime file, then returns its pid.
-fn served_by(watch: &mut Watch, process: &mut Process) -> u32 {
-    watch.await_steps(&[Step::Published("server.json")]);
-    process.id()
+/// Waits until the server that `process` runs answers on the home's socket, then returns its pid.
+fn served_by(home: &Home, process: &mut Process) -> u32 {
+    let pid = process.id();
+    home.await_served_by(pid);
+    pid
 }
 
 fn stop_real(home: &Home, pid: u32) {
@@ -275,9 +276,8 @@ fn row_no_socket_and_a_free_lock_status_is_not_running_stop_finds_nothing_ensure
         "a stop of a free home reserved a start"
     );
 
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     let serving = status(&home);
     assert_eq!(
         (&serving["running"], &serving["pid"], &serving["started"]),
@@ -316,9 +316,8 @@ fn row_a_stale_socket_and_a_free_lock_is_not_running_and_the_next_server_replace
     stop_real(&home, pid);
 
     stop_listening(fake_socket(&home));
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     assert_eq!(status(&home)["pid"], pid);
     stop_real(&home, pid);
 }
@@ -382,17 +381,7 @@ fn row_a_held_lock_without_a_socket_is_starting_and_each_command_waits_for_ready
     drop(held);
     let started = ui.finish().ok();
     let serving = status(&home);
-    assert_eq!(
-        format!(
-            "{}/",
-            serving["url"]
-                .as_str()
-                .expect("a url")
-                .trim_end_matches("/cli")
-        ),
-        started["url"].as_str().expect("a url"),
-        "{serving}"
-    );
+    assert_eq!(serving["web"], started["url"], "{serving}");
     let pid = serving["pid"].as_u64().expect("a pid") as u32;
     stop_real(&home, pid);
 
@@ -432,7 +421,7 @@ fn row_a_held_lock_without_a_socket_is_starting_and_each_command_waits_for_ready
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
     watch.await_steps(&[Step::Opened("start.lock"), Step::Opened("server.lock")]);
     drop(held);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     assert_eq!(status(&home)["pid"], pid);
     stop_real(&home, pid);
 }
@@ -570,9 +559,8 @@ fn row_a_server_of_another_build_is_refused_by_commands_and_stopped_by_its_gener
         http("200 OK", &another_build(&home).to_string()),
         Some(held),
     );
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     assert_eq!(
         fake.requests().last().map(String::as_str),
         Some("POST /server/stop HTTP/1.1")
@@ -659,9 +647,8 @@ fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_taken_over_b
     run(&home, &["project", "list"]).ok();
     assert_eq!(home.servers(), vec![old_pid]);
 
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let new_pid = served_by(&mut watch, &mut take_over);
+    let new_pid = served_by(&home, &mut take_over);
 
     await_exit(old_pid);
     let old_log =
@@ -708,7 +695,7 @@ fn a_take_over_hands_off_with_no_other_starter_in_between() {
     watch.await_steps(&[Step::Opened("start.lock")]);
     let during = spawn(&home, &["ui"]);
     release.send(()).expect("the old server lets go");
-    let new_pid = served_by(&mut watch, &mut take_over);
+    let new_pid = served_by(&home, &mut take_over);
 
     let refused = contender.finish();
     assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
@@ -719,14 +706,7 @@ fn a_take_over_hands_off_with_no_other_starter_in_between() {
     let answered = during.finish().ok();
     let new = status(&home);
     assert_eq!(new["pid"], new_pid, "{new}");
-    assert_eq!(
-        answered["url"],
-        format!(
-            "{}/",
-            new["url"].as_str().expect("a url").trim_end_matches("/cli")
-        ),
-        "{answered}"
-    );
+    assert_eq!(answered["url"], new["web"], "{answered}");
     assert_eq!(home.servers(), vec![new_pid]);
     stop_real(&home, new_pid);
 }
