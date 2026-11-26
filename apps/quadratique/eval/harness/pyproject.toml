@@ -1,6 +1,6 @@
 [project]
 name = "quadratique-eval"
-version = "0.2.0"
+version = "0.3.0"
 description = "Runs the same scenarios on Quadratique, lific and Beads and measures tasks completed, double claims, lost updates, tracker tokens, setup cost, and the answers to the human's and history questions."
 license = "MIT"
 requires-python = ">=3.14,<3.15"
