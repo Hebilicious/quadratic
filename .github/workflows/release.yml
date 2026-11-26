@@ -238,8 +238,10 @@ jobs:
           RELEASED: ${{ needs.pending.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          host=$(rustc -vV | sed -n 's/^host: //p')
+          host=$(cd apps/quadratique && rustc -vV | sed -n 's/^host: //p')
           test "$host" = "$TARGET"
+          pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' apps/quadratique/rust-toolchain.toml)
+          (cd apps/quadratique && rustc -V) | grep -q "^rustc $pinned " || { echo "::error::the build would not use Rust $pinned" >&2; exit 1; }
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/quadratique/Cargo.toml)
           if [ -n "$RELEASED" ]; then test "$version" = "$RELEASED"; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
