@@ -6,8 +6,9 @@ use quadratique_server::server::{self, Paths, ServerError};
 
 #[tokio::test]
 async fn the_server_refuses_to_start_on_windows_and_names_the_issue_that_brings_it() {
-    let home = tempfile::tempdir().expect("a temporary home");
-    let paths = Paths::in_home(home.path()).expect("an absolute home");
+    let parent = tempfile::tempdir().expect("a temporary folder");
+    let home = parent.path().join("home");
+    let paths = Paths::in_home(&home).expect("an absolute home");
 
     let refused = server::start(&paths, server::loopback()).await.err();
 
@@ -15,8 +16,5 @@ async fn the_server_refuses_to_start_on_windows_and_names_the_issue_that_brings_
         panic!("the server did not refuse to start: {refused:?}");
     };
     assert!(error.to_string().contains("QUA-61"), "{error}");
-    assert!(
-        !home.path().join("workspace.db").exists(),
-        "a refused server opened its store"
-    );
+    assert!(!home.exists(), "a refused server made its data folder");
 }

@@ -152,6 +152,10 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
             );
         }
     };
+    // Nothing is created in the data folder for a server that cannot serve here.
+    if cfg!(not(unix)) {
+        return report(io, Kind::Unavailable, ServerError::Unsupported.to_string());
+    }
     let home = match home() {
         Ok(home) => home,
         Err(error) => return report(io, Kind::Internal, error.to_string()),

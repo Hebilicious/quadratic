@@ -255,7 +255,7 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
         listener,
         file,
         Vec::new(),
-        serve::SOCKET_REQUEST_LIMIT,
+        serve::REQUEST_LIMIT,
         &serve::Gate::default(),
     );
     let other_name = home.path().join("same-socket");
@@ -303,7 +303,7 @@ fn an_accept_loop_on_a_socket_that_was_shut_down_leaves_its_thread_to_other_task
                 listener,
                 file,
                 Vec::new(),
-                serve::SOCKET_REQUEST_LIMIT,
+                serve::REQUEST_LIMIT,
                 &serve::Gate::default(),
             );
 
@@ -618,7 +618,7 @@ async fn answered_before_the_cut(running: &crate::support::Running, bytes: &[u8]
 async fn a_partial_control_request_is_cut_off_at_the_limit_and_stops_nothing() {
     use futures::FutureExt;
 
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
     let prepared = prepared_at(board.home());
     let generation = server::identity_over_socket(&prepared)
         .await
@@ -647,7 +647,7 @@ async fn a_partial_control_request_is_cut_off_at_the_limit_and_stops_nothing() {
 /// never arrives whole is cut off.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_request_whose_body_never_arrives_whole_is_cut_off_at_the_limit() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -663,7 +663,7 @@ async fn a_command_request_whose_body_never_arrives_whole_is_cut_off_at_the_limi
 /// it is cut off at the limit.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_connection_after_a_complete_answer_is_cut_off_at_the_limit() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -680,7 +680,7 @@ async fn an_idle_connection_after_a_complete_answer_is_cut_off_at_the_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_partial_request_after_a_complete_answer_on_the_same_connection_is_cut_off_at_the_limit()
 {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
 
     let answered = answered_before_the_cut(
         &board,
@@ -744,7 +744,7 @@ async fn calls_and_their_event_stream_answer_on_the_socket_of_a_server_that_list
 /// off at the limit, and the stream still delivers the next occurrence.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_event_stream_on_the_socket_outlives_the_limit_of_a_request() {
-    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let board = crate::support::start_with_request_limit(SHORT_LIMIT).await;
     board.project("DEM").await;
     let mut live = within(
         "the subscription",

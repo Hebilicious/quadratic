@@ -57,7 +57,7 @@ pub(crate) const DATABASE_FILE: &str = "workspace.db";
 /// Written by the servers of releases 0.1 to 0.3, which served the command line on TCP: a hint, for the command line,
 /// that one of them may hold the home. No server writes it any more.
 pub(crate) const RUNTIME_FILE: &str = "server.json";
-pub(crate) const LOCK_FILE: &str = "server.lock";
+pub const LOCK_FILE: &str = "server.lock";
 const DIRECTORY: &str = "quadratique";
 /// How long a server may take to start: a command waits this long for the server it started, and a server waits
 /// this long for a holder of the lock that is not a server to let go.
@@ -76,8 +76,8 @@ const LISTEN_BACKLOG: u32 = 1024;
 pub struct Waits {
     pub start: Duration,
     pub probe: Duration,
-    /// How long a client of the socket has to send a whole request.
-    pub socket_request: Duration,
+    /// How long a client, of the socket or of the web app on TCP, has to send a whole request.
+    pub request: Duration,
 }
 
 impl Default for Waits {
@@ -85,7 +85,7 @@ impl Default for Waits {
         Waits {
             start: START_LIMIT,
             probe: PROBE_LIMIT,
-            socket_request: serve::SOCKET_REQUEST_LIMIT,
+            request: serve::REQUEST_LIMIT,
         }
     }
 }
@@ -531,6 +531,11 @@ impl Server {
         self.web.listening()
     }
 
+    /// The web app's TCP connections open now, each a descriptor of the server.
+    pub async fn web_connections(&self) -> usize {
+        self.web.open_connections().await
+    }
+
     /// Opens the web app's listener, as the first `quadratique ui` does, and gives its address.
     pub async fn open_web(&self) -> std::io::Result<SocketAddr> {
         self.web.open().await
@@ -786,6 +791,7 @@ async fn start_checked(
         listen,
         strict,
         routes: web_routes,
+        request_limit: waits.request,
         gate: gate.clone(),
         origin,
     });
@@ -831,7 +837,7 @@ async fn start_checked(
             socket_listener,
             socket_file,
             vec![(IDENTITY.into(), control), (BASE.into(), surface)],
-            waits.socket_request,
+            waits.request,
             &gate,
         )
     };

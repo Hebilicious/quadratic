@@ -333,7 +333,10 @@ gets the app's pages and files, and only a request with the token gets data: `/w
 their live channel answer `401` without it. The command line's routes and the control requests
 (`/cli`, `/server` and below) answer `404` there. The listener does not ask which account connects:
 another account of the machine that reaches it gets the public pages and files, and `401` for
-every request of data, as a page without the token does. A forward that runs as you (`ssh -L`,
+every request of data, as a page without the token does. It serves at most 64 connections at once, and cuts
+off one whose request has not arrived whole after 5 seconds; the next ones wait. So another account
+can keep the web app's port busy, and your browser may then wait, but nothing it does there reaches
+the socket: your commands and agents keep working. A forward that runs as you (`ssh -L`,
 socat, the userland forwarders of rootless containers) lets whoever connects through it reach the
 web app the same way.
 
@@ -435,7 +438,7 @@ The socket serves the command line's routes under `/cli`, as the commands call t
 and two control requests, with any `Host` (use `quadratique.invalid`). A client must send each
 request whole, head and body, within 5 seconds of opening the connection or of the end of the
 previous answer, or the server closes the connection. An answer has no limit once its request has
-arrived, because a call may wait and `watch` keeps its stream open. The TCP listener has no such
+arrived, because a call may wait and `watch` keeps its stream open. The web app's TCP listener has the same
 limit. Each server start has a
 **generation**, 32 hexadecimal digits that are new at each start. The protocol has a version,
 `control`, apart from the interface of the commands. A server keeps answering every control version
@@ -466,7 +469,10 @@ server that was still starting, it stops the first generation that becomes ready
 request was sent and its answer was lost, `server stop` says the stop is not confirmed and whether
 the folder's lock is still held. Run `server status` to see what serves then.
 A server that does not answer, or does not let go in time, is never signalled: the message names
-the folder, the log and the last known pid, and says how to end it yourself. Every start and every
+the folder, the log and the last known pid, and says how to end it yourself. With no pid known, find
+the process that holds the folder's lock with `lsof -t <data folder>/server.lock` (Linux and macOS;
+on Linux `fuser <data folder>/server.lock` works too), and check it with `ps -p <pid> -o args` before
+you end it. Every start and every
 stop holds `start.lock` in the data folder, so no command starts a server between a stop and the
 start that follows it. A command never replaces a server that stalls, answers something malformed,
 serves another database or speaks a newer control version: each has its own message.

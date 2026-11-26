@@ -32,6 +32,7 @@ pub(super) struct Opening {
     pub listen: Listen,
     pub strict: bool,
     pub routes: Routes,
+    pub request_limit: std::time::Duration,
     pub gate: Gate,
     pub origin: Origin,
 }
@@ -93,6 +94,14 @@ impl WebListener {
         }
     }
 
+    /// The TCP connections open now, none while the listener is not open.
+    pub(super) async fn open_connections(&self) -> usize {
+        match &*self.state.lock().await {
+            State::Open(served) => served.open_connections(),
+            State::Closed(_) | State::Stopped => 0,
+        }
+    }
+
     /// Opens no listener from now on, and gives the one that is open, for the server to end.
     pub(super) async fn stop(&self) -> Option<Served> {
         match std::mem::replace(&mut *self.state.lock().await, State::Stopped) {
@@ -105,6 +114,11 @@ impl WebListener {
 fn listen(opening: &Opening) -> std::io::Result<(Served, address::Record)> {
     let bound = address::bind(&opening.home, opening.listen, opening.strict)?;
     let (listener, record) = address::listen(bound, LISTEN_BACKLOG)?;
-    let served = serve::serve_on(listener, opening.routes.clone())?;
+    let served = serve::serve_on(
+        listener,
+        opening.routes.clone(),
+        serve::TCP_CONNECTIONS,
+        opening.request_limit,
+    )?;
     Ok((served, record))
 }

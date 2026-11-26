@@ -198,7 +198,7 @@ impl std::fmt::Display for LifeError {
                     home.display(),
                     log.display(),
                     attempt.outcome(),
-                    recovery(*pid)
+                    recovery(*pid, Some(&home.join(quadratique_server::server::LOCK_FILE)))
                 )
             }
             LifeError::Stalled {
@@ -213,7 +213,7 @@ impl std::fmt::Display for LifeError {
                 PROBE,
                 log.display(),
                 attempt.outcome(),
-                recovery(*pid)
+                recovery(*pid, Some(&socket.with_file_name(quadratique_server::server::LOCK_FILE)))
             ),
             LifeError::Malformed {
                 socket,
@@ -280,7 +280,7 @@ impl std::fmt::Display for LifeError {
                 write!(
                     formatter,
                     " End it yourself, then run the command again. {}",
-                    recovery(Some(*pid))
+                    recovery(Some(*pid), None)
                 )
             }
             LifeError::Legacy {
@@ -315,12 +315,16 @@ const PROBE: Duration = quadratique_server::server::PROBE_LIMIT;
 
 /// What a person does about a server that this command line will not signal: the process number comes from the
 /// server's last answer or its runtime file, and nothing has verified it.
-fn recovery(pid: Option<u32>) -> String {
-    let check = match usable_pid(pid) {
-        Some(pid) => format!(
+fn recovery(pid: Option<u32>, lock: Option<&Path>) -> String {
+    let check = match (usable_pid(pid), lock) {
+        (Some(pid), _) => format!(
             "its process number was last given as {pid}, unverified: check it with `ps -p {pid} -o args` before you end it"
         ),
-        None => "find its process first".to_owned(),
+        (None, Some(lock)) => format!(
+            "`lsof -t {}` names the process that holds the home's lock, on Linux and on macOS; check it with `ps -p <pid> -o args` before you end it",
+            lock.display()
+        ),
+        (None, None) => "find its process first".to_owned(),
     };
     format!(
         "To recover: press Ctrl-C in the terminal that runs `quadratique serve`, stop it with the supervisor that started it, or end the process ({check})."
@@ -1351,6 +1355,36 @@ mod tests {
         );
         assert_eq!(command.get_current_dir(), Some(resolved.as_path()));
         assert!(!other.join("quadratique").exists());
+    }
+
+    /// No runtime file names the process any more: the recovery says how to find the process that holds the home's
+    /// lock, on Linux and on macOS.
+    #[test]
+    fn the_recovery_of_a_server_that_does_not_answer_names_how_to_find_its_process() {
+        use super::{Attempt, Hang};
+
+        let home = std::path::PathBuf::from("/home/someone/.local/share/quadratique");
+        let stalled = LifeError::Stalled {
+            socket: home.join("server.sock"),
+            log: home.join("server.log"),
+            pid: None,
+            attempt: Attempt::Start,
+        };
+        let hung = LifeError::Hung {
+            hang: Hang::NotStopped,
+            home: home.clone(),
+            log: home.join("server.log"),
+            pid: None,
+            attempt: Attempt::Stop,
+        };
+
+        for refused in [stalled, hung] {
+            let said = refused.to_string();
+            assert!(
+                said.contains("lsof -t /home/someone/.local/share/quadratique/server.lock"),
+                "{said}"
+            );
+        }
     }
 
     #[cfg(unix)]
