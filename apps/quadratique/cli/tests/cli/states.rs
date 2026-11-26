@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use serde_json::{Value, json};
 
-use crate::support::{HANG_GUARD, Home, Process, Run, Step, Watch, await_exit, outside};
+use crate::support::{
+    HANG_GUARD, Home, Process, Run, Step, Watch, await_exit, free, outside, stop_listening,
+};
 
 const UNAVAILABLE: i32 = 4;
 const GENERATION: &str = "0123456789abcdef0123456789abcdef";
@@ -181,18 +183,22 @@ impl Fake {
                 }
                 if matches!(on_stop, OnStop::LoseAnswer) {
                     // The home is free before the client reads the end of its connection, so the client sees it free.
-                    drop(listener);
-                    drop(lock.take());
+                    stop_listening(listener);
+                    if let Some(lock) = lock.take() {
+                        free(lock);
+                    }
                     drop(stream);
                     return;
                 }
                 let _ = stream.write_all(http("202 Accepted", &named).as_bytes());
                 drop(stream);
-                drop(listener);
+                stop_listening(listener);
                 if let OnStop::HoldUntil(release) = on_stop {
                     let _ = release.recv();
                 }
-                drop(lock.take());
+                if let Some(lock) = lock.take() {
+                    free(lock);
+                }
                 return;
             }
         });
@@ -289,8 +295,7 @@ fn row_no_socket_and_a_free_lock_status_is_not_running_stop_finds_nothing_ensure
 fn row_a_stale_socket_and_a_free_lock_is_not_running_and_the_next_server_replaces_the_file() {
     let home = Home::new();
     let socket = home.path().join("server.sock");
-    let stale = fake_socket(&home);
-    drop(stale);
+    stop_listening(fake_socket(&home));
     let refused = UnixStream::connect(&socket);
     assert_eq!(
         refused.as_ref().err().map(std::io::Error::kind),
@@ -310,7 +315,7 @@ fn row_a_stale_socket_and_a_free_lock_is_not_running_and_the_next_server_replace
     let pid = serving["pid"].as_u64().expect("a pid") as u32;
     stop_real(&home, pid);
 
-    drop(fake_socket(&home));
+    stop_listening(fake_socket(&home));
     let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
     let pid = served_by(&mut watch, &mut take_over);

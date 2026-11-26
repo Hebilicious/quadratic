@@ -63,4 +63,4 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-util.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-rustix = { workspace = true, features = ["event", "fs", "process"] }
+rustix = { workspace = true, features = ["event", "fs", "net", "process"] }
