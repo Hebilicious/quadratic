@@ -80,11 +80,11 @@ moon run quadratique-eval:report -- --run "$run"                # results.json -
 ```
 
 The run folders are in `~/.cache/quadratique-eval/runs/`, or in the folder that `QEVAL_RUNS` names.
-Each sandbox's Quadratique data folder is apart from its run folder, in the system's temporary
-folder (`qeval-<user>-<digest of the sandbox's folder>`), because the server's socket in it must have
-a path of at most 107 bytes. A later `reanalyze` of the same run finds it while it exists. The
-harness stops each sandbox's server with `quadratique server stop`, and a stop that fails fails the
-run.
+While a sandbox runs, its Quadratique data folder is apart from its run folder: a private folder
+with an unpredictable name in the system's temporary folder (`qeval-…`), because the server's socket
+in it must have a path of at most 107 bytes. The harness stops each sandbox's server with
+`quadratique server stop` (a stop that fails fails the run), keeps the folder's files in
+`<sandbox>/qhome`, and removes the folder; a later `reanalyze` of the run starts from those files.
 `scripted` and `agents` write their measures to `results.json` in the run folder; they and
 `report` write the table to `results.md` in it and print it. To combine runs, for
 example the agent sessions of one run with the scripted measures of another, pass `--from` once

@@ -327,11 +327,11 @@ Decision (owner, 2026-11-26): the kept port and the lasting bearer by default; s
 
 | Point | What was built |
 | --- | --- |
-| Routes on TCP | Only the web app's: the guarded `/web` and `/webmcp`, `/session`, and the files and deep links. `/cli`, `/server` and every path below them answer `404` for every method, before the single-page fallback; any other path that is neither a file nor a deep link answers `404` for every method, and a deep link or a file answers `405` to a method other than `GET` and `HEAD`. The exact numeric `Host` is checked first on every route (`403`). |
+| Routes on TCP | Only the web app's: the guarded `/web` and `/webmcp`, `/session`, and the files and deep links. `/cli`, `/server` and every path below them answer `404` for every method, before the single-page fallback; any other path that is neither a file nor a deep link answers `404` for every method, and a deep link or a file answers `405` to a method other than `GET` and `HEAD`. The exact numeric `Host` is checked first on every route (`403`): one `Host` header only, and an absolute-form request line must name that same authority. |
 | The bearer | Required on `/web`, `/webmcp` and the event stream: a request without it gets the same `401` as one with another (`Requirement` and `REQUIRED` are gone). No stream without a token exists, so a sign-out ends every stream. |
-| When the listener opens | Not at every start. The bearer is made at the first pairing (the record's "made the first time it is needed"): by default it is then written to `web-token`, in strict mode kept in memory. A start opens the TCP listener only when the home already has a bearer, that is, by default, after any earlier pairing, so bookmarks and open tabs work after a restart with nothing to run. Otherwise the first `POST /server/pair` opens it, then makes the code. A server that only agents use listens on no TCP port. The port policy is unchanged and applies when the listener opens; the strict setting is still read once per start. A sign-out with no bearer replaces nothing. |
+| When the listener opens | Not at every start. The bearer is made at the first pairing (the record's "made the first time it is needed"): by default it is then written to `web-token`, in strict mode kept in memory. A start opens the TCP listener only when the home already has a bearer in `web-token`, that is, by default, after any earlier pairing, so bookmarks and open tabs work after a restart with nothing to run; a data folder that a 0.3 server ran has one too, because those servers wrote it at every start, so it listens at start although no browser may have been let in (kept: the alternative would sign out every paired browser at the upgrade). Without the token the listener gives only the app's page and files. Strict mode keeps no token, so its listener opens only at `ui`. Otherwise the first `POST /server/pair` opens it, then makes the code. A server that only agents use listens on no TCP port. The port policy is unchanged and applies when the listener opens; the strict setting is still read once per start. A sign-out with no bearer replaces nothing. |
 | `server.json` | No longer written. The server's own fast refusal of a second server (`Owned`) asks the socket for the identity, and still asks the TCP address of a `server.json` that a server of releases 0.1 to 0.3 wrote. |
-| The identity | It gains `web` (`http://127.0.0.1:<port>/`) and `addressKept` once the listener is open. `url` stays, always `http://127.0.0.1:0/cli`: see the correction in §6. `server status` loses `url` and `runtime`, and gives `web` only while the web app listens. |
+| The identity | It gains `web` (`http://127.0.0.1:<port>/`) and `addressKept` once the listener is open, and loses `url`. Its control version is 2, and it lists 1 and 2: see the correction in §6. `server status` loses `url` and `runtime`, gives `web` only while the web app listens, and names a server of control version 1 `older`, with what to run; every command, `ui`, `mcp`, `init` and `upgrade --skills` refuse it with the same words, and `server stop` and `serve --take-over` stop it through version 1. |
 | Windows | Its command line still looks for a server through `server.json` and TCP (`background/over_tcp.rs`); no server writes that file, and none starts on Windows. QUA-59 deletes that path with the signal paths it uses. |
 | A Windows browser on a server in WSL | Not measured: this machine has no Windows. The bearer no longer depends on the kernel, so the WSL relay is no obstacle in principle. |
 
@@ -381,16 +381,17 @@ the new binary. The upgrader then runs the **new** `server status` until it repo
 | the server runs as the unit's main process (no fork into the background) | `pid` must equal `MainPID` |
 | `server status` keeps `running`, `sameInterface` and `pid` (the server's own pid), permanently | the old upgrader and the old `install.sh` (`install/install.sh:84-92`) check them |
 
-**Correction (QUA-58, 2026-11-26).** The upgrade code of releases 0.2 and 0.3 does not run the new
-`server status`: after it starts the unit again, it waits on its own look at the socket
-(`upgrade/server.rs` `ready`, through `background::observe`). That look takes an identity as a
-server only when `started` is present and `url` is a loopback address of the command line's routes,
-`http://<address>/cli` (`background.rs:660` and `runtime_of`, the same in 0.2.0 and 0.3.0);
-anything else is `Malformed`, and the upgrade reports that the new build did not answer. So the new
-binary must also keep, on the socket, an identity with `started`, a 32-digit `generation`, `control`
-1, the `pid` of the server itself, its `executable`, and a `url` of that form. From QUA-58 on, `url`
-is always `http://127.0.0.1:0/cli`: no route answers there, and port 0 is no port, so a command
-line of 0.2 or 0.3 that calls it fails at once instead of reaching another program.
+**Correction (QUA-58, 2026-11-26, revised after the review).** The upgrade code of releases 0.2 and 0.3
+does not run the new `server status`: after it starts the unit again, it waits on its own look at the
+socket (`upgrade/server.rs` `ready`, through `background::observe`), which takes `Serving` and
+`Newer`. That look checks the generation, the database, then the control version
+(`background.rs:657` in both tags): a version other than 1 is `Newer`, which `ready` accepts, which
+`server stop` stops while the server lists version 1 in `controls`, and for which every other command
+says to upgrade the command line. So the new binary answers control version 2 and lists 1 and 2: the
+requests of version 1 (`GET /server`, `POST /server/stop`) are the same. A first revision kept
+version 1 with a fixed `url`; a 0.3 command line then took the new server as its own build and failed
+on every call with no next step, and this command line took a 0.3 server as its own and failed on
+every call too. With version 2 each names the other.
 
 That evidence is from the upgrade code on `main`, which first ships in 0.2. Only v0.1.0 is
 published, and it has no `upgrade`. The 0.2 path needs evidence from the real 0.2 artifact once it

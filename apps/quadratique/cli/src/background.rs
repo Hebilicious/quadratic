@@ -87,6 +87,13 @@ pub enum LifeError {
         control: u32,
         attempt: Attempt,
     },
+    /// A server of an earlier release (control version 1, releases 0.2 and 0.3) holds the home: it serves the commands
+    /// on TCP only, which this command line never uses.
+    Older {
+        pid: u32,
+        control: u32,
+        attempt: Attempt,
+    },
     /// The server answered `409`: it is not the generation this command asked to stop.
     OtherGeneration {
         asked: String,
@@ -232,6 +239,15 @@ impl std::fmt::Display for LifeError {
             LifeError::Newer { control, attempt } => write!(
                 formatter,
                 "the server of this home speaks control version {control}, which this command line does not know. {} Upgrade this command line.",
+                attempt.outcome()
+            ),
+            LifeError::Older {
+                pid,
+                control,
+                attempt,
+            } => write!(
+                formatter,
+                "a Quadratique server of an earlier release (pid {pid}, control version {control}) holds this home, and this command line cannot use it. {} Run `quadratique server stop`, which stops it, then run the command again: it starts this build's server.",
                 attempt.outcome()
             ),
             LifeError::OtherGeneration { asked, serving } => {
@@ -528,6 +544,8 @@ pub enum OnSocket {
     OtherDatabase(Identity),
     /// A control version that this build does not know: a newer server.
     Newer(Identity),
+    /// An earlier control version: a server of an earlier release, which this build only stops.
+    Older(Identity),
     Malformed(String),
     Stalled,
     /// An entry that is not yet a socket of this account with mode 0600.
@@ -570,7 +588,8 @@ async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
     }
     match identity.control {
         None => return OnSocket::Malformed("the identity has no control version".to_owned()),
-        Some(control) if control != CONTROL => return OnSocket::Newer(identity),
+        Some(control) if control > CONTROL => return OnSocket::Newer(identity),
+        Some(control) if control < CONTROL => return OnSocket::Older(identity),
         Some(_) => {}
     }
     if identity.started.is_none() {
@@ -596,6 +615,8 @@ pub enum Observed {
         identity: Identity,
     },
     Newer(Identity),
+    /// A server of an earlier release: its control version is older than this build's.
+    Older(Identity),
     OtherDatabase(Identity),
     Malformed(String),
     Stalled,
@@ -623,6 +644,7 @@ async fn observe_within(home: &Home, limit: Duration) -> Result<Observed, LifeEr
         OnSocket::Serving(identity) => Observed::Serving { identity },
         OnSocket::OtherDatabase(identity) => Observed::OtherDatabase(identity),
         OnSocket::Newer(identity) => Observed::Newer(identity),
+        OnSocket::Older(identity) => Observed::Older(identity),
         OnSocket::Malformed(why) => Observed::Malformed(why),
         OnSocket::Stalled => Observed::Stalled,
         OnSocket::Denied(reason) | OnSocket::PathError(reason) => Observed::Unreachable(reason),
@@ -740,6 +762,11 @@ fn refusal(home: &Home, observed: Observed, attempt: Attempt) -> LifeError {
             attempt,
         },
         Observed::Newer(identity) => LifeError::Newer {
+            control: identity.control.unwrap_or_default(),
+            attempt,
+        },
+        Observed::Older(identity) => LifeError::Older {
+            pid: identity.pid,
             control: identity.control.unwrap_or_default(),
             attempt,
         },
@@ -991,7 +1018,7 @@ async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError>
             None
         }
         Observed::Starting { .. } => None,
-        Observed::Serving { identity, .. } => identity.generation,
+        Observed::Serving { identity, .. } | Observed::Older(identity) => identity.generation,
         Observed::Newer(identity) if lists_this_control(&identity) => identity.generation,
         refused => return Err(refusal(home, refused, Attempt::Stop)),
     };
@@ -1091,7 +1118,7 @@ async fn stop_holding(
                 }
             }
             Observed::Legacy | Observed::Starting { .. } => None,
-            Observed::Serving { identity, .. } => Some(identity),
+            Observed::Serving { identity, .. } | Observed::Older(identity) => Some(identity),
             Observed::Newer(identity)
                 if attempt == Attempt::Stop && lists_this_control(&identity) =>
             {

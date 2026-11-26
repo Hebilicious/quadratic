@@ -77,9 +77,14 @@ quadratique server status
 quadratique ui --open
 ```
 
-The web app is at `http://127.0.0.1:<port>/`. Its TCP listener opens only once a browser was let
-in: the first `quadratique ui` opens it, and after that every start of the server opens it again, so
-a server that only agents and commands use listens on no TCP port. The server keeps its port across
+The web app is at `http://127.0.0.1:<port>/`. Its TCP listener opens at the start of the server
+when the data folder holds a web token (`web-token`): that is so after a first `quadratique ui`, and
+also in a data folder that a server of release 0.3 ran, because those servers wrote one at every
+start. Otherwise the first `quadratique ui` opens it, so a server that only agents and commands use
+listens on no TCP port. Without the token, the listener gives only the app's page and its files,
+never data. To stop listening at start, run `quadratique server strict on`: in strict mode the token
+is made at the first pairing after each start and kept nowhere, so the listener opens only at
+`quadratique ui`. The server keeps its port across
 restarts and upgrades, so open tabs and bookmarks keep working. It keeps the port in `server.port` in its data
 folder and asks for it again at each start. When another program holds that port, the server
 starts on a port the system chooses and keeps that one; `quadratique ui` prints the current
@@ -134,8 +139,8 @@ out, run `quadratique server sign-out`: it makes a new token, and every live cha
 the earlier one delivers nothing more once the command answers and closes, so each open page
 shows the sentence at once, and every other browser at its next request, until you run
 `quadratique ui --open` there again. In strict mode (`quadratique server strict on`) the token is
-made at each start of the server and kept in memory only, so every restart signs every browser
-out. A strict setting that you change applies from the next start of the server.
+made at the first pairing after each start of the server and kept in memory only, so every restart
+signs every browser out. A strict setting that you change applies from the next start of the server.
 
 Every request of the web app and its live channel needs the token: a request without it, or with
 an earlier one, gets `401`, and the page shows the sentence.
@@ -354,7 +359,7 @@ A missing data folder, and any missing folder above it, is made with mode `0700`
 The server also listens on the Unix socket `server.sock` in the data folder, with mode `0600`.
 `server status` asks it there first, and reports one state: `running`, `starting` (a server holds
 the folder and does not answer yet), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
-command line), `reachable: false` with the reason, or `legacy: true` for a server from before the
+command line), `older` (a server of release 0.2 or 0.3: run `quadratique server stop`), `reachable: false` with the reason, or `legacy: true` for a server from before the
 socket (release 0.1), which only TCP reaches. `server stop` and `serve --take-over` ask the server on
 the socket to stop, and never signal it. Every other command, `quadratique mcp`, `init` and
 `upgrade --skills` call the server on the socket too, and never over TCP: the command finds the
@@ -436,11 +441,15 @@ limit. Each server start has a
 `control`, apart from the interface of the commands. A server keeps answering every control version
 it ever served, and lists them in `controls`. Two fields keep their meaning in every version:
 `generation` and `database`. A command line checks them before it looks at the control versions, so
-it stops a newer server only in its own folder and only by its generation. This is version 1:
+it stops a newer server only in its own folder and only by its generation. This is version 2, and the
+server still answers version 1, which releases 0.2 and 0.3 speak: their command lines take this
+server as newer, say to upgrade the command line, and still stop it. Version 2 means that the command
+line's routes are on the socket and nowhere else; a server of version 1 also served them on TCP, so
+this command line names it a server of an earlier release, uses none of it, and stops it when asked:
 
 | Request | Answer |
 | --- | --- |
-| `GET /server` | `200` and the identity: `pid`, `database`, `interface`, `schema`, `generation`, `control`, `controls`, `executable` (`path`, `device`, `inode`), `started` (`on-demand` or `serve`), `web` (`http://127.0.0.1:<port>/`, while the web app listens) and `addressKept` with it, and `url`, always `http://127.0.0.1:0/cli`: the command lines of releases 0.2 and 0.3 accept an identity only with a loopback address of the command line's routes there, and no route answers at it. |
+| `GET /server` | `200` and the identity: `pid`, `database`, `interface`, `schema`, `generation`, `control`, `controls`, `executable` (`path`, `device`, `inode`), `started` (`on-demand` or `serve`), `web` (`http://127.0.0.1:<port>/`, while the web app listens) and `addressKept` with it. A server of version 1 also gives `url`, its command line's routes on TCP. |
 | `POST /server/stop` with `{"generation": "<generation>"}` | `202 {"generation": …}` if it names this server's generation: the server has closed its listeners, and starts to shut down once this answer is sent. Open connections get up to 2 seconds, then the server closes its store and frees the folder. `409 {"generation": <the serving one>}` for any other generation: nothing stops. `400` for a body that is not that JSON. |
 
 ```sh
@@ -655,6 +664,10 @@ app can import findings; the MCP server of agents does not offer it.
 ```sh
 quadratique upgrade
 ```
+
+Upgrade every copy of `quadratique` on the machine: a command line of release 0.2 or 0.3 cannot use
+this release's server, and says to upgrade the command line; this release's command line cannot use
+a server of release 0.2 or 0.3, and says to run `quadratique server stop`.
 
 `upgrade` asks the GitHub API for the latest release and compares it with the running binary.
 When the release is newer, it:

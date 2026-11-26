@@ -94,7 +94,7 @@ fn a_socket_that_accepts_and_never_answers_is_stalled() {
 fn an_answer_that_is_no_identity_is_malformed_and_never_running() {
     let home = Home::new();
     let listener = fake_socket(&home);
-    let mut complete = identity(&home, &database_of(&home), 1);
+    let mut complete = identity(&home, &database_of(&home), 2);
     complete
         .as_object_mut()
         .expect("an object")
@@ -127,7 +127,7 @@ fn an_identity_of_another_database_or_of_a_newer_control_version_is_never_runnin
     let elsewhere = Path::new("/elsewhere/workspace.db");
     let serving = answering(
         listener,
-        http(&identity(&home, elsewhere, 1).to_string()),
+        http(&identity(&home, elsewhere, 2).to_string()),
         1,
     );
     let other = status(&home);
@@ -136,7 +136,7 @@ fn an_identity_of_another_database_or_of_a_newer_control_version_is_never_runnin
     let listener = fake_socket(&home);
     let serving = answering(
         listener,
-        http(&identity(&home, &database_of(&home), 2).to_string()),
+        http(&identity(&home, &database_of(&home), 3).to_string()),
         1,
     );
 
@@ -147,7 +147,7 @@ fn an_identity_of_another_database_or_of_a_newer_control_version_is_never_runnin
     assert!(other.get("running").is_none(), "{other}");
     assert_eq!(
         (&newer["newer"], &newer["control"]),
-        (&json!(true), &json!(2)),
+        (&json!(true), &json!(3)),
         "{newer}"
     );
     assert!(newer.get("running").is_none(), "{newer}");

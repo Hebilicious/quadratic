@@ -48,8 +48,11 @@ class Prepared:
         return self.adapter.agent_env(self.sb, self.repo, agent, distinct)
 
     def stop(self) -> None:
-        if self.repo.exists():
-            self.adapter.stop(self.sb, self.repo)
+        try:
+            if self.repo.exists():
+                self.adapter.stop(self.sb, self.repo)
+        finally:
+            self.sb.remove()
 
     def __enter__(self) -> "Prepared":
         return self

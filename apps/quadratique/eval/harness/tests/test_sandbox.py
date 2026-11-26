@@ -29,13 +29,20 @@ class QuadratiqueHome(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(made.qhome.stat().st_mode), 0o700)
         self.assertEqual(made.tool_env()["QUADRATIQUE_HOME"], str(made.qhome))
 
-    def test_each_run_folder_has_its_own_data_folder_and_finds_it_again(self):
-        first = self.made(self.root / "first")
-        again = self.made(self.root / "first")
-        other = self.made(self.root / "other")
-
-        self.assertEqual(first.qhome, again.qhome)
+    def test_each_sandbox_gets_a_private_unguessable_data_folder_that_its_removal_keeps_in_the_run_and_deletes(self):
+        first = self.made(self.root / "run")
+        (first.qhome / "workspace.db").write_text("the store")
+        other = self.made(self.root / "run")
         self.assertNotEqual(first.qhome, other.qhome)
+        other.remove()
+
+        first.remove()
+        again = self.made(self.root / "run")
+
+        self.assertFalse(first.qhome.exists(), "the removed sandbox left its data folder")
+        self.assertEqual((first.root / "qhome" / "workspace.db").read_text(), "the store")
+        self.assertEqual((again.qhome / "workspace.db").read_text(), "the store")
+        self.assertNotEqual(again.qhome, first.qhome)
 
     def test_a_server_that_does_not_stop_fails_the_run(self):
         fake = self.root / "fake-quadratique"

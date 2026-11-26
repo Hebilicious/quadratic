@@ -267,6 +267,16 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
             "pid": identity.pid,
             "database": database,
         }),
+        Observed::Older(identity) => json!({
+            "running": true,
+            "older": true,
+            "sameInterface": false,
+            "control": identity.control,
+            "pid": identity.pid,
+            "generation": identity.generation,
+            "reason": "a server of an earlier release holds this home, and this command line cannot use it: run `quadratique server stop`, which stops it; the next command starts this build's server",
+            "database": database,
+        }),
         Observed::Newer(identity) => json!({
             "newer": true,
             "control": identity.control,
@@ -554,7 +564,11 @@ async fn mcp_command(args: Vec<String>, io: &mut CliIo) -> i32 {
         Ok(home) => home,
         Err(error) => return report(io, home_refusal_kind(&error), error.to_string()),
     };
-    if let Err(error @ background::LifeError::Unreachable { .. }) = background::ensure(&home).await
+    // AcidCat shows an agent only that a tool failed: what the agent cannot fix by calling again stops the MCP server
+    // at its start, with the reason, which the harness shows.
+    if let Err(
+        error @ (background::LifeError::Unreachable { .. } | background::LifeError::Older { .. }),
+    ) = background::ensure(&home).await
     {
         return report(io, Kind::Unavailable, error.to_string());
     }
