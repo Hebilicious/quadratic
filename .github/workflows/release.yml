@@ -457,8 +457,17 @@ jobs:
           wanted=$(jq -r '.packages[] | select(.name == "quadratique") | .dependencies[] | select(.name == "quadratique-server") | .req' <<< "$metadata")
           [ "$wanted" = "^$VERSION" ] || { echo "::error::the crate quadratique requires quadratique-server '$wanted', not ^$VERSION" >&2; exit 1; }
 
-      # Builds the web app, copies it into the server crate, and checks that both crates carry what they read.
-      - run: moon run quadratique-server:preflight
+      # Builds the web app, copies it into the server crate, and checks that both crates carry what they read. The
+      # server's tasks stage-web and preflight do the same on a person's machine, but moon does not run them in CI
+      # (runInCI: false) and answers "No tasks found", so the job runs their two steps itself.
+      - name: Build the web app, stage it in the server crate, and check what both crates carry
+        run: |
+          set -euo pipefail
+          moon run quadratique-web:build
+          cd apps/quadratique/server
+          rm -rf web-dist
+          cp -R ../web/dist web-dist
+          sh preflight.sh
 
       # Packs both crates and builds each one from its package, as cargo publish would.
       - name: Package and build both crates as crates.io will serve them
