@@ -255,7 +255,11 @@ reads and keeps nothing. The **strict setting** (`quadratique server strict on`)
 bound origin** instead: the server binds a port its home has never served. It lists the ports it
 served in the data folder (the last 4096), and binds again, up to 8 times, if the system gives one
 from the list. Turning strict on adds the kept port to that list. Turning strict on or off starts no server
-and applies from the next start; the first start after `strict off` takes a new address and keeps it. The same setting makes the bearer
+and applies from the next start; the first start after `strict off` takes a new address and keeps it. A start
+reads the setting once, under the home's lock. A normal start that read it just before `strict on` may write
+`server.port` again; every strict start therefore adds a kept port to the served ports and removes `server.port`
+first. `addressKept` is true only when the next start would ask for the address in use: the server kept that port,
+strict is off now, and `server.port` names that port now. The same setting makes the bearer
 per server start: one setting, for a machine whose other accounts are not trusted.
 
 **Threat analysis.** B is another account on the same machine. A machine with a single account has

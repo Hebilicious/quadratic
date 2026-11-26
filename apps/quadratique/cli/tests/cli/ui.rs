@@ -447,3 +447,30 @@ fn strict_on_and_off_start_no_server_and_apply_from_the_next_start() {
     assert_eq!(on["from"], "the next start of the server", "{on}");
     assert_eq!(off["from"], "the next start of the server", "{off}");
 }
+
+#[test]
+fn a_running_server_says_its_address_is_kept_only_while_the_next_start_would_ask_for_it() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let first = ui_url(&home, elsewhere.path(), &app);
+    assert_eq!(first["addressKept"], true, "{first}");
+
+    strict(&home, elsewhere.path(), "on");
+    let after_strict = ui_url(&home, elsewhere.path(), &app);
+    let status_after_strict = server_status(&home, elsewhere.path());
+    strict(&home, elsewhere.path(), "off");
+    std::fs::write(home.path().join("server.port"), "9\n").expect("server.port edited by hand");
+    let after_edit = server_status(&home, elsewhere.path());
+    std::fs::remove_file(home.path().join("server.port")).expect("server.port removed by hand");
+    let after_removal = ui_url(&home, elsewhere.path(), &app);
+    stop(&home, elsewhere.path());
+
+    assert_eq!(after_strict["addressKept"], false, "{after_strict}");
+    assert_eq!(
+        status_after_strict["addressKept"], false,
+        "{status_after_strict}"
+    );
+    assert_eq!(after_edit["addressKept"], false, "{after_edit}");
+    assert_eq!(after_removal["addressKept"], false, "{after_removal}");
+}

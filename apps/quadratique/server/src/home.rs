@@ -161,34 +161,34 @@ pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
     options.open(path)
 }
 
-/// The one way a file of the home is replaced: `contents` go to `<name>.<pid>`, made by [`create_private`] after
-/// whatever was at that name is removed (a link is removed, never followed), synced, then renamed over `path`. The
-/// partial file is removed when a step fails.
+/// The one way a file of the home is replaced: `contents` go to a partial file `<name>.<pid>.<random>`, unique to this
+/// call and made by [`create_private`], so no two writes, in one process or two, share one and nothing already at that
+/// name (a link included) is used; it is synced, then renamed over `path`. Only this call's own partial file is removed
+/// when a step fails.
 pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let partial = path.with_file_name(format!("{name}.{}", std::process::id()));
+    let mut unique = [0u8; 8];
+    getrandom::fill(&mut unique).map_err(std::io::Error::other)?;
+    let unique: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
+    let partial = path.with_file_name(format!("{name}.{}.{unique}", std::process::id()));
     let named = |what: &str, error: std::io::Error| {
         std::io::Error::new(
             error.kind(),
             format!("{what} {}: {error}", partial.display()),
         )
     };
-    match std::fs::remove_file(&partial) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            return Err(named("removing", error));
-        }
-        _ => {}
-    }
+    let mut made = false;
     let written = create_private(&partial)
         .and_then(|mut file| {
+            made = true;
             file.write_all(contents)?;
             file.sync_all()
         })
         .map_err(|error| named("writing", error))
         .and_then(|()| std::fs::rename(&partial, path).map_err(|error| named("renaming", error)));
-    if written.is_err() {
+    if written.is_err() && made {
         let _ = std::fs::remove_file(&partial);
     }
     written

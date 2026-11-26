@@ -27,7 +27,7 @@ use crate::web::{self, WebApp};
 mod address;
 mod closing;
 
-pub use address::{Listen, kept_port, set_strict, strict};
+pub use address::{Listen, address_kept, kept_port, set_strict, strict};
 
 pub const TARGET: &str = "cli";
 pub const BASE: &str = "/cli";
@@ -598,6 +598,8 @@ async fn start_checked(
     started: Started,
 ) -> Result<Server, ServerError> {
     let owner: closing::HomeLock = Arc::new(own(home, waits).await?);
+    // Read once, under the home's lock: everything this start does follows this one value.
+    let strict = address::strict(home);
     #[cfg(unix)]
     let (socket_listener, socket_file) = home::bind_socket(home).await?;
     let credentials = Credentials::open(home.credentials())?.holding(Arc::clone(&owner));
@@ -653,7 +655,7 @@ async fn start_checked(
         web::OriginHeader::OwnOnly,
     ));
     let admit = callers::owner_only(own_account);
-    let listening = address::bind(home, listen).and_then(|bound| {
+    let listening = address::bind(home, listen, strict).and_then(|bound| {
         let (listener, record) = address::listen(bound, LISTEN_BACKLOG)?;
         let served = serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS)?;
         Ok((served, record))

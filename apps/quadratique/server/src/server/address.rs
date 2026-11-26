@@ -48,14 +48,16 @@ pub(super) enum Record {
     Served,
 }
 
-pub(super) fn bind(home: &Prepared, listen: Listen) -> std::io::Result<Bound> {
+/// `strict` is the home's setting as this start read it, once, so that the port and the token of one start agree.
+pub(super) fn bind(home: &Prepared, listen: Listen, strict: bool) -> std::io::Result<Bound> {
     match listen {
         Listen::On(address) => Ok(Bound {
             socket: bound(address)?,
             record: Record::Nothing,
             kept: false,
         }),
-        Listen::Home if strict(home) => {
+        Listen::Home if strict => {
+            forget_kept_port(home)?;
             let served = served_ports(home);
             let socket = choose_fresh(&served, FRESH_TRIES, || {
                 let socket = bound(loopback())?;
@@ -153,6 +155,13 @@ fn choose_fresh<S>(
     }
 }
 
+/// The one definition of a kept address: the server on `port` says it kept that port at its start (`said`), the home is
+/// not strict now, and `server.port` names that port now, so the next start asks for the same address. A change made
+/// while the server runs (`strict on`, `server.port` edited or removed) shows at once.
+pub fn address_kept(home: &Prepared, said: bool, port: u16) -> bool {
+    said && !strict(home) && kept_port(home) == Some(port)
+}
+
 /// Whether this home is strict: a regular file, not a link, at `strict`.
 pub fn strict(home: &Prepared) -> bool {
     std::fs::symlink_metadata(home.strict()).is_ok_and(|metadata| metadata.is_file())
@@ -162,12 +171,20 @@ pub fn strict(home: &Prepared) -> bool {
 /// is forgotten, so that no later start asks for it. Off, the next start takes a port the system chooses and keeps it.
 pub fn set_strict(home: &Prepared, on: bool) -> std::io::Result<()> {
     if on {
-        let ports: Vec<u16> = kept_port(home).into_iter().collect();
-        add_served(home, &ports)?;
         home::write_atomically(&home.strict(), b"on\n")?;
-        return remove(&home.kept_port());
+        return forget_kept_port(home);
     }
     remove(&home.strict())
+}
+
+/// The kept port joins the served ports, then `server.port` goes. `strict on` does it, and so does every strict start:
+/// a normal start that read the setting before `strict on` may write `server.port` again after it, and the next start,
+/// which is strict, forgets that port too.
+fn forget_kept_port(home: &Prepared) -> std::io::Result<()> {
+    if let Some(port) = kept_port(home) {
+        add_served(home, &[port])?;
+    }
+    remove(&home.kept_port())
 }
 
 fn remove(path: &Path) -> std::io::Result<()> {
@@ -217,9 +234,13 @@ fn read_tail(path: &Path, limit: u64) -> Option<Vec<u8>> {
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(limit);
-    file.seek(SeekFrom::Start(start)).ok()?;
+    // From the byte before the cut, which tells whether the cut lands at the start of a line.
+    let before = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(before)).ok()?;
     let mut bytes = Vec::new();
-    file.take(limit).read_to_end(&mut bytes).ok()?;
+    file.take(limit + (start - before))
+        .read_to_end(&mut bytes)
+        .ok()?;
     if start > 0 {
         let line = bytes
             .iter()
@@ -302,7 +323,7 @@ mod home_tests {
         let (_folder, home) = home();
         let (other, port) = held_port();
         std::fs::write(home.kept_port(), format!("{port}\n")).expect("a kept port");
-        let bound = bind(&home, Listen::Home).expect("the kept port is bound");
+        let bound = bind(&home, Listen::Home, false).expect("the kept port is bound");
         assert_eq!(bound.socket.local_addr().expect("its address").port(), port);
         let _other = other.listen(16).expect("the other socket listens first");
 
@@ -310,6 +331,51 @@ mod home_tests {
 
         let (listener, _) = listened.expect("the server listens on another port");
         assert_ne!(listener.local_addr().expect("its address").port(), port);
+    }
+
+    #[test]
+    fn a_served_ports_file_cut_exactly_at_a_line_start_keeps_that_line() {
+        let (_folder, home) = home();
+        // Lines of six bytes: the last SERVED_PORTS_LIMIT bytes start exactly at a line.
+        let text: String = (10000..15000u16).map(|port| format!("{port}\n")).collect();
+        std::fs::write(home.served_ports(), text).expect("a long file");
+
+        let kept = served_list(&home);
+
+        assert_eq!(kept.len(), super::SERVED_PORTS);
+        assert_eq!(kept.first(), Some(&(15000 - super::SERVED_PORTS as u16)));
+    }
+
+    #[test]
+    fn a_write_of_the_home_never_touches_a_file_at_another_writers_partial_name() {
+        let (_folder, home) = home();
+        let other = home
+            .kept_port()
+            .with_file_name(format!("server.port.{}", std::process::id()));
+        std::fs::write(&other, "another write in progress").expect("another partial file");
+
+        assert!(record(&home, &Record::Kept, 4100), "the port is kept");
+
+        assert_eq!(
+            std::fs::read_to_string(&other).expect("the other partial file"),
+            "another write in progress"
+        );
+    }
+
+    #[test]
+    fn a_strict_start_forgets_a_port_that_a_racing_normal_start_kept_after_strict_on() {
+        let (_folder, home) = home();
+        super::set_strict(&home, true).expect("strict on");
+        std::fs::write(home.kept_port(), "4100\n").expect("a port kept after strict on");
+
+        let bound = super::bind(&home, super::Listen::Home, true).expect("a strict start binds");
+        drop(bound);
+
+        assert!(!home.kept_port().exists(), "server.port stays under strict");
+        assert!(
+            served_list(&home).contains(&4100),
+            "the kept port can be served again"
+        );
     }
 
     #[test]

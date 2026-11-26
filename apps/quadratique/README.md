@@ -88,10 +88,11 @@ address. On a machine whose other accounts you do not trust, run `quadratique se
 from the next start of the server, each start takes an address it never served, and you run
 `quadratique ui` after each restart. `quadratique server strict off` goes back to the default from
 the next start, which takes a new address and keeps it. Neither command starts a server.
-`server status` and `ui` say `"addressKept": true` only when the running server listens on the
-port its home keeps: not under strict, not with `serve --port`, and not when `server.port` could
-not be written (the log says why). With no server running, `addressKept` says what the next start
-does.
+`server status` and `ui` say `"addressKept": true` only when the next start would ask for the
+address the server listens on now: the server kept that port at its start (not with
+`serve --port`, and not when `server.port` could not be written; the log says why), strict is off
+now, and `server.port` still names that port. With no server running, `addressKept` says what
+the next start does.
 
 ## Install from a release
 
