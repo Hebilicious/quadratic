@@ -10,6 +10,8 @@ use quadratique_server::server::{self, Asked, Paths, Server, Waits};
 use quadratique_server::web::WebApp;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use crate::support::{private_home, within};
 use crate::web::{Answer, Site, built, request, start};
@@ -91,6 +93,129 @@ async fn stream_with_bearer(site: &Site, token: &str) -> Answer {
         Some(json!({})),
     )
     .await
+}
+
+/// An event stream of `issue.changed` on the web target, read as it comes.
+struct EventStream {
+    connection: TcpStream,
+    received: String,
+    read_up_to: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Next {
+    Event,
+    End,
+}
+
+impl EventStream {
+    /// Opens the stream with the bearer `token`, or with none, and reads its head: once the head is in, the server has
+    /// registered the subscription. The status of a refused stream is the error.
+    async fn open(site: &Site, token: Option<&str>) -> Result<EventStream, u16> {
+        within("the event stream's head", async {
+            let host = site.address().to_string();
+            let mut text = format!(
+                "POST /web/events/issue.changed HTTP/1.1\r\nConnection: close\r\nHost: {host}\r\nOrigin: {}\r\n",
+                site.origin()
+            );
+            if let Some(token) = token {
+                text.push_str(&format!("Authorization: Bearer {token}\r\n"));
+            }
+            text.push_str("Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}");
+            let mut connection = TcpStream::connect(site.address())
+                .await
+                .expect("a connection");
+            connection
+                .write_all(text.as_bytes())
+                .await
+                .expect("the request is sent");
+            let mut stream = EventStream {
+                connection,
+                received: String::new(),
+                read_up_to: 0,
+            };
+            while !stream.received.contains("\r\n\r\n") {
+                assert!(stream.read().await, "the server closed before the head");
+            }
+            let status: u16 = stream
+                .received
+                .split_whitespace()
+                .nth(1)
+                .and_then(|status| status.parse().ok())
+                .expect("a status");
+            stream.read_up_to = stream.received.find("\r\n\r\n").expect("the head's end");
+            if status == 200 { Ok(stream) } else { Err(status) }
+        })
+        .await
+    }
+
+    /// The next event, or the end of the stream, whichever comes first.
+    async fn next(&mut self) -> Next {
+        within("the next event or the end of the stream", async {
+            loop {
+                if let Some(found) = self.received[self.read_up_to..].find("event: next") {
+                    self.read_up_to += found + "event: next".len();
+                    return Next::Event;
+                }
+                if !self.read().await {
+                    return Next::End;
+                }
+            }
+        })
+        .await
+    }
+
+    /// Whether more bytes came before the server closed the connection.
+    async fn read(&mut self) -> bool {
+        let mut buffer = [0u8; 4096];
+        let count = self
+            .connection
+            .read(&mut buffer)
+            .await
+            .expect("the stream is read");
+        self.received
+            .push_str(&String::from_utf8_lossy(&buffer[..count]));
+        count > 0
+    }
+}
+
+async fn create_issue(site: &Site, title: &str) {
+    let created = site
+        .call(
+            "/web",
+            "issue.create",
+            json!({ "project": "DEM", "title": title, "acceptance": "It is done." }),
+            &[],
+        )
+        .await;
+    assert_eq!(created.status, 200, "{}", created.body);
+    assert!(created.body.contains(r#""ok":true"#), "{}", created.body);
+}
+
+async fn create_project(site: &Site) {
+    let created = site
+        .call(
+            "/web",
+            "project.create",
+            json!({ "key": "DEM", "name": "Demo" }),
+            &[],
+        )
+        .await;
+    assert_eq!(created.status, 200, "{}", created.body);
+    assert!(created.body.contains(r#""ok":true"#), "{}", created.body);
+}
+
+async fn sign_out(site: &Site) {
+    let signed_out = server::sign_out_over_socket(&prepared(site.home.path())).await;
+    assert!(
+        matches!(signed_out, Ok(Asked::Answered(ref answer)) if answer.signed_out),
+        "{signed_out:?}"
+    );
+}
+
+async fn bearer_of(site: &Site) -> String {
+    let issued = pair(site.home.path(), false).await;
+    token_of(&redeem(site.address(), &code_of(&issued), None).await)
 }
 
 async fn start_in(home: &Path, app: &Path) -> Server {
@@ -429,4 +554,69 @@ async fn only_the_exact_path_redeems_a_code_and_only_with_one_origin_header() {
     assert_eq!(below.status, 404, "POST /session/x");
     assert_eq!(twice.status, 403, "{}", twice.body);
     assert_eq!(redeem(site.address(), &code, None).await.status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_out_ends_both_event_streams_of_the_earlier_token_and_neither_delivers_an_event_after_it()
+ {
+    let site = start(built).await;
+    create_project(&site).await;
+    let earlier = bearer_of(&site).await;
+    let mut first = EventStream::open(&site, Some(&earlier))
+        .await
+        .expect("a stream of the token");
+    let mut second = EventStream::open(&site, Some(&earlier))
+        .await
+        .expect("another stream of the token");
+    create_issue(&site, "Before the sign-out").await;
+    assert_eq!(
+        first.next().await,
+        Next::Event,
+        "the first stream is not live"
+    );
+    assert_eq!(
+        second.next().await,
+        Next::Event,
+        "the second stream is not live"
+    );
+
+    sign_out(&site).await;
+    create_issue(&site, "After the sign-out").await;
+
+    assert_eq!(
+        first.next().await,
+        Next::End,
+        "the first stream delivered an event after the sign-out"
+    );
+    assert_eq!(
+        second.next().await,
+        Next::End,
+        "the second stream delivered an event after the sign-out"
+    );
+    assert_eq!(
+        EventStream::open(&site, Some(&earlier)).await.err(),
+        Some(401),
+        "the stream reopened with the earlier token was served"
+    );
+}
+
+/// Until the cutover (QUA-58) a stream without a token is served, and no token is replaced for it: a sign-out leaves
+/// it running. After the cutover no such stream is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_sign_out_a_stream_of_the_new_token_and_a_stream_without_a_token_keep_delivering() {
+    let site = start(built).await;
+    create_project(&site).await;
+    let mut without_token = EventStream::open(&site, None)
+        .await
+        .expect("a stream without a token");
+
+    sign_out(&site).await;
+    let renewed = bearer_of(&site).await;
+    let mut of_the_new_token = EventStream::open(&site, Some(&renewed))
+        .await
+        .expect("a stream of the new token");
+    create_issue(&site, "After the sign-out").await;
+
+    assert_eq!(of_the_new_token.next().await, Next::Event);
+    assert_eq!(without_token.next().await, Next::Event);
 }

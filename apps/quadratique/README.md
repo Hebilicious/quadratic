@@ -119,11 +119,12 @@ hand an `.html` file to an editor. When the browser shows no web app, run `quadr
 open the `link` it prints, within 60 seconds.
 
 The server keeps the token in `web-token` in the data folder, mode `0600`. To sign every browser
-out, run `quadratique server sign-out`: it makes a new token, and each browser shows the sentence
-at its next request until you run `quadratique ui --open` there again. A live channel that is
-already open goes on until its next reconnection. In strict mode (`quadratique server strict on`)
-the token is made at each start of the server and kept in memory only, so every restart signs
-every browser out. A strict setting that you change applies from the next start of the server.
+out, run `quadratique server sign-out`: it makes a new token, and every live channel opened with
+the earlier one delivers nothing more once the command answers and closes, so each open page
+shows the sentence at once, and every other browser at its next request, until you run
+`quadratique ui --open` there again. In strict mode (`quadratique server strict on`) the token is
+made at each start of the server and kept in memory only, so every restart signs every browser
+out. A strict setting that you change applies from the next start of the server.
 
 Until the next release requires it (QUA-58), a request with no token is still served, as the
 kernel check of "Who can talk to the server" guards it; a request with a token that is not the

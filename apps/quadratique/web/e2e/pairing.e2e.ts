@@ -134,6 +134,21 @@ test("after server sign-out every tab shows the one sentence, and quadratique ui
   });
 });
 
+test("after server sign-out an open board that only listens shows the one sentence without a reload, and stops reconnecting", async ({
+  page,
+  workspace,
+}) => {
+  seed(workspace);
+  await page.goto(workspace.url("/projects/DEM"));
+  await expect(live(page)).toHaveText("Live");
+
+  workspace.quadratique("human", workspace.repository, "server", "sign-out");
+
+  await expect(notPaired(page)).toBeVisible();
+  await expect(live(page)).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("quadratique.token"))).toBeNull();
+});
+
 test("in strict mode a restart signs the browser out, and quadratique ui lets it in again", async ({
   page,
   workspace,
