@@ -77,16 +77,16 @@ impl Stack {
         (agent, worktree)
     }
 
-    async fn close_a(&self) {
-        let closed = self
+    async fn finish_a(&self) {
+        let finished = self
             .board
             .ok(
                 &self.a_agent,
-                "issue.close",
+                "issue.finish",
                 json!({ "issue": self.a, "evidence": "the tests pass" }),
             )
             .await;
-        assert_eq!(closed["issue"]["status"], "in-review", "{closed}");
+        assert_eq!(finished["issue"]["status"], "in-review", "{finished}");
     }
 
     async fn move_to(&self, who: &Who, issue: &str, status: &str) -> Result<Value, Value> {
@@ -216,7 +216,7 @@ async fn b_is_ready_and_can_be_claimed_once_a_is_in_review_and_not_before() {
     assert_eq!(refused["reasons"], json!(["stacked"]), "{refused}");
     assert_eq!(refused["blockers"], json!([stack.a]), "{refused}");
 
-    stack.close_a().await;
+    stack.finish_a().await;
 
     assert_eq!(stack.summary_for(&agent, &stack.b).await["ready"], true);
     let claimed = stack
@@ -229,7 +229,7 @@ async fn b_is_ready_and_can_be_claimed_once_a_is_in_review_and_not_before() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ready_offers_b_only_from_a_branch_or_a_branch_on_top_of_it() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let (on_top, _) = stack.agent_from("cache", "parse").await;
     let (unrelated, _) = stack.agent_from("docs", "main").await;
     let on_a_branch = stack.a_agent.clone();
@@ -255,7 +255,7 @@ async fn ready_offers_b_only_from_a_branch_or_a_branch_on_top_of_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn once_another_agent_frees_a_claim_in_review_b_is_still_offered_only_from_a_branch() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let (lead, _) = stack.agent_from("lead", "main").await;
     stack
         .board
@@ -282,7 +282,7 @@ async fn once_another_agent_frees_a_claim_in_review_b_is_still_offered_only_from
 #[tokio::test(flavor = "multi_thread")]
 async fn b_can_be_claimed_only_from_a_branch_that_contains_a_branch() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let (unrelated, _) = stack.agent_from("docs", "main").await;
 
     let refused = stack
@@ -297,7 +297,7 @@ async fn b_can_be_claimed_only_from_a_branch_that_contains_a_branch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn b_is_offered_to_no_caller_while_a_branch_cannot_be_read() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let (on_top, _) = stack.agent_from("cache", "parse").await;
     git(
         &stack.repository.root,
@@ -320,7 +320,7 @@ async fn b_is_offered_to_no_caller_while_a_branch_cannot_be_read() {
 #[tokio::test(flavor = "multi_thread")]
 async fn b_is_ready_for_any_caller_once_a_is_merged() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let (unrelated, _) = stack.agent_from("docs", "main").await;
     stack
         .move_to(&stack.human(), &stack.a, "merged")
@@ -339,7 +339,7 @@ async fn b_is_ready_for_any_caller_once_a_is_merged() {
 #[tokio::test(flavor = "multi_thread")]
 async fn b_cannot_move_to_merged_or_later_before_a_has() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let human = stack.human();
 
     for status in ["merged", "done"] {
@@ -356,7 +356,7 @@ async fn b_cannot_move_to_merged_or_later_before_a_has() {
         .board
         .failure(
             &human,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": stack.b, "evidence": "checked by hand" }),
         )
         .await;
@@ -370,7 +370,7 @@ async fn b_cannot_move_to_merged_or_later_before_a_has() {
 #[tokio::test(flavor = "multi_thread")]
 async fn b_moves_to_merged_once_a_has() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let human = stack.human();
     stack
         .move_to(&human, &stack.a, "merged")
@@ -384,7 +384,7 @@ async fn b_moves_to_merged_once_a_has() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_landing_of_b_before_a_merges_holds_b_until_a_reaches_merged() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let (agent, worktree) = stack.agent_from("cache", "parse").await;
     stack
         .board
@@ -398,7 +398,7 @@ async fn a_landing_of_b_before_a_merges_holds_b_until_a_reaches_merged() {
         .board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": stack.b, "evidence": "the tests pass" }),
         )
         .await;
@@ -417,7 +417,7 @@ async fn a_landing_of_b_before_a_merges_holds_b_until_a_reaches_merged() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_held_landing_of_b_moves_once_the_link_is_removed() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let human = stack.human();
     stack
         .move_to(&human, &stack.b, "in-review")
@@ -446,7 +446,7 @@ async fn a_held_landing_of_b_moves_once_the_link_is_removed() {
 async fn when_a_goes_back_from_review_to_in_progress_b_keeps_its_claim_and_shows_a_reason_naming_a()
 {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let (agent, _) = stack.agent_from("cache", "parse").await;
     stack
         .board
@@ -470,7 +470,7 @@ async fn when_a_goes_back_from_review_to_in_progress_b_keeps_its_claim_and_shows
         .await;
     assert_stacked_on(&listed["items"][0], &stack.a);
 
-    stack.close_a().await;
+    stack.finish_a().await;
     let shown = stack.summary_for(&agent, &stack.b).await;
     assert!(!reasons(&shown["notReady"]).contains("stacked"), "{shown}");
 }
@@ -499,7 +499,7 @@ async fn a_canceled_base_keeps_b_not_ready_until_the_link_is_removed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stacked_on_does_not_make_b_wait_for_a_to_be_resolved() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let shown = stack.summary_for(&stack.a_agent, &stack.b).await;
     assert_eq!(stack.board.get(&stack.a).await["category"], "started");
     assert_eq!(shown["ready"], true, "{shown}");
@@ -540,7 +540,7 @@ async fn an_issue_stacked_on_two_issues_waits_for_both() {
         .link("stacked-on", &stack.b, &d)
         .await
         .expect("a second base");
-    stack.close_a().await;
+    stack.finish_a().await;
     let on_a = stack.a_agent.clone();
 
     assert_stacked_on(&stack.summary_for(&on_a, &stack.b).await, &d);
@@ -567,7 +567,7 @@ async fn a_held_landing_moves_once_every_base_is_merged_in_the_last_base_commit(
         .link("stacked-on", &stack.b, &d)
         .await
         .expect("a second base");
-    stack.close_a().await;
+    stack.finish_a().await;
     stack.hold_b().await;
 
     stack.move_to(&human, &d, "merged").await.expect("D merges");
@@ -592,7 +592,7 @@ async fn a_held_landing_moves_once_every_base_is_merged_in_the_last_base_commit(
 #[tokio::test(flavor = "multi_thread")]
 async fn advance_leaves_a_held_landing_in_left() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let landing = stack.hold_b().await;
 
     let advanced = stack
@@ -611,7 +611,7 @@ async fn advance_leaves_a_held_landing_in_left() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hold_ends_when_its_issue_is_canceled_and_a_new_claim_never_lands_with_it() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let human = stack.human();
     let (agent, worktree) = stack.agent_from("cache", "parse").await;
     stack
@@ -626,7 +626,7 @@ async fn a_hold_ends_when_its_issue_is_canceled_and_a_new_claim_never_lands_with
         .board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": stack.b, "evidence": "the tests pass" }),
         )
         .await;
@@ -660,7 +660,7 @@ async fn a_hold_ends_when_its_issue_is_canceled_and_a_new_claim_never_lands_with
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hold_ends_when_its_claim_is_released() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let human = stack.human();
     let (agent, worktree) = stack.agent_from("cache", "parse").await;
     stack
@@ -675,7 +675,7 @@ async fn a_hold_ends_when_its_claim_is_released() {
         .board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": stack.b, "evidence": "the tests pass" }),
         )
         .await;
@@ -698,7 +698,7 @@ async fn a_hold_ends_when_its_claim_is_released() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hold_is_kept_when_another_agent_frees_the_claim_in_review() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let human = stack.human();
     let (agent, worktree) = stack.agent_from("cache", "parse").await;
     let (lead, _) = stack.agent_from("lead", "main").await;
@@ -714,7 +714,7 @@ async fn a_hold_is_kept_when_another_agent_frees_the_claim_in_review() {
         .board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": stack.b, "evidence": "the tests pass" }),
         )
         .await;
@@ -738,7 +738,7 @@ async fn a_hold_is_kept_when_another_agent_frees_the_claim_in_review() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_branch_of_the_same_name_in_another_repository_does_not_satisfy_the_branch_rule() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     let other = Repository::new();
     let worktree = other.worktree("parse");
     other.commit(&worktree, "parser.rs", "Parse the headers elsewhere");
@@ -800,7 +800,7 @@ async fn the_branch_rule_starts_git_only_for_a_decision_about_a_base_in_review()
     board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": a, "evidence": "done" }),
         )
         .await;
@@ -854,7 +854,7 @@ async fn a_link_added_to_a_claimed_issue_shows_stacked_only_while_the_base_is_be
         .await
         .expect("C on A");
     assert_stacked_on(&stack.summary_for(&unrelated, &c).await, &stack.a);
-    stack.close_a().await;
+    stack.finish_a().await;
     let shown = stack.summary_for(&unrelated, &c).await;
     assert!(!reasons(&shown["notReady"]).contains("stacked"), "{shown}");
 }
@@ -914,7 +914,7 @@ async fn a_workflow_that_puts_a_stacked_issue_at_merge_ahead_of_its_base_is_refu
 #[tokio::test(flavor = "multi_thread")]
 async fn a_workflow_change_that_makes_every_base_merged_releases_a_held_landing() {
     let stack = Stack::new().await;
-    stack.close_a().await;
+    stack.finish_a().await;
     stack.hold_b().await;
 
     stack
@@ -999,7 +999,7 @@ async fn an_import_that_finishes_a_base_releases_its_held_landing() {
 /// A merged, then B merged, then A moved back before the `merge` status by hand.
 async fn out_of_order(stack: &Stack) {
     let human = stack.human();
-    stack.close_a().await;
+    stack.finish_a().await;
     stack
         .move_to(&human, &stack.a, "merged")
         .await
@@ -1092,7 +1092,7 @@ async fn a_base_branch_name_with_a_revision_suffix_gives_no_evidence() {
         .board
         .ok(
             &suffixed,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": c, "evidence": "done" }),
         )
         .await;

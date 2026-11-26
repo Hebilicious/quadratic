@@ -165,7 +165,7 @@ describe("the schemas the page reads answers with agree with the shared catalog"
       json(sharedCatalog.capabilities["issue.create"]?.output),
     ],
     ["issue.link", IssueRelationsSchema, json(sharedCatalog.capabilities["issue.link"]?.output)],
-    ["issue.close", IssueAnswerSchema, json(sharedCatalog.capabilities["issue.close"]?.output)],
+    ["issue.finish", IssueAnswerSchema, json(sharedCatalog.capabilities["issue.finish"]?.output)],
   ];
 
   test.each(answers)(

@@ -230,9 +230,9 @@ fn b_cannot_move_to_the_merge_status_or_later_before_a_has() {
                 );
             }
             assert_eq!(
-                decide(&Event::Close, &issue, &human(), &board.project),
+                decide(&Event::Finish, &issue, &human(), &board.project),
                 Err(base_not_merged(&["DEM-1"])),
-                "{} {stage:?} close",
+                "{} {stage:?} finish",
                 board.label
             );
         }
@@ -349,8 +349,8 @@ fn every_move_that_ends_at_or_after_the_merge_status_waits_for_the_bases() {
         claim_of(&holder),
     );
     assert_eq!(
-        decide(&Event::Close, &held, &holder, &board.project),
+        decide(&Event::Finish, &held, &holder, &board.project),
         Err(base_not_merged(&["DEM-1"])),
-        "a close from a feature branch into a review status after the merge status"
+        "a finish from a feature branch into a review status after the merge status"
     );
 }

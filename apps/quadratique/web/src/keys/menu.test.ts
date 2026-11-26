@@ -58,22 +58,22 @@ describe("the command menu", () => {
     expect(action(offered([summary("DEM-2")]), "peek")).toEqual({ kind: "peek", issue: "DEM-2" });
   });
 
-  test("it offers Close only where closing changes the issue: not in the workflow's merge status, not when resolved", () => {
+  test("it offers Finish only where finishing changes the issue: not in the workflow's merge status, not when resolved", () => {
     expect(
-      action(offered([summary("DEM-1", { status: "checking", category: "started" })]), "close"),
+      action(offered([summary("DEM-1", { status: "checking", category: "started" })]), "finish"),
     ).toEqual({
       kind: "go",
-      path: "/issues/DEM-1#close",
+      path: "/issues/DEM-1#finish",
     });
     expect(
-      action(offered([summary("DEM-1", { status: "landed", category: "started" })]), "close"),
+      action(offered([summary("DEM-1", { status: "landed", category: "started" })]), "finish"),
     ).toBeUndefined();
     expect(
-      action(offered([summary("DEM-1", { status: "done", category: "completed" })]), "close"),
+      action(offered([summary("DEM-1", { status: "done", category: "completed" })]), "finish"),
     ).toBeUndefined();
   });
 
-  test("on every project's list, it offers the statuses and Close of the issue's own project", () => {
+  test("on every project's list, it offers the statuses and Finish of the issue's own project", () => {
     const items = menuItems({
       projects: [demo],
       view: "list",
@@ -82,12 +82,12 @@ describe("the command menu", () => {
       roles: [],
       query: "",
     });
-    expect([action(items, "status:doing"), action(items, "close")]).toEqual([
+    expect([action(items, "status:doing"), action(items, "finish")]).toEqual([
       {
         kind: "run",
         commands: [{ kind: "update", issue: "DEM-1", revision: 1, patch: { status: "doing" } }],
       },
-      { kind: "go", path: "/issues/DEM-1#close" },
+      { kind: "go", path: "/issues/DEM-1#finish" },
     ]);
   });
 });

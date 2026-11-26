@@ -1,6 +1,13 @@
 import { describe, expect, test } from "vitest";
 
-import { changeLines, relationLabel, textParts, type ChangeLine, type Meter } from "./present.ts";
+import {
+  changeLines,
+  operationText,
+  relationLabel,
+  textParts,
+  type ChangeLine,
+  type Meter,
+} from "./present.ts";
 
 const statusName = (key: string) => key;
 const shown = (line: ChangeLine) => `${line.before ?? ""} → ${line.after ?? ""}`;
@@ -61,6 +68,14 @@ describe("a change of the history, in plain words", () => {
     );
     expect([line?.before, line?.after]).toEqual(['"review"', '"checking"']);
   });
+});
+
+test("a finish reads the same in history written before 0.2, which names it issue.close, and an unknown operation reads as its name", () => {
+  expect([operationText("issue.finish"), operationText("issue.close")]).toEqual([
+    "finished with evidence",
+    "finished with evidence",
+  ]);
+  expect(operationText("issue.later")).toBe("issue.later");
 });
 
 test("a stacked-on relation reads from both of its issues", () => {

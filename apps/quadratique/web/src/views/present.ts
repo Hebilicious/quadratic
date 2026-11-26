@@ -167,7 +167,9 @@ const OPERATIONS: Readonly<Record<string, string>> = {
   "issue.update": "changed",
   "issue.claim": "claimed",
   "issue.release": "released the claim on",
-  "issue.close": "closed with evidence",
+  "issue.finish": "finished with evidence",
+  // History written before 0.2 names the finish by its old name.
+  "issue.close": "finished with evidence",
   "issue.link": "changed the relations of",
   "git.merged": "saw merged the work of",
   "findings.import": "imported a tool's findings into",

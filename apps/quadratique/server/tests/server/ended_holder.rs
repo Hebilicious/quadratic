@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::support::{Running, Who, start};
 
-/// An issue that `holder` claimed and closed into review, as an agent does before it ends.
+/// An issue that `holder` claimed and finished into review, as an agent does before it ends.
 async fn left_in_review(board: &Running, holder: &Who) -> String {
     board.project("DEM").await;
     let issue = board.issue("Audit the parser").await;
@@ -15,7 +15,7 @@ async fn left_in_review(board: &Running, holder: &Who) -> String {
     board
         .ok(
             holder,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "read every branch of the parser" }),
         )
         .await;
@@ -73,7 +73,7 @@ async fn left_in_progress(board: &Running, holder: &Who) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_agent_that_does_not_hold_the_claim_cannot_move_or_close_it() {
+async fn an_agent_that_does_not_hold_the_claim_cannot_move_or_finish_it() {
     let board = start().await;
     let holder = board.agent("audit");
     let issue = left_in_review(&board, &holder).await;
@@ -90,15 +90,15 @@ async fn an_agent_that_does_not_hold_the_claim_cannot_move_or_close_it() {
             }),
         )
         .await;
-    let closed = board
+    let finished = board
         .failure(
             &other,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "-" }),
         )
         .await;
 
-    for failure in [&moved, &closed] {
+    for failure in [&moved, &finished] {
         assert_eq!(failure["_tag"], "Held", "{failure}");
         assert_eq!(failure["claim"]["holder"]["name"], holder.name());
     }
@@ -177,7 +177,7 @@ async fn any_agent_frees_a_claim_at_a_status_after_review_and_the_issue_keeps_it
     board
         .ok(
             &holder,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "read every branch of the parser" }),
         )
         .await;
@@ -263,10 +263,10 @@ async fn once_freed_an_issue_in_review_is_moved_before_it_is_claimed_again() {
     let claimed_in_review = board
         .failure(&lead, "issue.claim", json!({ "issue": issue }))
         .await;
-    let closed_unclaimed = board
+    let finished_unclaimed = board
         .failure(
             &lead,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "-" }),
         )
         .await;
@@ -286,13 +286,16 @@ async fn once_freed_an_issue_in_review_is_moved_before_it_is_claimed_again() {
         .await;
 
     assert_eq!(claimed_in_review["_tag"], "NotReady", "{claimed_in_review}");
-    assert_eq!(closed_unclaimed["_tag"], "NotClaimed", "{closed_unclaimed}");
+    assert_eq!(
+        finished_unclaimed["_tag"], "NotClaimed",
+        "{finished_unclaimed}"
+    );
     assert_eq!(moved["issue"]["status"], "todo", "{moved}");
     assert_eq!(claimed["issue"]["claim"]["holder"]["name"], lead.name());
 }
 
 /// Every move that `rule 2` names, by `who`, on an issue in progress: the answers of a status
-/// change, a release and a close, in that order.
+/// change, a release and a finish, in that order.
 async fn every_move(board: &Running, who: &Who, issue: &str) -> [Result<Value, Value>; 3] {
     let moved = board
         .call(
@@ -304,14 +307,14 @@ async fn every_move(board: &Running, who: &Who, issue: &str) -> [Result<Value, V
     let released = board
         .call(who, "issue.release", json!({ "issue": issue }))
         .await;
-    let closed = board
+    let finished = board
         .call(
             who,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "-" }),
         )
         .await;
-    [moved, released, closed]
+    [moved, released, finished]
 }
 
 fn assert_held_for_every_move(answers: &[Result<Value, Value>; 3], holder: &Who) {
@@ -323,16 +326,16 @@ fn assert_held_for_every_move(answers: &[Result<Value, Value>; 3], holder: &Who)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_holders_session_closes_moves_and_releases_its_claim_from_another_worktree() {
+async fn the_holders_session_finishes_moves_and_releases_its_claim_from_another_worktree() {
     let board = start().await;
     let holder = in_session(board.agent("audit"), "session-1");
     let issue = left_in_progress(&board, &holder).await;
     let elsewhere = in_session(board.agent("lead"), "session-1");
 
-    let closed = board
+    let finished = board
         .ok(
             &elsewhere,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "checked from lead" }),
         )
         .await;
@@ -351,8 +354,8 @@ async fn the_holders_session_closes_moves_and_releases_its_claim_from_another_wo
         .ok(&elsewhere, "issue.release", json!({ "issue": issue }))
         .await;
 
-    assert_eq!(closed["issue"]["status"], "in-review", "{closed}");
-    let claim = &closed["issue"]["claim"];
+    assert_eq!(finished["issue"]["status"], "in-review", "{finished}");
+    let claim = &finished["issue"]["claim"];
     assert_eq!(claim["holder"]["name"], holder.name(), "{claim}");
     assert_eq!(claim["branch"], "audit", "{claim}");
     assert_eq!(claim["worktree"], holder.worktree(), "{claim}");
@@ -439,16 +442,16 @@ async fn a_human_with_the_holders_harness_and_session_is_the_human_not_the_holde
     actor["harness"] = json!("claude-code");
     actor["session"] = json!("session-1");
 
-    let closed = board
+    let finished = board
         .ok(
             &human,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "checked by the human" }),
         )
         .await;
 
-    assert_eq!(closed["issue"]["status"], "merged", "{closed}");
-    assert!(closed["issue"].get("claim").is_none(), "{closed}");
+    assert_eq!(finished["issue"]["status"], "merged", "{finished}");
+    assert!(finished["issue"].get("claim").is_none(), "{finished}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -572,7 +575,7 @@ async fn an_agent_that_holds_an_issue_assigned_to_the_human_gets_human_only_for_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_human_closing_a_stacked_issue_before_its_base_merges_gets_base_not_merged() {
+async fn the_human_finishing_a_stacked_issue_before_its_base_merges_gets_base_not_merged() {
     let board = start().await;
     board.project("DEM").await;
     let base = board.issue("Base").await;
@@ -585,13 +588,13 @@ async fn the_human_closing_a_stacked_issue_before_its_base_merges_gets_base_not_
         )
         .await;
 
-    let closed = board
+    let finished = board
         .failure(
             &board.human(),
-            "issue.close",
+            "issue.finish",
             json!({ "issue": stacked, "evidence": "checked" }),
         )
         .await;
 
-    assert_eq!(closed["_tag"], "BaseNotMerged", "{closed}");
+    assert_eq!(finished["_tag"], "BaseNotMerged", "{finished}");
 }

@@ -27,7 +27,7 @@ async fn each_issue_capability_returns_a_refusal_as_its_catalog_failure() {
     let failure = board
         .failure(
             &other,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": second, "evidence": "-" }),
         )
         .await;
