@@ -61,6 +61,7 @@ earlier measurements, and the reviewer.
 | Another account that can write a non-sticky **parent** renames a `0700` folder without entering it | confirmed by the reviewer on Linux |
 | A plain Claude Code shell, then `codex sandbox` (default policy), connect to a `0600` socket in the data folder | connects, then fails (loopback TCP fails there too) |
 | The same, measured again in QUA-53 (2026-11-26, Claude Code 2.1.332, codex-cli 0.172.0); and `codex sandbox` with `network_access = true` | connects; `socket(AF_UNIX)` gives `EPERM`; the socket and loopback TCP both connect. In both Codex cases the home policy refuses first: the sandbox's user namespace leaves root unmapped, so `/home` shows as uid 65534 (QUA-84) |
+| Both `codex sandbox` policies again, with the build of QUA-84's first part, `quadratique issue list` | the command tells the overflow uid from an account (no line of `/proc/self/uid_map` maps that uid), says the sandbox hides who owns `/home`, and answers `unavailable` with its MCP tool, exit 4; the home policy still refuses the folder, and under the default policy `socket(AF_UNIX)` succeeds and `connect` gives `EPERM` |
 
 ## What AcidCat gives
 

@@ -598,3 +598,150 @@ fn a_data_folder_this_process_cannot_enter_is_unreachable_for_every_command_and_
         "{served:?}"
     );
 }
+
+/// What `unshare` takes to run a command as Codex's sandbox does: in a user namespace that maps this account to
+/// itself and nothing else, where every folder of root (`/`, `/home`, `/tmp`) shows the kernel's overflow uid. `None`,
+/// saying why, where this machine makes no such namespace; with `QUADRATIQUE_TEST_USER_NAMESPACES=required`, as CI
+/// sets it, that is a failure instead.
+fn mapping_only_this_account() -> Option<[String; 2]> {
+    let prefix = [
+        "--user".to_owned(),
+        format!("--map-user={}", rustix::process::getuid().as_raw()),
+    ];
+    let probe = std::process::Command::new("unshare")
+        .args(&prefix)
+        .arg("true")
+        .output();
+    let missing = match probe {
+        Ok(output) if output.status.success() => return Some(prefix),
+        Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        Err(error) => format!("unshare does not run: {error}"),
+    };
+    let required = std::env::var("QUADRATIQUE_TEST_USER_NAMESPACES").as_deref() == Ok("required");
+    assert!(
+        !required,
+        "QUADRATIQUE_TEST_USER_NAMESPACES=required, and this machine makes no user namespace: {missing}"
+    );
+    println!("skipped: this machine makes no user namespace that maps this account ({missing})");
+    None
+}
+
+/// In a user namespace that does not map root, the owner of a folder above the data folder shows as the overflow uid,
+/// which may be root or another account: the policy still refuses the folder, and every command that would reach the
+/// server answers as for any place it cannot reach the server from, `unavailable` with its MCP tool, and starts
+/// nothing. `serve` is the server itself and refuses as before.
+#[test]
+fn where_a_sandbox_hides_who_owns_the_folders_above_the_home_every_command_is_unavailable_and_starts_nothing()
+ {
+    let Some(prefix) = mapping_only_this_account() else {
+        return;
+    };
+    let home = Home::new();
+    let elsewhere = outside();
+    let repository = Repository::new();
+    let hidden = "this sandbox hides who owns ";
+    let cannot_check =
+        ", so this command cannot check that the data folder is safe to use from here";
+    let in_the_namespace = |directory: &Path| {
+        home.quadratique_at(Path::new("unshare"), directory)
+            .args(&prefix)
+            .args([crate::support::BINARY])
+    };
+
+    let listed = in_the_namespace(elsewhere.path())
+        .args(["issue", "list"])
+        .run();
+    let initialised = in_the_namespace(&repository.root).args(["init"]).run();
+    let status = in_the_namespace(elsewhere.path())
+        .args(["server", "status"])
+        .run();
+    let served = in_the_namespace(elsewhere.path()).args(["serve"]).run();
+    let mut mcp = in_the_namespace(elsewhere.path())
+        .args(["mcp"])
+        .spawn_interactive();
+    mcp.close_stdin();
+    let mcp = mcp.finish();
+
+    for (refused, outcome) in [
+        (&listed, guidance("issue.list")),
+        (&initialised, COMMAND_LINE_ONLY.to_owned()),
+        (&mcp, "Nothing was started.".to_owned()),
+    ] {
+        assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+        let message = message_of(refused);
+        assert!(
+            message.starts_with(&format!(
+                "Cannot reach the Quadratique server from here: {hidden}"
+            )) && message.contains(cannot_check)
+                && message.ends_with(outcome.as_str()),
+            "{message}"
+        );
+    }
+    assert!(mcp.stdout.is_empty(), "{mcp:?}");
+    assert_eq!(status.code, 0, "{status:?}");
+    let status = status.json();
+    assert_eq!(status["reachable"], false, "{status}");
+    assert!(
+        status["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with(hidden) && reason.ends_with(cannot_check)),
+        "{status}"
+    );
+    assert_eq!(served.code, 5, "{served:?}");
+    assert!(
+        served.stderr.contains("\"kind\":\"internal\""),
+        "{served:?}"
+    );
+    assert!(home.servers().is_empty());
+    assert_eq!(entries(home.path()), Vec::<String>::new());
+}
+
+/// Outside a user namespace, a folder above the data folder that the account nobody really owns is refused as any
+/// other account's folder, even though nobody's uid is the kernel's overflow uid.
+#[test]
+#[ignore = "needs `sudo -n` as root, and /tmp; CI runs it with `moon run quadratique-server:test-as-nobody`"]
+fn another_account_that_owns_a_folder_above_the_home_is_refused_even_as_the_overflow_uid() {
+    let folder = traversable_folder();
+    let owned = folder.path().join("nobody");
+    std::fs::create_dir(&owned).expect("a folder");
+    let chowned = std::process::Command::new("sudo")
+        .args(["-n", "chown", "nobody"])
+        .arg(&owned)
+        .status()
+        .expect("sudo runs");
+    assert!(chowned.success(), "root gives the folder to nobody");
+    let nobody =
+        std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&owned).expect("the folder"));
+    let overflow: u32 = std::fs::read_to_string("/proc/sys/kernel/overflowuid")
+        .expect("the overflow uid")
+        .trim()
+        .parse()
+        .expect("a uid");
+    assert_eq!(
+        nobody, overflow,
+        "the account nobody has the overflow uid here"
+    );
+    let elsewhere = outside();
+
+    let refused = std::process::Command::new(crate::support::BINARY)
+        .current_dir(elsewhere.path())
+        .env("QUADRATIQUE_HOME", owned.join("home"))
+        .args(["issue", "list"])
+        .output()
+        .expect("the command runs");
+
+    let refused = Run {
+        code: refused.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&refused.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&refused.stderr).into_owned(),
+    };
+    println!("{refused:?}");
+    assert_eq!(refused.code, 5, "{refused:?}");
+    assert_eq!(
+        message_of(&refused),
+        format!(
+            "another account can replace {}: it belongs to another account (uid {nobody}); ask its owner to give it to you or to root, or set QUADRATIQUE_HOME to a folder that only you and root can change, such as one in your home folder",
+            owned.display()
+        )
+    );
+}

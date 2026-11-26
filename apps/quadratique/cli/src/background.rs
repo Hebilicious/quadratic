@@ -401,14 +401,24 @@ impl Home {
     /// Applies the home policy before anything opens a lock file in the home or starts a server for it, and makes the
     /// home when it is missing.
     pub fn new(paths: Paths) -> Result<Home, LifeError> {
-        let prepared = home::prepare(&paths).map_err(|refusal| match refusal.denied() {
-            Some(error) => LifeError::Unreachable {
-                reason: format!(
-                    "this process cannot use {}: {error}; a sandbox may be blocking it",
-                    paths.database.parent().unwrap_or(Path::new(".")).display()
-                ),
-            },
-            None => LifeError::Refused(refusal.to_string()),
+        let prepared = home::prepare(&paths).map_err(|refusal| {
+            if let Some(error) = refusal.denied() {
+                return LifeError::Unreachable {
+                    reason: format!(
+                        "this process cannot use {}: {error}; a sandbox may be blocking it",
+                        paths.database.parent().unwrap_or(Path::new(".")).display()
+                    ),
+                };
+            }
+            if let Some(entry) = refusal.hidden_owner() {
+                return LifeError::Unreachable {
+                    reason: format!(
+                        "this sandbox hides who owns {}, so this command cannot check that the data folder is safe to use from here",
+                        entry.display()
+                    ),
+                };
+            }
+            LifeError::Refused(refusal.to_string())
         })?;
         Ok(Home { prepared })
     }
