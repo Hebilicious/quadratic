@@ -250,10 +250,13 @@ impl Pairing {
     /// A new bearer: every saved one stops working, and the codes that wait are dropped with their bootstrap files.
     pub fn rotate(&self) -> std::io::Result<()> {
         let bearer = Secret::random()?;
+        // One lock around the file and the memory: two rotations at once cannot leave them on different tokens.
+        let mut current = self.bearer.write().unwrap_or_else(PoisonError::into_inner);
         if let Lifetime::Folder(file) = &self.lifetime {
             write_token(file, &bearer)?;
         }
-        *self.bearer.write().unwrap_or_else(PoisonError::into_inner) = bearer;
+        *current = bearer;
+        drop(current);
         for dropped in self.pending().drain(..) {
             if let Some(file) = dropped.bootstrap {
                 let _ = std::fs::remove_file(file);
@@ -859,6 +862,34 @@ mod tests {
             Optional,
             "QUA-58 requires the bearer, not this step"
         );
+    }
+
+    /// Two sign-outs at once: each makes a token, writes the file and sets memory. The file and the memory must end on
+    /// the same token, or browsers paired after the second sign-out are signed out by the next restart.
+    #[test]
+    fn rotations_at_once_leave_the_file_and_the_memory_on_the_same_token() {
+        let fixture = Fixture::new(false);
+        let file = fixture.folder.path().join(TOKEN_FILE);
+
+        for round in 0..300 {
+            let rotating: Vec<_> = (0..4)
+                .map(|_| {
+                    let pairing = Arc::clone(&fixture.pairing);
+                    std::thread::spawn(move || pairing.rotate())
+                })
+                .collect();
+            for rotation in rotating {
+                rotation
+                    .join()
+                    .expect("the rotating thread")
+                    .expect("a rotation");
+            }
+            let on_disk = std::fs::read_to_string(&file).expect("the token file");
+            assert!(
+                fixture.pairing.admits(on_disk.trim()),
+                "round {round}: the file and the memory hold different tokens"
+            );
+        }
     }
 
     #[test]
