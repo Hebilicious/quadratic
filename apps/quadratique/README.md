@@ -257,9 +257,12 @@ forwarded socket can call every command as you, with no token.
 ## Install from a release
 
 Each [GitHub release](https://github.com/Hebilicious/quadratique/releases) has a prebuilt binary,
-with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.34 or newer and
-`libgcc_s.so.1` (Ubuntu 22.04, Debian 12, RHEL 9, Fedora 35 or later have both), and no other
-tool: no Rust, Node.js or proto.
+with the web app inside it, for Linux and macOS, on x86-64 and on arm64. It needs no other tool:
+no Rust, Node.js or proto.
+
+- Linux: glibc 2.34 or newer and `libgcc_s.so.1` (Ubuntu 22.04, Debian 12, RHEL 9, Fedora 35 or
+  later have both).
+- macOS: macOS 11 or newer, on Apple silicon or Intel.
 
 Each platform has one archive, named for the version and the target, and its SHA-256 file:
 
@@ -267,15 +270,18 @@ Each platform has one archive, named for the version and the target, and its SHA
 |---|---|
 | Linux x86-64 | `quadratique-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux arm64 | `quadratique-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `quadratique-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `quadratique-<version>-x86_64-apple-darwin.tar.gz` |
 
 The archive has one folder, `quadratique-<version>-<target>/`, with the binary in `bin/quadratique`,
 the script `install.sh`, this file and the license. `install.sh` copies the binary you give it to
 `$XDG_BIN_HOME/quadratique`, or `~/.local/bin/quadratique`, as "Install" does. Download, check and
-install a release (here 0.1.0 for x86-64; use `aarch64` for arm64):
+install a release (here 0.1.0; set `target` to your platform's, from the table):
 
 ```sh
 version=0.1.0
-archive=quadratique-$version-x86_64-unknown-linux-gnu
+target=x86_64-unknown-linux-gnu
+archive=quadratique-$version-$target
 curl -fLO "https://github.com/Hebilicious/quadratique/releases/download/v$version/$archive.tar.gz"
 curl -fLO "https://github.com/Hebilicious/quadratique/releases/download/v$version/$archive.tar.gz.sha256"
 sha256sum -c "$archive.tar.gz.sha256"
@@ -283,13 +289,53 @@ tar -xzf "$archive.tar.gz"
 sh "$archive/install.sh" "$archive/bin/quadratique"
 ```
 
+On macOS, check the archive with `shasum -a 256 -c "$archive.tar.gz.sha256"` instead of
+`sha256sum` (macOS has `shasum`), and use `target=aarch64-apple-darwin` on Apple silicon or
+`target=x86_64-apple-darwin` on Intel (`uname -m` prints `arm64` or `x86_64`). `~/.local/bin` is
+not on a Mac's `PATH` by default: add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile`, or
+set `XDG_BIN_HOME` to a folder that is on it. Installing starts nothing; to have the server running
+after a reboot, see "Keep the server up after a reboot" (a LaunchAgent).
+
 To upgrade, run `quadratique upgrade` (see "Upgrade"). To uninstall, see "Uninstall".
+
+### macOS and Gatekeeper
+
+The macOS binaries are not signed with an Apple Developer ID and not notarized. macOS checks such a
+program only when the file carries the quarantine mark (the extended attribute
+`com.apple.quarantine`), which a browser sets on what it downloads. `curl` sets no such mark, so
+the commands above meet no Gatekeeper prompt.
+
+`install.sh` writes the binary into a new file, so the installed `quadratique` carries no
+quarantine mark even when you downloaded the archive with a browser (the release workflow checks
+this on its macOS runners). Only the unpacked `bin/quadratique` itself can carry it, for example
+when Finder unpacked a downloaded archive. Running that file can then stop with a message that
+Apple cannot check "quadratique" for malicious software. Install it with `install.sh` and run the
+installed copy, or remove the mark from that file:
+
+```sh
+xattr -d com.apple.quarantine "$archive/bin/quadratique"
+```
+
+System Settings also lets it run once you tried to open it: Privacy & Security, then "Open
+Anyway" (see Apple's [Open a Mac app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)).
+
+### WSL
+
+Under WSL 2, a Linux distribution such as Ubuntu runs Linux binaries: install the Linux archive of
+your machine's architecture, with the commands above. WSL gives no systemd user manager unless
+`/etc/wsl.conf` turns systemd on, which Quadratique does not need: the first command starts the
+server. The difference is the browser: it runs on the Windows side, and reaches the web app at
+`http://127.0.0.1:<port>/` only through WSL's forwarding of localhost to Windows, which the default
+networking mode does. That has not been measured with Quadratique, and `quadratique ui --open`
+needs an opener in WSL (`xdg-open`); otherwise open the address that `quadratique ui` prints in a
+Windows browser. WSL is not tested in CI.
 
 ### With mise
 
 [mise](https://mise.jdx.dev) installs the binary from the GitHub releases. It picks the archive
 for your platform from its name, checks it against the SHA-256 file, and unpacks the archive's
-folder. It puts that folder's `bin/` on your `PATH`, so `quadratique` is the only command it adds:
+folder. It puts that folder's `bin/` on your `PATH`, so `quadratique` is the only command it adds.
+On a Mac it picks the `apple-darwin` archive of your processor:
 
 ```sh
 mise use -g github:Hebilicious/quadratique
@@ -310,8 +356,8 @@ cargo install quadratique
 ```
 
 This builds from source, so it needs Rust, a C compiler and the zlib development files (the store
-engine is compiled from C; on Debian or Ubuntu: `sudo apt install build-essential zlib1g-dev`).
-That is the whole install.
+engine is compiled from C; on Debian or Ubuntu: `sudo apt install build-essential zlib1g-dev`; on
+macOS, Xcode's command line tools, `xcode-select --install`, have both). That is the whole install.
 
 ## Set up a repository
 
@@ -1010,22 +1056,29 @@ runs on every push to `main`:
 3. A job that checks out nothing names the release to finish: the release whose tag is `v` and
    the version that `.release-please-manifest.json` says at the pushed commit, found by its exact
    tag, even when release-please failed after it made the draft. It builds a draft only when the
-   tag points at the commit that was released. A published release with its four files needs
+   tag points at the commit that was released. A published release with its eight files needs
    no build; a published release without them fails this job and is not changed. For a draft or
    a complete release, the job also names the commit to publish the crates from: the commit that
    the tag points at, which must be the commit that the release records as its target. A public
    release whose tag was moved fails this job, and nothing is published.
 4. One job per platform checks out that commit by its SHA, checks that the tag points at it,
-   builds the web app and the release binary with it inside on the oldest hosted Ubuntu (22.04),
-   and keeps the archive and its SHA-256 file as workflow artifacts. `install/package.sh` makes
-   the archive. The job prints the libraries and the newest glibc that the binary needs. It holds
-   no token.
-5. A last job, which checks out nothing and runs no project code, checks that the four files are
+   builds the web app and the release binary with it inside, and keeps the archive and its SHA-256
+   file as workflow artifacts. Each platform builds on a hosted runner of its own: Linux x86-64 on
+   `ubuntu-22.04` and arm64 on `ubuntu-22.04-arm` (the oldest hosted Ubuntu, glibc 2.35), macOS
+   Apple silicon on `macos-15` and Intel on `macos-15-intel`, both for macOS 11 and newer
+   (`MACOSX_DEPLOYMENT_TARGET`). The workflow's `TARGETS` lists the four targets, and every job
+   that counts a release's files reads it. `install/package.sh` makes the archive, with GNU tar on
+   Linux and bsdtar on macOS. The job prints the libraries and the newest glibc, or the oldest
+   macOS, that the binary needs, then installs the archive as a person does with
+   `install/try-archive.sh`: in an empty home, the installed binary gives its version, serves the
+   web app and answers commands; on macOS the archive is first marked as a browser download, and
+   the installed binary must carry no quarantine mark. It holds no token.
+5. A last job, which checks out nothing and runs no project code, checks that the eight files are
    there and that each archive matches its SHA-256 file. It works on the release by its ID and
    changes files only while the release is a draft: it removes any file whose name or digest is
-   not one of the four, uploads the missing ones, checks the four digests, checks the tag again,
+   not one of the eight, uploads the missing ones, checks the eight digests, checks the tag again,
    and only then publishes the release. On a release that is already public it changes nothing:
-   it succeeds when the four digests match and fails otherwise.
+   it succeeds when the eight digests match and fails otherwise.
 6. Once the release is public, or at once for a release that was already complete, three jobs
    publish the crates that crates.io lacks, `quadratique-server` then `quadratique`, so that
    crates.io never holds back the release:
@@ -1075,7 +1128,7 @@ crates.io index and a fake `cargo`. Both run locally too, with no token.
 
 #### When a release stops half-way
 
-The release stays a draft until its publish job has attached and checked the four files, so a
+The release stays a draft until its publish job has attached and checked the eight files, so a
 failure never leaves a public release without its archives. The crates are published after the
 release, so a crates.io failure never holds back the release's files.
 
@@ -1105,17 +1158,18 @@ release, so a crates.io failure never holds back the release's files.
   unpublished unless the owner decides otherwise; the next release's crates are published as
   usual.
 - **By hand**, if the workflow cannot run, in this order:
-  1. On each platform: `git checkout refs/tags/v<version>`, `moon run quadratique-web:build`,
+  1. On each platform (a Linux machine of each architecture, a Mac of each processor):
+     `git checkout refs/tags/v<version>`, `moon run quadratique-web:build`,
      then `sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target`
      and `sh apps/quadratique/install/package.sh <binary> <version> <target triple> <folder>`.
-  2. Put the four files in one folder and check them there: `sha256sum --check --strict *.sha256`.
+  2. Put the eight files in one folder and check them there: `sha256sum --check --strict *.sha256`.
   3. Check that the release is still a draft:
      `gh release view v<version> --json isDraft --jq .isDraft` must print `true`. If it prints
      `false`, stop: do not change a public release's files.
-  4. `gh release upload v<version> <the four files> --clobber`.
+  4. `gh release upload v<version> <the eight files> --clobber`.
   5. Check the attached digests against the local files:
      `gh release view v<version> --json assets --jq '.assets[] | "\(.name) \(.digest)"'` must
-     list exactly the four files, each with `sha256:` and the hash that `sha256sum` prints for it.
+     list exactly the eight files, each with `sha256:` and the hash that `sha256sum` prints for it.
   6. Only then: `gh release edit v<version> --draft=false`.
 
 ### The crates
@@ -1156,7 +1210,7 @@ What a maintainer does for a release, and what happens on its own:
    them releases, release-please opens or updates the release pull request on its own.
 2. Review and merge the release pull request. The tag, the draft release, the archives and the
    publication of the release follow on their own; check that the run of the workflow
-   `Release` is green and that the release lists four files.
+   `Release` is green and that the release lists eight files.
 
 The same run publishes both crates to crates.io (step 6 of "Releases"): no token from a person
 is needed. Check that its job "publish the crates to crates.io" is green and that crates.io shows
