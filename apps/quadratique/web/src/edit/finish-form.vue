@@ -9,14 +9,14 @@ const props = defineProps<{ readonly editor: IssueEditor; readonly focus: boolea
 
 const draft = ref("");
 const edit = useEdit({
-  run: async (_, signal) => await props.editor.close(draft.value.trim(), signal),
+  run: async (_, signal) => await props.editor.finish(draft.value.trim(), signal),
   revision: () => props.editor.revision(),
   refresh: () => {
     props.editor.refresh();
   },
 });
 const { actor, phase } = edit;
-const fieldId = `close-${Math.random().toString(36).slice(2)}`;
+const fieldId = `finish-${Math.random().toString(36).slice(2)}`;
 
 async function open(): Promise<void> {
   actor.send({ type: "start" });
@@ -51,11 +51,11 @@ function onKey(event: KeyboardEvent): void {
     cancel();
   } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
-    close();
+    finish();
   }
 }
 
-function close(): void {
+function finish(): void {
   if (draft.value.trim().length === 0) {
     return;
   }
@@ -64,10 +64,10 @@ function close(): void {
 </script>
 
 <template>
-  <section class="field close-form" aria-label="Close with evidence">
+  <section class="field finish-form" aria-label="Finish with evidence">
     <div class="field-head">
-      <h3 class="field-label">Close with evidence</h3>
-      <button v-if="phase === 'idle'" class="ghost-button" type="button" @click="open">Close…</button>
+      <h3 class="field-label">Finish with evidence</h3>
+      <button v-if="phase === 'idle'" class="ghost-button" type="button" @click="open">Finish…</button>
     </div>
     <textarea
       v-if="phase !== 'idle'"
@@ -89,8 +89,8 @@ function close(): void {
         class="primary-button"
         type="button"
         :disabled="phase === 'saving' || draft.trim().length === 0"
-        @click="close"
-      >{{ phase === "saving" ? "Closing…" : "Close the issue" }}</button>
+        @click="finish"
+      >{{ phase === "saving" ? "Finishing…" : "Finish the issue" }}</button>
       <button class="ghost-button" type="button" :disabled="phase === 'saving'" @click="cancel">Cancel</button>
       <span class="field-hint">It moves to the merge status of the workflow, and the claim ends.</span>
     </div>

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::support::{Home, outside};
+use crate::support::{Home, free, outside};
 
 fn status(home: &Home) -> Value {
     home.quadratique(outside().path())
@@ -164,7 +164,7 @@ fn the_lock_tells_a_starting_server_from_a_stopped_home() {
     let socket = UnixListener::bind(&path).expect("a socket not yet private");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).expect("mode 0660");
     let not_ready_while_held = status(&home);
-    drop(held);
+    free(held);
     let not_ready_while_free = status(&home);
     drop(socket);
 

@@ -128,3 +128,81 @@ fn rule_4_the_skill_says_the_words_are_what_the_human_said_to_the_agent_in_this_
         .expect("the skill's line about the human's words");
     assert!(line.contains("said to you in this session"), "{line}");
 }
+
+#[test]
+fn rule_4_the_old_name_issue_close_takes_the_humans_words_as_issue_finish_does() {
+    let home = Home::new();
+    let repository = Repository::new();
+    let worktree = repository.worktree("audit");
+    home.quadratique(&repository.root)
+        .args(["project", "create", "--key", "DEM", "--name", "Demo"])
+        .run()
+        .ok();
+    let decision = |title: &str| {
+        let issue = home
+            .quadratique(&repository.root)
+            .args(["create", "--title", title, "--acceptance", "It is done."])
+            .run()
+            .ok()["issue"]["id"]
+            .as_str()
+            .expect("an issue id")
+            .to_owned();
+        home.quadratique(&worktree)
+            .env("CLAUDECODE", "1")
+            .args(["claim", "--issue", &issue])
+            .run()
+            .ok();
+        let revision = home
+            .quadratique(&repository.root)
+            .args(["show", "--issue", &issue])
+            .run()
+            .ok()["issue"]["revision"]
+            .to_string();
+        home.quadratique(&repository.root)
+            .args([
+                "issue",
+                "update",
+                "--issue",
+                &issue,
+                "--revision",
+                &revision,
+                "--assignee",
+                r#"{"kind":"human"}"#,
+            ])
+            .run()
+            .ok();
+        issue
+    };
+    let finish = |verb: &str, issue: &str| {
+        home.quadratique(&worktree)
+            .env("CLAUDECODE", "1")
+            .args([
+                "issue",
+                verb,
+                "--issue",
+                issue,
+                "--evidence",
+                "read it",
+                "--humanWords",
+                WORDS,
+                "--confidence",
+                "high",
+            ])
+            .run()
+            .ok()
+    };
+
+    let closed = finish("close", &decision("Through the old name"));
+    let finished = finish("finish", &decision("Through the new name"));
+
+    for answer in [&closed, &finished] {
+        assert_eq!(answer["issue"]["status"], "in-review", "{answer}");
+        let note = answer["issue"]["notes"][0]["text"]
+            .as_str()
+            .expect("a note");
+        assert!(
+            note.contains(&format!("with high confidence: \"{WORDS}\"")),
+            "{note}"
+        );
+    }
+}

@@ -260,7 +260,8 @@ async fn held_then_assigned_to_the_human(board: &Running, holder: &crate::suppor
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rule_4_an_agent_that_holds_an_issue_assigned_to_the_human_closes_it_on_the_humans_words() {
+async fn rule_4_an_agent_that_holds_an_issue_assigned_to_the_human_finishes_it_on_the_humans_words()
+{
     let board = start().await;
     let holder = board.agent("audit");
     let issue = held_then_assigned_to_the_human(&board, &holder).await;
@@ -268,7 +269,7 @@ async fn rule_4_an_agent_that_holds_an_issue_assigned_to_the_human_closes_it_on_
     let left = board
         .ok(
             &holder,
-            "issue.close",
+            "issue.finish",
             json!({
                 "issue": issue,
                 "evidence": "read every branch",
@@ -283,7 +284,7 @@ async fn rule_4_an_agent_that_holds_an_issue_assigned_to_the_human_closes_it_on_
     let closed = board
         .ok(
             &holder,
-            "issue.close",
+            "issue.finish",
             json!({
                 "issue": issue,
                 "evidence": "read every branch",
@@ -302,7 +303,7 @@ async fn rule_4_an_agent_that_holds_an_issue_assigned_to_the_human_closes_it_on_
         "{closed}"
     );
     let change = last_change(&board, &issue).await;
-    assert_eq!(change["operation"], "issue.close", "{change}");
+    assert_eq!(change["operation"], "issue.finish", "{change}");
     assert_eq!(
         change["reason"],
         format!("The human's words, high confidence: \"{WORDS}\""),
@@ -378,7 +379,7 @@ async fn rule_4_on_an_issue_not_assigned_to_the_human_the_words_change_nothing()
     let not_claimed = board
         .failure(
             &lead,
-            "issue.close",
+            "issue.finish",
             json!({
                 "issue": unclaimed,
                 "evidence": "-",
@@ -474,7 +475,7 @@ async fn rule_4_at_medium_a_refusal_after_human_only_keeps_its_place() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rule_4_several_issues_never_close_on_one_quote() {
+async fn rule_4_several_issues_never_finish_on_one_quote() {
     let board = start().await;
     let holder = board.agent("audit");
     let issue = held_then_assigned_to_the_human(&board, &holder).await;
@@ -482,7 +483,7 @@ async fn rule_4_several_issues_never_close_on_one_quote() {
     let refused = board
         .client(&holder)
         .invoke(
-            "issues.close",
+            "issues.finish",
             &json!({
                 "issue": [issue],
                 "evidence": "read every branch",

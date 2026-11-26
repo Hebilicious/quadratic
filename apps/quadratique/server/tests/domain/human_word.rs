@@ -65,7 +65,7 @@ fn rule_4_with_high_confidence_an_agent_moves_an_issue_assigned_to_the_human() {
         assert_eq!(change.claim, ClaimAfter::Ended, "{}", board.label);
 
         let closed = decide_on_word(
-            &Event::Close,
+            &Event::Finish,
             &held_decision(&board),
             &agent(),
             &board.project,
@@ -100,7 +100,7 @@ fn rule_4_with_medium_or_low_confidence_nothing_moves_and_the_issue_is_left_for_
                 (update_to(board.done), decision(&board)),
                 (assignee_only(), decision(&board)),
                 (Event::Release, held_decision(&board)),
-                (Event::Close, held_decision(&board)),
+                (Event::Finish, held_decision(&board)),
             ];
             for (event, issue) in calls {
                 assert_eq!(
@@ -121,7 +121,7 @@ fn rule_4_without_the_words_or_the_confidence_an_agent_gets_human_only() {
             (update_to(board.done), decision(&board)),
             (assignee_only(), decision(&board)),
             (Event::Release, held_decision(&board)),
-            (Event::Close, held_decision(&board)),
+            (Event::Finish, held_decision(&board)),
         ];
         for (event, issue) in calls {
             assert_eq!(
@@ -187,7 +187,7 @@ fn rule_4_with_high_confidence_the_rules_after_human_only_still_apply() {
             claimed(board.issue(board.in_progress), claim_of(&other_agent())),
             Assignee::Human,
         );
-        for event in [update_to(board.in_review), Event::Close, Event::Release] {
+        for event in [update_to(board.in_review), Event::Finish, Event::Release] {
             assert!(
                 matches!(
                     decide_on_word(
@@ -205,7 +205,7 @@ fn rule_4_with_high_confidence_the_rules_after_human_only_still_apply() {
         }
         assert_eq!(
             decide_on_word(
-                &Event::Close,
+                &Event::Finish,
                 &decision(&board),
                 &agent(),
                 &board.project,
@@ -253,7 +253,7 @@ fn rule_4_at_medium_or_low_a_refusal_after_human_only_keeps_its_place() {
             Assignee::Human,
         );
         for confidence in [Confidence::Medium, Confidence::Low] {
-            for event in [update_to(board.in_review), Event::Close, Event::Release] {
+            for event in [update_to(board.in_review), Event::Finish, Event::Release] {
                 assert!(
                     matches!(
                         decide_on_word(
@@ -271,7 +271,7 @@ fn rule_4_at_medium_or_low_a_refusal_after_human_only_keeps_its_place() {
             }
             assert_eq!(
                 decide_on_word(
-                    &Event::Close,
+                    &Event::Finish,
                     &decision(&board),
                     &agent(),
                     &board.project,
@@ -297,9 +297,9 @@ fn rule_4_on_an_issue_not_assigned_to_the_human_the_words_change_nothing() {
             for (event, issue) in [
                 (update_to(board.todo), &held_by_another),
                 (Event::Release, &held_by_another),
-                (Event::Close, &unclaimed),
+                (Event::Finish, &unclaimed),
                 (update_to(board.in_review), &own),
-                (Event::Close, &own),
+                (Event::Finish, &own),
             ] {
                 assert_eq!(
                     decide_on_word(&event, issue, &agent(), &board.project, Some(confidence)),

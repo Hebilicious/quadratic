@@ -83,7 +83,7 @@ impl Client {
 }
 
 #[test]
-fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_work() {
+fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_finishes_seeded_work() {
     let home = Home::new();
     let repository = Repository::new();
     let worktree = repository.worktree("tooling");
@@ -136,6 +136,14 @@ fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_
             .starts_with("token.")),
         "an agent's MCP tools include a token capability: {listed}"
     );
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        names.contains(&"issue.finish") && !names.contains(&"issue.close"),
+        "an agent's MCP tools offer the old name, or lack the new one: {names:?}"
+    );
     for tool in tools {
         assert!(
             tool.get("outputSchema").is_none(),
@@ -147,7 +155,7 @@ fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_
     let instructions = agent.tool("workspace.instructions", json!({}));
     assert_eq!(instructions["project"], "MCP");
     let text = instructions["text"].as_str().expect("a text");
-    for command in ["ready", "show", "claim", "close", "release"] {
+    for command in ["ready", "show", "claim", "finish", "release"] {
         assert!(
             text.contains(&format!("`quadratique {command}")),
             "the instructions do not name `quadratique {command}`: {text}"
@@ -165,7 +173,7 @@ fn an_agent_over_mcp_reads_its_instructions_then_finds_claims_and_closes_seeded_
     assert_eq!(claimed["issue"]["claim"]["holder"]["name"], "agent@tooling");
 
     agent.tool(
-        "issue.close",
+        "issue.finish",
         json!({ "issue": seeded, "evidence": "cargo test: 3 passed" }),
     );
 
@@ -219,7 +227,7 @@ fn rule_4_an_agent_over_mcp_gives_the_humans_words_on_every_move_that_human_only
 
     let listed = agent.request("tools/list", json!({}));
     let tools = listed["result"]["tools"].as_array().expect("the tools");
-    for name in ["issue.update", "issue.release", "issue.close"] {
+    for name in ["issue.update", "issue.release", "issue.finish"] {
         let tool = tools
             .iter()
             .find(|tool| tool["name"] == name)
@@ -323,7 +331,7 @@ fn a_session_started_in_the_main_checkout_claims_for_a_worktree_it_names_and_the
         "{again}"
     );
     let closed = agent.tool(
-        "issue.close",
+        "issue.finish",
         json!({ "issue": issue, "evidence": "cargo test: 3 passed" }),
     );
     assert_eq!(

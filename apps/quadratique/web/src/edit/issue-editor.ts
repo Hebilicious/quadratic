@@ -16,14 +16,14 @@ export interface IssueEditor {
   readonly update: (patch: IssuePatch, base: number, signal: AbortSignal) => Promise<unknown>;
   readonly link: (change: LinkChange, signal: AbortSignal) => Promise<unknown>;
   readonly release: (signal: AbortSignal) => Promise<unknown>;
-  readonly close: (evidence: string, signal: AbortSignal) => Promise<unknown>;
+  readonly finish: (evidence: string, signal: AbortSignal) => Promise<unknown>;
 }
 
 export function issueEditor(options: {
   readonly id: string;
   readonly detail: DetailActor;
   readonly revision: () => number;
-  readonly quadratique: Pick<Quadratique, "update" | "link" | "release" | "close">;
+  readonly quadratique: Pick<Quadratique, "update" | "link" | "release" | "finish">;
   readonly settle: (issues: readonly IssueSummary[]) => void;
 }): IssueEditor {
   const { id, detail, quadratique, settle } = options;
@@ -46,8 +46,8 @@ export function issueEditor(options: {
     release: async (signal) => {
       settle([await quadratique.release(id, signal)]);
     },
-    close: async (evidence, signal) => {
-      settle([await quadratique.close({ issue: id, evidence }, signal)]);
+    finish: async (evidence, signal) => {
+      settle([await quadratique.finish({ issue: id, evidence }, signal)]);
     },
   };
 }

@@ -105,7 +105,7 @@ enum Request {
         reason: Option<String>,
         word: Option<HumanWord>,
     },
-    Close {
+    Finish {
         evidence: String,
         word: Option<HumanWord>,
     },
@@ -116,7 +116,7 @@ impl Request {
         match self {
             Request::Claim { .. } => "issue.claim",
             Request::Release { .. } => "issue.release",
-            Request::Close { .. } => "issue.close",
+            Request::Finish { .. } => FINISH,
         }
     }
 
@@ -128,13 +128,13 @@ impl Request {
                 worktree: worktree.clone(),
             },
             Request::Release { .. } => Event::Release,
-            Request::Close { .. } => Event::Close,
+            Request::Finish { .. } => Event::Finish,
         }
     }
 
     fn evidence(&self) -> Option<&str> {
         match self {
-            Request::Close { evidence, .. } => Some(evidence),
+            Request::Finish { evidence, .. } => Some(evidence),
             Request::Claim { .. } | Request::Release { .. } => None,
         }
     }
@@ -142,13 +142,13 @@ impl Request {
     fn reason(&self) -> Option<&str> {
         match self {
             Request::Release { reason, .. } => reason.as_deref(),
-            Request::Claim { .. } | Request::Close { .. } => None,
+            Request::Claim { .. } | Request::Finish { .. } => None,
         }
     }
 
     fn word(&self) -> Option<&HumanWord> {
         match self {
-            Request::Release { word, .. } | Request::Close { word, .. } => word.as_ref(),
+            Request::Release { word, .. } | Request::Finish { word, .. } => word.as_ref(),
             Request::Claim { .. } => None,
         }
     }
@@ -346,19 +346,25 @@ pub(super) fn release()
     )
 }
 
+/// The operation that a finish writes, called by its name or by `close`, its name before 0.2.
+/// History written before the rename holds `issue.close`.
+const FINISH: &str = "issue.finish";
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CloseInput {
+pub(super) struct FinishInput {
     issue: String,
     evidence: String,
     human_words: Option<String>,
     confidence: Option<Confidence>,
 }
 
-pub(super) fn close() -> CapabilityDefinition<Context, CloseInput, IssueAnswer<Issue>, Value> {
-    capability::<CloseInput, IssueAnswer<Issue>>("issue.close").run(|input, call| async move {
+pub(super) fn finish_one(
+    id: &'static str,
+) -> CapabilityDefinition<Context, FinishInput, IssueAnswer<Issue>, Value> {
+    capability::<FinishInput, IssueAnswer<Issue>>(id).run(|input, call| async move {
         let caller = &call.context().caller;
-        let request = Request::Close {
+        let request = Request::Finish {
             evidence: input.evidence,
             word: HumanWord::given(caller, input.human_words, input.confidence),
         };
@@ -376,38 +382,41 @@ pub(super) fn close() -> CapabilityDefinition<Context, CloseInput, IssueAnswer<I
 }
 
 #[derive(Deserialize)]
-pub(super) struct CloseSeveralInput {
+pub(super) struct FinishSeveralInput {
     issue: Vec<String>,
     evidence: String,
 }
 
 #[derive(Serialize)]
-pub(super) struct ClosedSeveral {
+pub(super) struct FinishedSeveral {
     items: Vec<IssueSummary>,
 }
 
-pub(super) fn close_several()
--> CapabilityDefinition<Context, CloseSeveralInput, ClosedSeveral, Value> {
-    capability::<CloseSeveralInput, ClosedSeveral>("issues.close").run(|input, call| async move {
-        finish(close_issues(call.context(), input.issue, input.evidence).await)
+pub(super) fn finish_several(
+    id: &'static str,
+    refusal: &'static str,
+) -> CapabilityDefinition<Context, FinishSeveralInput, FinishedSeveral, Value> {
+    capability::<FinishSeveralInput, FinishedSeveral>(id).run(move |input, call| async move {
+        finish(finish_issues(call.context(), input.issue, input.evidence, refusal).await)
     })
 }
 
-/// Closes each issue in order inside one write, so that a refusal of any of them changes
+/// Finishes each issue in order inside one write, so that a refusal of any of them changes
 /// nothing.
-async fn close_issues(
+async fn finish_issues(
     context: &Context,
     ids: Vec<String>,
     evidence: String,
-) -> Result<ClosedSeveral, Refused> {
+    refusal: &'static str,
+) -> Result<FinishedSeveral, Refused> {
     let caller = context.caller.clone();
     let written = context
-        .write("issue.close", None, {
+        .write(FINISH, None, {
             let ids = ids.clone();
             move |tx| {
                 for id in &ids {
-                    close_in(tx, id, &caller, &evidence)
-                        .map_err(|refused| not_closed(id, refused))?;
+                    finish_in(tx, id, &caller, &evidence)
+                        .map_err(|refused| not_finished(refusal, id, refused))?;
                 }
                 ids.iter()
                     .map(|id| board::summary(tx, id, &caller))
@@ -416,7 +425,7 @@ async fn close_issues(
         })
         .await?;
     let Some(commit) = written.commit else {
-        return Ok(ClosedSeveral {
+        return Ok(FinishedSeveral {
             items: written.value,
         });
     };
@@ -428,23 +437,23 @@ async fn close_issues(
                 .collect::<Result<Vec<_>, _>>()
         })
         .await?;
-    Ok(ClosedSeveral { items })
+    Ok(FinishedSeveral { items })
 }
 
-fn close_in(tx: &mut Tx<'_>, id: &str, caller: &Caller, evidence: &str) -> Result<(), Refused> {
+fn finish_in(tx: &mut Tx<'_>, id: &str, caller: &Caller, evidence: &str) -> Result<(), Refused> {
     let record = board::issue(tx, id)?;
     let project = model::domain_project(&board::project(tx, &record.project)?)?;
     let issue = Board::load(tx)?.issue(&record)?;
-    if let Outcome::Changed(change) = decide(&Event::Close, &issue, caller, &project)? {
+    if let Outcome::Changed(change) = decide(&Event::Finish, &issue, caller, &project)? {
         apply(tx, id, &change, Some(evidence))?;
     }
     Ok(())
 }
 
-fn not_closed(id: &str, refused: Refused) -> Refused {
+fn not_finished(tag: &str, id: &str, refused: Refused) -> Refused {
     match refused {
         Refused::Failure(failure) => Refused::Failure(json!({
-            "_tag": "NotClosed",
+            "_tag": tag,
             "issue": id,
             "failure": failure,
         })),

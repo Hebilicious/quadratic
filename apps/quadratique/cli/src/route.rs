@@ -7,6 +7,17 @@ const HELP_FLAGS: [&str; 2] = ["--help", "-h"];
 const VERSION_FLAGS: [&str; 2] = ["--version", "-v"];
 const OUTPUT_FLAG: &str = "--json";
 
+/// The capabilities that 0.2 renamed, by their old name. The old names still answer, until the
+/// release after 0.2.
+const RENAMED: [(&str, &str); 2] = [
+    ("issue.close", "issue.finish"),
+    ("issues.close", "issues.finish"),
+];
+
+/// What a command called by an old name adds on standard error, after its answer.
+pub const RENAMED_POINTER: &str =
+    "quadratique: `close` is now `finish`; `close` goes away in the release after 0.2.";
+
 pub struct Words {
     server_words: BTreeSet<String>,
     aliases: BTreeMap<String, String>,
@@ -86,15 +97,31 @@ impl Words {
         }
     }
 
-    pub fn mcp_tool(&self, args: &[String]) -> McpTool {
+    /// Whether the command calls a capability by the name it had before 0.2.
+    pub fn renamed(&self, args: &[String]) -> bool {
+        self.capability(args)
+            .ok()
+            .flatten()
+            .is_some_and(|id| RENAMED.iter().any(|(old, _)| *old == id))
+    }
+
+    /// The capability that the command calls; `Err` for a command that calls none.
+    fn capability(&self, args: &[String]) -> Result<Option<String>, McpTool> {
         let words = command_words(args);
-        let capability = match words[..] {
+        Ok(match words[..] {
             [] => self.default.clone(),
-            ["list" | "watch", ..] => return McpTool::Absent,
+            ["list" | "watch", ..] => return Err(McpTool::Absent),
             ["call", id, ..] => Some(id.to_owned()),
             [first, ..] if self.aliases.contains_key(first) => self.aliases.get(first).cloned(),
             [noun, verb, ..] => Some(format!("{noun}.{verb}")),
             _ => None,
+        })
+    }
+
+    pub fn mcp_tool(&self, args: &[String]) -> McpTool {
+        let capability = match self.capability(args) {
+            Ok(capability) => capability.map(|id| new_name(&id)),
+            Err(answer) => return answer,
         };
         match capability {
             Some(id) if self.mcp_tools.contains(&id) => McpTool::Offered(id),
@@ -111,8 +138,16 @@ impl Words {
     }
 }
 
-/// A command-line capability over several issues, such as `issues.close`, has an MCP tool for
-/// one issue in its place, such as `issue.close`.
+fn new_name(id: &str) -> String {
+    RENAMED
+        .iter()
+        .find(|(old, _)| *old == id)
+        .map_or(id, |(_, new)| new)
+        .to_owned()
+}
+
+/// A command-line capability over several issues, such as `issues.finish`, has an MCP tool for
+/// one issue in its place, such as `issue.finish`.
 fn one_issue(id: &str) -> String {
     match id.strip_prefix("issues.") {
         Some(verb) => format!("issue.{verb}"),

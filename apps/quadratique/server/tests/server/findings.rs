@@ -507,7 +507,7 @@ async fn a_reopened_issue_keeps_evidence_that_an_agent_wrote_after_the_import_fi
     board
         .ok(
             &worker,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": id, "evidence": "Reworded the span; cargo test passes." }),
         )
         .await;

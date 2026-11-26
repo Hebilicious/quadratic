@@ -110,11 +110,13 @@ still alive: a claim records no liveness.
    decision. When the human decides it in a session, the agent may move it, on the human's
    words. The owner's words: "why do i have to do it myself?", and the condition: "it needs to
    evaluate a degree of confidence first". The one-issue calls that `HumanOnly` guards
-   (`issue.update` with `status` or a new assignee, `issue.release`, `issue.close`) take
-   `humanWords`, what the human said to this agent in this session about this issue, quoted
-   as given (1 to 400 characters, not only spaces), and `confidence`, how sure the agent is
-   that those words decide the issue: `high`, `medium` or `low`. `issues.close` takes
-   neither: the human's words settle one issue, and one quote must not close a batch.
+   (`issue.update` with `status` or a new assignee, `issue.release`, `issue.finish` and its
+   name before 0.2, `issue.close`) take `humanWords`, what the human said to this agent in
+   this session about this issue, quoted as given (1 to 400 characters, not only spaces), and `confidence`, how sure the agent is
+   that those words decide the issue: `high`, `medium` or `low`. `issues.finish` (and
+   `issues.close`) takes neither: the human's words settle one issue, and one quote must not
+   finish a batch. The short command `finish` is `issues.finish`, even with one `--issue`, so
+   the words go on `quadratique issue finish`.
 
    The two inputs have an effect only where `HumanOnly` applies: an agent's call on an issue
    assigned to the human. Elsewhere, and in the human's own calls, they are ignored, and the
@@ -140,7 +142,7 @@ still alive: a claim records no liveness.
    the reason inside the write, after it has read the issue. Without `humanWords` or without
    `confidence`, an agent gets `HumanOnly` on an issue assigned to the human, as before.
 
-   An agent's `issue.close` on an unclaimed issue still answers `NotClaimed`: an agent records
+   An agent's `issue.finish` on an unclaimed issue still answers `NotClaimed`: an agent records
    the human's decision on a decision issue with `issue.update` and `status`. The skill says
    when, in one line: only when what the human said to the agent in this session settles the
    issue's acceptance without interpretation; otherwise the agent asks the human. Words found
