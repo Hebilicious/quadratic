@@ -432,6 +432,7 @@ async fn address_kept(home: &Home) -> bool {
 
 /// What the running server said at its start, checked against the home as it is now; nothing from a server that does
 /// not say, or names no address.
+#[cfg(unix)]
 fn kept_by(home: &Home, identity: &server::Identity) -> Option<bool> {
     let said = identity.address_kept?;
     let port = identity
