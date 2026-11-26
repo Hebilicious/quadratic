@@ -8,7 +8,9 @@ case $scratch in *[[:space:]]*) echo "the temporary folder $scratch has a space"
 home=$scratch/home
 bin_home="$home/my bin"
 quadratique=$bin_home/quadratique
-data_home="$home/my data"
+# The server's socket is in the data folder, and its path may be at most 103 bytes on macOS: the data folder is short.
+data_parent=$(mktemp -d /tmp/qinstall.XXXXXX)
+data=$data_parent/home
 started=""
 
 cleanup() {
@@ -16,7 +18,7 @@ cleanup() {
     [ -x "$binary" ] && on_machine "$binary" server stop > /dev/null 2>&1 || true
   done
   for pid in $started; do kill -KILL "$pid" 2> /dev/null || true; done
-  rm -rf "$scratch"
+  rm -rf "$scratch" "$data_parent"
 }
 trap cleanup EXIT INT TERM
 
@@ -27,7 +29,7 @@ show_file() {
 
 fail() {
   echo "FAIL: $*" >&2
-  show_file "$data_home/quadratique/server.log"
+  show_file "$data/server.log"
   show_file "$scratch/install.log"
   show_file "$scratch/serve.log"
   exit 1
@@ -40,7 +42,7 @@ pass() {
 mkdir -p "$home"
 
 exec_on_machine() {
-  exec env -i PATH="$PATH" HOME="$home" USER=tester XDG_BIN_HOME="$bin_home" XDG_DATA_HOME="$data_home" \
+  exec env -i PATH="$PATH" HOME="$home" USER=tester XDG_BIN_HOME="$bin_home" QUADRATIQUE_HOME="$data" \
     XDG_RUNTIME_DIR="$home/run" "$@"
 }
 
@@ -94,9 +96,9 @@ build() {
   rm -rf "$scratch/dist"
 }
 
-# Every file under the home, except the installed binary's folder and the data folder.
+# Every file under the home, except the installed binary's folder.
 outside_the_install() {
-  (cd "$home" && find . -path "./my bin" -prune -o -path "./my data" -prune -o -print | LC_ALL=C sort)
+  (cd "$home" && find . -path "./my bin" -prune -o -print | LC_ALL=C sort)
 }
 
 mkdir "$scratch/fake-cargo"
