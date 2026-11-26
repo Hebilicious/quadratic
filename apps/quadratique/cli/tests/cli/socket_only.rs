@@ -57,9 +57,17 @@ fn a_command_watch_an_mcp_tool_call_init_and_upgrade_skills_work_while_tcp_refus
         .args(["init", "--key", "TAL", "--name", "tally"])
         .run()
         .ok();
+    let history = home
+        .quadratique(&repository.root)
+        .args(["history", "query"])
+        .run()
+        .ok();
+    let latest = history["items"][0]["commit"]
+        .as_str()
+        .expect("the commit of init's project");
     let mut watcher = home
         .quadratique(&repository.root)
-        .args(["watch", "issue.changed"])
+        .args(["watch", "issue.changed", "--cursor", latest])
         .spawn();
     let watched = Lines::of(watcher.stdout());
     let created = home

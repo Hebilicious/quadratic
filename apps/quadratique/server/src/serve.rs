@@ -145,6 +145,14 @@ struct OnSocket {
     unbounded: Unbounded,
 }
 
+#[cfg(unix)]
+impl OnSocket {
+    fn mark(&self, request: &mut Request<RequestBody>) {
+        request.extensions_mut().insert(self.stop_after.clone());
+        request.extensions_mut().insert(self.unbounded.clone());
+    }
+}
+
 /// Fires on drop, so that a connection whose task ends in any way still asks for the stop it promised.
 #[cfg(unix)]
 struct StopWhenAnswered {
@@ -465,6 +473,13 @@ pub fn serve_socket(
 #[derive(Clone)]
 enum OnSocket {}
 
+#[cfg(not(unix))]
+impl OnSocket {
+    fn mark(&self, _request: &mut Request<RequestBody>) {
+        match *self {}
+    }
+}
+
 async fn answer<S>(stream: S, routes: Arc<Routes>, on_socket: Option<OnSocket>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -472,14 +487,8 @@ where
     let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
         let routes = routes.clone();
         let mut request = request_body(request);
-        #[cfg(not(unix))]
-        let _ = &on_socket;
-        #[cfg(unix)]
         if let Some(on_socket) = &on_socket {
-            request
-                .extensions_mut()
-                .insert(on_socket.stop_after.clone());
-            request.extensions_mut().insert(on_socket.unbounded.clone());
+            on_socket.mark(&mut request);
         }
         async move { Ok::<_, Infallible>(route(&routes, request).await) }
     });
