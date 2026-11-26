@@ -15,6 +15,9 @@ use crate::store::{StoreError, refuse_git_work_tree};
 pub const SOCKET_FILE: &str = "server.sock";
 const START_LOCK_FILE: &str = "start.lock";
 const LOG_FILE: &str = "server.log";
+const KEPT_PORT_FILE: &str = "server.port";
+const STRICT_FILE: &str = "strict";
+const SERVED_PORTS_FILE: &str = "served-ports";
 
 /// The longest socket path, in bytes, that `bind` and `connect` accept: the size of `sun_path` less its final NUL.
 pub const SOCKET_PATH_LIMIT: usize = if cfg!(target_os = "macos") { 103 } else { 107 };
@@ -57,6 +60,21 @@ impl Prepared {
 
     pub fn credentials(&self) -> PathBuf {
         self.folder.join(CREDENTIALS_FILE)
+    }
+
+    /// The port the web app keeps across restarts. Unlike the runtime file, it stays after the server stops.
+    pub fn kept_port(&self) -> PathBuf {
+        self.folder.join(KEPT_PORT_FILE)
+    }
+
+    /// Present while the owner asked for the strict setting (`quadratique server strict on`).
+    pub fn strict(&self) -> PathBuf {
+        self.folder.join(STRICT_FILE)
+    }
+
+    /// The ports a strict home served, which a strict start does not take again.
+    pub fn served_ports(&self) -> PathBuf {
+        self.folder.join(SERVED_PORTS_FILE)
     }
 }
 
@@ -128,6 +146,52 @@ pub fn shell_word(path: &str) -> String {
     } else {
         format!("'{}'", path.replace('\'', "'\\''"))
     }
+}
+
+/// A new file that only this account can read, made with `create_new`, so that nothing already at the path (a link
+/// included) is ever written through.
+pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// The one way a file of the home is replaced: `contents` go to a partial file `<name>.<pid>.<random>`, unique to this
+/// call and made by [`create_private`], so no two writes, in one process or two, share one and nothing already at that
+/// name (a link included) is used; it is synced, then renamed over `path`. Only this call's own partial file is removed
+/// when a step fails.
+pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut unique = [0u8; 8];
+    getrandom::fill(&mut unique).map_err(std::io::Error::other)?;
+    let unique: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
+    let partial = path.with_file_name(format!("{name}.{}.{unique}", std::process::id()));
+    let named = |what: &str, error: std::io::Error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("{what} {}: {error}", partial.display()),
+        )
+    };
+    let mut made = false;
+    let written = create_private(&partial)
+        .and_then(|mut file| {
+            made = true;
+            file.write_all(contents)?;
+            file.sync_all()
+        })
+        .map_err(|error| named("writing", error))
+        .and_then(|()| std::fs::rename(&partial, path).map_err(|error| named("renaming", error)));
+    if written.is_err() && made {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
 }
 
 /// Applies the policy to the home that `paths` names, makes it when it is missing, and returns the only handle on its

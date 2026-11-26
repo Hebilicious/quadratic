@@ -287,6 +287,25 @@ async fn a_dropped_server_stops_listening_while_another_copy_of_its_listener_is_
     drop(copy);
 }
 
+/// A restart that asks for the port of the server it replaces, as a home that keeps its address does, binds it at once
+/// even while a copy of the old listener's descriptor is open.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_binds_the_port_at_once_while_a_copy_of_the_old_listener_is_open() {
+    let (served, copy) = served_with_a_copy();
+    let address = served.address;
+
+    drop(served);
+
+    let socket = tokio::net::TcpSocket::new_v4().expect("a socket");
+    socket
+        .set_reuseaddr(true)
+        .expect("SO_REUSEADDR, as the server sets it");
+    let again = socket.bind(address).and_then(|()| socket.listen(1024));
+    assert!(again.is_ok(), "the port of the dropped server: {again:?}");
+    drop(copy);
+}
+
 /// The IPv4 TCP sockets of this network namespace, as `/proc/net/tcp` lists them.
 #[cfg(target_os = "linux")]
 mod kernel_sockets {
