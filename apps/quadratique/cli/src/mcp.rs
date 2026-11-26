@@ -121,10 +121,10 @@ impl Upstream {
     }
 
     async fn send(&self, caller: &Caller, id: &str, input: &Value) -> RunResult<Value, Value> {
-        let runtime = background::ensure(&self.home)
+        let endpoint = background::ensure(&self.home)
             .await
             .map_err(|error| Defect::new(error.to_string()))?;
-        let client = caller::client(caller, &runtime.url).map_err(Defect::new)?;
+        let client = caller::client(caller, &endpoint).map_err(Defect::new)?;
         match client.invoke(id, input).await {
             Outcome::Value(value) => Ok(value),
             Outcome::Failure(failure) => Err(RunError::Failure(failure)),

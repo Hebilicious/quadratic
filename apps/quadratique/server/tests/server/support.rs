@@ -134,7 +134,9 @@ impl Running {
     }
 
     pub fn client(&self, who: &Who) -> HttpClient {
-        let mut client = HttpClient::new(self.server.url()).expect("the server's URL");
+        let mut client = HttpClient::new(&server::base_over_socket())
+            .expect("the base URL over the socket")
+            .unix_socket(self.server.socket_path());
         let headers = [
             (
                 "Quadratique-Actor",

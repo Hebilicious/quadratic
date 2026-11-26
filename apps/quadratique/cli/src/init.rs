@@ -565,28 +565,26 @@ async fn server(dry_run: bool) -> Result<Result<HttpClient, String>, i32> {
         }
         Err(message) => return Ok(Err(message)),
     };
-    let runtime = match running_server(&home).await {
-        Ok(runtime) => runtime,
+    let endpoint = match running_server(&home).await {
+        Ok(endpoint) => endpoint,
         Err(why) => return Ok(Err(why)),
     };
     let caller = caller::detect(Binding::Cli)
         .map_err(|error| report_code(Kind::InvalidInput, error.to_string()))?;
-    Ok(caller::client(&caller, &runtime.url))
+    Ok(caller::client(&caller, &endpoint))
 }
 
 /// The server of this home that answers on its socket with this build's interface, or why a dry run asks none.
 #[cfg(unix)]
-async fn running_server(
-    home: &background::Home,
-) -> Result<quadratique_server::server::RuntimeFile, String> {
+async fn running_server(home: &background::Home) -> Result<background::Endpoint, String> {
     use background::Observed;
 
     match background::observe(home).await.map_err(|error| error.to_string())? {
-        Observed::Serving { identity, runtime }
+        Observed::Serving { identity }
             if identity.interface.as_deref()
                 == Some(quadratique_server::app::interface().as_str()) =>
         {
-            Ok(runtime)
+            Ok(home.endpoint())
         }
         Observed::Serving { .. } | Observed::Newer(_) => {
             Err("the server that runs is of another build, and a dry run replaces none".to_owned())
@@ -604,13 +602,11 @@ async fn running_server(
 
 /// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
 #[cfg(not(unix))]
-async fn running_server(
-    home: &background::Home,
-) -> Result<quadratique_server::server::RuntimeFile, String> {
+async fn running_server(home: &background::Home) -> Result<background::Endpoint, String> {
     use background::Found;
 
     match background::find(home).await {
-        Ok(Found::Ours(runtime)) => Ok(runtime),
+        Ok(Found::Ours(runtime)) => Ok(background::Endpoint::over_tcp(&runtime)),
         Ok(Found::Nobody) => {
             Err("no Quadratique server runs, and a dry run starts none".to_owned())
         }

@@ -34,6 +34,8 @@ const LOG_TAIL: usize = 2000;
 #[derive(Debug)]
 pub enum LifeError {
     Io(std::io::Error),
+    /// The home policy refuses the data folder, or its path is not one: the person changes the folder.
+    Refused(String),
     /// The runtime file names another database: only Windows reads it to find a server (QUA-61).
     #[cfg(not(unix))]
     OtherDatabase {
@@ -155,6 +157,7 @@ impl std::fmt::Display for LifeError {
             LifeError::Io(error) => {
                 write!(formatter, "the Quadratique home is not usable: {error}")
             }
+            LifeError::Refused(reason) => formatter.write_str(reason),
             #[cfg(not(unix))]
             LifeError::OtherDatabase { runtime, database } => write!(
                 formatter,
@@ -397,22 +400,30 @@ pub struct Home {
 impl Home {
     /// Applies the home policy before anything opens a lock file in the home or starts a server for it, and makes the
     /// home when it is missing.
-    pub fn new(paths: Paths) -> Result<Home, String> {
+    pub fn new(paths: Paths) -> Result<Home, LifeError> {
         let prepared = home::prepare(&paths).map_err(|refusal| match refusal.denied() {
             Some(error) => LifeError::Unreachable {
                 reason: format!(
                     "this process cannot use {}: {error}; a sandbox may be blocking it",
                     paths.database.parent().unwrap_or(Path::new(".")).display()
                 ),
-            }
-            .to_string(),
-            None => refusal.to_string(),
+            },
+            None => LifeError::Refused(refusal.to_string()),
         })?;
         Ok(Home { prepared })
     }
 
     pub fn prepared(&self) -> &Prepared {
         &self.prepared
+    }
+
+    /// The socket of this home, which a command calls once `observe` has found its server there.
+    #[cfg(unix)]
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint {
+            base: quadratique_server::server::base_over_socket(),
+            socket: Some(self.prepared.socket()),
+        }
     }
 
     pub fn log(&self) -> PathBuf {
@@ -678,7 +689,6 @@ pub enum Observed {
     /// A server of this home's database and of this build's control version. Its interface may be another build's.
     Serving {
         identity: Identity,
-        runtime: RuntimeFile,
     },
     Newer(Identity),
     OtherDatabase(Identity),
@@ -705,12 +715,7 @@ pub async fn observe(home: &Home) -> Result<Observed, LifeError> {
 #[cfg(unix)]
 async fn observe_within(home: &Home, limit: Duration) -> Result<Observed, LifeError> {
     Ok(match on_socket_within(home, limit).await {
-        OnSocket::Serving(identity) => match runtime_of(&identity) {
-            Some(runtime) => Observed::Serving { identity, runtime },
-            None => Observed::Malformed(
-                "the identity's url names no loopback address of the command line".to_owned(),
-            ),
-        },
+        OnSocket::Serving(identity) => Observed::Serving { identity },
         OnSocket::OtherDatabase(identity) => Observed::OtherDatabase(identity),
         OnSocket::Newer(identity) => Observed::Newer(identity),
         OnSocket::Malformed(why) => Observed::Malformed(why),
@@ -787,22 +792,6 @@ fn behind_the_socket(home: &Home, reason: Option<String>, no_socket: bool) -> Ob
     }
 }
 
-/// The TCP address of the command line's routes, which the generated client still uses (QUA-53 moves it to the
-/// socket), from the identity's `url`: `http://127.0.0.1:<port>/cli`.
-#[cfg(unix)]
-fn runtime_of(identity: &Identity) -> Option<RuntimeFile> {
-    let url = identity.url.as_deref()?;
-    let (authority, path) = url.strip_prefix("http://")?.split_once('/')?;
-    let address: std::net::SocketAddr = authority.parse().ok()?;
-    (address.ip().is_loopback() && path == "cli").then(|| RuntimeFile {
-        pid: identity.pid,
-        address,
-        url: url.to_owned(),
-        database: identity.database.clone(),
-        control: identity.control,
-    })
-}
-
 #[cfg(unix)]
 pub fn lists_this_control(identity: &Identity) -> bool {
     identity
@@ -862,7 +851,25 @@ fn refusal(home: &Home, observed: Observed, attempt: Attempt) -> LifeError {
     }
 }
 
-pub async fn ensure(home: &Home) -> Result<RuntimeFile, LifeError> {
+/// Where a command reaches the server of a home: on Unix its socket, and never TCP; on Windows, which has no socket
+/// yet (QUA-61), the TCP address of its runtime file.
+#[derive(Debug, Clone)]
+pub struct Endpoint {
+    pub base: String,
+    pub socket: Option<PathBuf>,
+}
+
+impl Endpoint {
+    #[cfg(not(unix))]
+    pub fn over_tcp(runtime: &RuntimeFile) -> Endpoint {
+        Endpoint {
+            base: runtime.url.clone(),
+            socket: None,
+        }
+    }
+}
+
+pub async fn ensure(home: &Home) -> Result<Endpoint, LifeError> {
     ensure_within(home, START_LIMIT).await
 }
 
@@ -871,7 +878,7 @@ pub async fn ensure(home: &Home) -> Result<RuntimeFile, LifeError> {
 /// server is never replaced. The only process this may end is its own child, through its `Child` handle, when the
 /// child is not ready by the deadline.
 #[cfg(unix)]
-async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
+async fn ensure_within(home: &Home, limit: Duration) -> Result<Endpoint, LifeError> {
     let deadline = Deadline::after(limit);
     let mut start_lock: Option<File> = None;
     let mut child: Option<OwnedChild> = None;
@@ -884,7 +891,7 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, Life
             ));
         };
         match observed {
-            Observed::Serving { identity, runtime } => {
+            Observed::Serving { identity } => {
                 if let Some(child) = child.take()
                     && child.id() == identity.pid
                 {
@@ -892,7 +899,7 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, Life
                 }
                 return match other_interface(&identity) {
                     Some(refused) => Err(refused),
-                    None => Ok(runtime),
+                    None => Ok(home.endpoint()),
                 };
             }
             Observed::Legacy => {
@@ -964,8 +971,10 @@ fn not_ready_by_the_deadline(
 }
 
 #[cfg(not(unix))]
-async fn ensure_within(home: &Home, limit: Duration) -> Result<RuntimeFile, LifeError> {
-    over_tcp::ensure(home, limit).await
+async fn ensure_within(home: &Home, limit: Duration) -> Result<Endpoint, LifeError> {
+    over_tcp::ensure(home, limit)
+        .await
+        .map(|runtime| Endpoint::over_tcp(&runtime))
 }
 
 /// `start.lock`, held: no command starts a server while its holder starts, stops or hands off one. It carries the
@@ -1545,44 +1554,6 @@ mod tests {
             "{stop}"
         );
         assert!(stop.to_string().ends_with("Nothing was stopped."), "{stop}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_tcp_address_comes_from_the_identity_url_only_when_it_is_a_loopback_url_of_the_command_line()
-     {
-        use quadratique_server::server::Identity;
-
-        let identity = |url: &str| Identity {
-            pid: 1,
-            database: "/home/workspace.db".into(),
-            interface: None,
-            schema: None,
-            generation: None,
-            control: Some(1),
-            controls: None,
-            executable: None,
-            started: None,
-            url: Some(url.to_owned()),
-            address_kept: None,
-        };
-
-        let runtime =
-            super::runtime_of(&identity("http://127.0.0.1:4100/cli")).expect("an address");
-
-        assert_eq!(
-            runtime.address,
-            "127.0.0.1:4100".parse().expect("an address")
-        );
-        assert_eq!(runtime.control, Some(1));
-        for refused in [
-            "http://192.0.2.1:4100/cli",
-            "http://127.0.0.1:4100/web",
-            "https://127.0.0.1:4100/cli",
-            "http://localhost:4100/cli",
-        ] {
-            assert!(super::runtime_of(&identity(refused)).is_none(), "{refused}");
-        }
     }
 
     /// One deadline per operation: once it has passed, nothing new begins. A free home is not started in.

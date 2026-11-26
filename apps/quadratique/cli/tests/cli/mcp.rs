@@ -2,14 +2,14 @@ use serde_json::{Value, json};
 
 use crate::support::{Home, Lines, Process, Repository, git, outside, send_line};
 
-struct Client {
+pub(crate) struct Client {
     process: Process,
     lines: Lines,
     next_id: u64,
 }
 
 impl Client {
-    fn start(mut process: Process) -> Client {
+    pub(crate) fn start(mut process: Process) -> Client {
         let lines = Lines::of(process.stdout());
         let mut client = Client {
             process,
@@ -64,7 +64,7 @@ impl Client {
             .to_owned()
     }
 
-    fn tool(&mut self, name: &str, arguments: Value) -> Value {
+    pub(crate) fn tool(&mut self, name: &str, arguments: Value) -> Value {
         let answer = self.request(
             "tools/call",
             json!({ "name": name, "arguments": arguments }),

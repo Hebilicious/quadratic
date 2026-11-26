@@ -40,10 +40,10 @@ pub struct Connection {
 
 pub type Admit = Arc<dyn Fn(Connection) -> bool + Send + Sync>;
 
-/// How long one connection to the Unix socket may last, from the first byte of its request to the end of its answer.
-/// The socket serves only the control requests, which a client sends whole and with `Connection: close`; a client that
-/// sends part of a request, or keeps the connection idle, is cut off here. QUA-53, which moves the commands and their
-/// event streams to the socket, gives those routes their own bounds.
+/// How long one connection to the Unix socket may last while it carries only control requests, which a client sends
+/// whole and with `Connection: close`: a client that sends part of a request, or keeps the connection idle, is cut off
+/// here. A connection that carries a request of the command line's routes is not, because a call may wait and an event
+/// stream lasts: it then lasts as a TCP connection does, until it ends or the server stops.
 pub const SOCKET_REQUEST_LIMIT: Duration = Duration::from_secs(5);
 
 /// The listeners of one server, as its stop request sees them: [`Gate::close`] takes every registered listener out of
@@ -102,6 +102,47 @@ impl StopAfterAnswer {
     pub fn set(&self) {
         self.set.store(true, Ordering::SeqCst);
     }
+}
+
+/// Set on a connection to the Unix socket by its first request to the command line's routes: from then the connection
+/// is not cut off at [`SOCKET_REQUEST_LIMIT`].
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct Unbounded {
+    set: Arc<AtomicBool>,
+}
+
+#[cfg(unix)]
+impl Unbounded {
+    /// Resolves after the limit, unless a request of the command line's routes came by then: then never.
+    async fn limit(&self) {
+        tokio::time::sleep(SOCKET_REQUEST_LIMIT).await;
+        if self.set.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// A route of the command line on the socket: it lifts the limit of the connection that carries it.
+#[cfg(unix)]
+struct Unbounding(Arc<dyn acid_cat_core::remote::Handler>);
+
+#[cfg(unix)]
+impl acid_cat_core::remote::Handler for Unbounding {
+    fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
+        if let Some(unbounded) = request.extensions().get::<Unbounded>() {
+            unbounded.set.store(true, Ordering::SeqCst);
+        }
+        self.0.handle(request)
+    }
+}
+
+/// What a connection to the Unix socket gives each of its requests.
+#[cfg(unix)]
+#[derive(Clone)]
+struct OnSocket {
+    stop_after: StopAfterAnswer,
+    unbounded: Unbounded,
 }
 
 /// Fires on drop, so that a connection whose task ends in any way still asks for the stop it promised.
@@ -168,6 +209,15 @@ impl Served {
 
     pub async fn close(mut self) {
         self.tasks.close().await;
+    }
+
+    /// Accepts no other connection, for every copy of the listener's descriptor; open connections go on.
+    pub fn stop_listening(&self) {
+        closer(
+            Arc::clone(&self.listener),
+            self.tasks.accepting.clone(),
+            self.address.to_string(),
+        )();
     }
 }
 
@@ -336,16 +386,22 @@ impl Drop for ServedSocket {
 }
 
 /// Accepts on a socket that `home::bind_socket` bound and checked. The socket is registered with `gate` before it
-/// accepts its first connection, and a handler that sets [`StopAfterAnswer`] stops the server through it.
+/// accepts its first connection, and a handler that sets [`StopAfterAnswer`] stops the server through it. `control`
+/// and `commands` are served alike; only a request to `commands` lifts [`SOCKET_REQUEST_LIMIT`].
 #[cfg(unix)]
 pub fn serve_socket(
     listener: tokio::net::UnixListener,
     file: crate::home::SocketFile,
-    routes: Routes,
+    control: Routes,
+    commands: Routes,
     gate: &Gate,
 ) -> ServedSocket {
     let listener = Arc::new(listener);
-    let mut routes = routes;
+    let mut routes = control;
+    routes.extend(commands.into_iter().map(|(prefix, handler)| {
+        let unbounding: Arc<dyn acid_cat_core::remote::Handler> = Arc::new(Unbounding(handler));
+        (prefix, unbounding)
+    }));
     routes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
     let routes = Arc::new(routes);
     let stop = CancellationToken::new();
@@ -378,9 +434,14 @@ pub fn serve_socket(
                 gate: gate.clone(),
             };
             tokio::spawn(async move {
-                let answering = answer(stream, routes, Some(when_answered.after.clone()));
+                let on_socket = OnSocket {
+                    stop_after: when_answered.after.clone(),
+                    unbounded: Unbounded::default(),
+                };
+                let unbounded = on_socket.unbounded.clone();
                 tokio::select! {
-                    _ = tokio::time::timeout(SOCKET_REQUEST_LIMIT, answering) => {}
+                    () = answer(stream, routes, Some(on_socket)) => {}
+                    () = unbounded.limit() => {}
                     () = stopped.cancelled() => {}
                 }
                 drop(when_answered);
@@ -400,15 +461,25 @@ pub fn serve_socket(
     }
 }
 
-async fn answer<S>(stream: S, routes: Arc<Routes>, stop_after: Option<StopAfterAnswer>)
+#[cfg(not(unix))]
+#[derive(Clone)]
+enum OnSocket {}
+
+async fn answer<S>(stream: S, routes: Arc<Routes>, on_socket: Option<OnSocket>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
         let routes = routes.clone();
         let mut request = request_body(request);
-        if let Some(stop_after) = &stop_after {
-            request.extensions_mut().insert(stop_after.clone());
+        #[cfg(not(unix))]
+        let _ = &on_socket;
+        #[cfg(unix)]
+        if let Some(on_socket) = &on_socket {
+            request
+                .extensions_mut()
+                .insert(on_socket.stop_after.clone());
+            request.extensions_mut().insert(on_socket.unbounded.clone());
         }
         async move { Ok::<_, Infallible>(route(&routes, request).await) }
     });

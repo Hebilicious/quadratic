@@ -94,8 +94,9 @@ fn words(args: &[String]) -> Vec<&str> {
         .collect()
 }
 
-pub fn home() -> Result<Home, String> {
-    let paths = Paths::from_env().map_err(|error| error.to_string())?;
+pub fn home() -> Result<Home, background::LifeError> {
+    let paths =
+        Paths::from_env().map_err(|error| background::LifeError::Refused(error.to_string()))?;
     Home::new(paths)
 }
 
@@ -106,7 +107,9 @@ pub fn existing_home() -> Result<Option<Home>, String> {
     let folder = paths.database.parent().unwrap_or(std::path::Path::new("/"));
     match std::fs::symlink_metadata(folder) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        _ => Home::new(paths).map(Some),
+        _ => Home::new(paths)
+            .map(Some)
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -144,7 +147,7 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
     };
     let home = match home() {
         Ok(home) => home,
-        Err(message) => return report(io, Kind::Internal, message),
+        Err(error) => return report(io, Kind::Internal, error.to_string()),
     };
     (io.stderr)(&format!(
         "quadratique serve: pid {}, database {}",
@@ -184,7 +187,7 @@ async fn serve(args: Vec<String>, io: &mut CliIo) -> i32 {
 async fn server_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     let home = match home() {
         Ok(home) => home,
-        Err(message) => return report(io, Kind::Internal, message),
+        Err(error) => return report(io, Kind::Internal, error.to_string()),
     };
     let answer = match words(&args)[..] {
         ["status"] => status(&home).await,
@@ -382,7 +385,7 @@ async fn ui(args: Vec<String>, io: &mut CliIo) -> i32 {
     };
     let home = match home() {
         Ok(home) => home,
-        Err(message) => return report(io, Kind::Internal, message),
+        Err(error) => return report(io, Kind::Internal, error.to_string()),
     };
     let paired = match pair(&home, open).await {
         Ok(paired) => paired,
@@ -560,7 +563,10 @@ async fn mcp_command(args: Vec<String>, io: &mut CliIo) -> i32 {
     };
     let home = match home() {
         Ok(home) => home,
-        Err(message) => return report(io, Kind::Internal, message),
+        Err(error @ background::LifeError::Unreachable { .. }) => {
+            return report(io, Kind::Unavailable, error.to_string());
+        }
+        Err(error) => return report(io, Kind::Internal, error.to_string()),
     };
     if let Err(error @ background::LifeError::Unreachable { .. }) = background::ensure(&home).await
     {

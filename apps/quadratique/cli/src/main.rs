@@ -64,11 +64,17 @@ async fn run(args: Vec<String>) -> i32 {
 pub(crate) async fn remote(mcp_tool: route::McpTool) -> Result<HttpClient, i32> {
     let caller = caller::detect(Binding::Cli)
         .map_err(|error| fail(Kind::InvalidInput, error.to_string()))?;
-    let home = commands::home().map_err(|message| fail(Kind::Internal, message))?;
-    let runtime = background::ensure(&home)
+    let home = commands::home().map_err(|error| {
+        let kind = match error {
+            background::LifeError::Unreachable { .. } => Kind::Unavailable,
+            _ => Kind::Internal,
+        };
+        fail(kind, error.for_a_command(&mcp_tool))
+    })?;
+    let endpoint = background::ensure(&home)
         .await
         .map_err(|error| fail(Kind::Unavailable, error.for_a_command(&mcp_tool)))?;
-    caller::client(&caller, &runtime.url).map_err(|message| fail(Kind::Internal, message))
+    caller::client(&caller, &endpoint).map_err(|message| fail(Kind::Internal, message))
 }
 
 fn fail(kind: Kind, message: String) -> i32 {

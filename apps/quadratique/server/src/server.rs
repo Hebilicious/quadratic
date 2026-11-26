@@ -41,6 +41,12 @@ pub const CONTROL: u32 = 1;
 pub const CONTROLS: &[u32] = &[CONTROL];
 /// The authority that a request on the Unix socket names: the socket, not a host, decides where it goes.
 pub const SOCKET_AUTHORITY: &str = "quadratique.invalid";
+
+/// The base URL of the command line's routes for a client that connects to the Unix socket: it gives the path and the
+/// `Host` of each request, and the socket gives where it goes.
+pub fn base_over_socket() -> String {
+    format!("http://{SOCKET_AUTHORITY}{BASE}")
+}
 pub(crate) const DATABASE_FILE: &str = "workspace.db";
 pub(crate) const RUNTIME_FILE: &str = "server.json";
 pub(crate) const LOCK_FILE: &str = "server.lock";
@@ -493,6 +499,12 @@ impl Server {
         self.socket.path()
     }
 
+    /// Takes the TCP listener out of the listening state, as a stop does, and leaves the socket serving: every later
+    /// connection to the TCP address is refused. A test uses it to show what works without TCP.
+    pub fn stop_listening_on_tcp(&self) {
+        self.served.stop_listening();
+    }
+
     pub async fn look_at_repositories(&self) {
         self.watcher.look().await;
     }
@@ -733,8 +745,9 @@ async fn start_checked(
             ..HttpOptions::default()
         },
     );
+    let surface: Arc<dyn Handler> = Arc::new(surface);
     let command_line: remote::Routes = vec![
-        (BASE.into(), Arc::new(surface) as Arc<dyn Handler>),
+        (BASE.into(), Arc::clone(&surface)),
         (IDENTITY.into(), Arc::clone(&identify)),
     ];
     let mut routes = web::guarded(&origin, command_line, web::OriginHeader::Refused);
@@ -797,6 +810,7 @@ async fn start_checked(
             socket_listener,
             socket_file,
             vec![(IDENTITY.into(), control)],
+            vec![(BASE.into(), surface)],
             &gate,
         )
     };

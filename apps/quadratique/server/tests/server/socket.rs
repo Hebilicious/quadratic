@@ -247,7 +247,13 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
         .try_clone_to_owned()
         .expect("a second descriptor of the listener");
     let socket = file.path().to_path_buf();
-    let served = serve::serve_socket(listener, file, Vec::new(), &serve::Gate::default());
+    let served = serve::serve_socket(
+        listener,
+        file,
+        Vec::new(),
+        Vec::new(),
+        &serve::Gate::default(),
+    );
     let other_name = home.path().join("same-socket");
     std::fs::hard_link(&socket, &other_name).expect("a hard link to the socket");
     std::os::unix::net::UnixStream::connect(&other_name).expect("the link reaches the socket");
@@ -674,4 +680,97 @@ async fn a_partial_control_request_is_cut_off_within_the_limit_and_stops_nothing
         .expect("the socket still answers");
     assert_eq!(still.generation, Some(generation));
     running.shutdown().await;
+}
+
+type Occurrences = futures::stream::BoxStream<
+    'static,
+    Result<acid_cat_core::Occurrence, acid_cat_core::CallFailure>,
+>;
+
+/// The next occurrence that names `issue`; panics when the stream ends first.
+async fn occurrence_naming(occurrences: &mut Occurrences, issue: &str) -> serde_json::Value {
+    use futures::StreamExt;
+
+    loop {
+        match within("an occurrence", occurrences.next()).await {
+            Some(Ok(occurrence)) if occurrence.data.to_string().contains(issue) => {
+                return occurrence.data;
+            }
+            Some(Ok(_)) => {}
+            ended => panic!("the event stream ended before an occurrence named {issue}: {ended:?}"),
+        }
+    }
+}
+
+/// The test helpers, as the command line, call the command line's routes and follow their event stream on the socket
+/// only: once the TCP listener refuses every connection, they still work.
+#[tokio::test(flavor = "multi_thread")]
+async fn calls_and_their_event_stream_answer_on_the_socket_while_tcp_refuses_every_connection() {
+    let board = crate::support::start().await;
+    board.server.stop_listening_on_tcp();
+    let tcp = tokio::net::TcpStream::connect(board.server.address()).await;
+    assert_eq!(
+        tcp.as_ref().map_err(std::io::Error::kind).err(),
+        Some(std::io::ErrorKind::ConnectionRefused),
+        "{tcp:?}"
+    );
+
+    let mut live = within(
+        "the subscription",
+        board.client(&board.agent("watcher")).subscribe(
+            "issue.changed",
+            &serde_json::json!({}),
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("the subscription starts on the socket");
+    board.project("DEM").await;
+    let issue = board.issue("Write the parser").await;
+
+    let occurrence = occurrence_naming(&mut live, &issue).await;
+    assert_eq!(occurrence["operation"], "issue.create", "{occurrence}");
+    within("the shutdown", board.server.shutdown()).await;
+}
+
+/// A connection that carries an event stream is not cut off at the limit of the control requests: a partial control
+/// request opened after the stream is cut off, and the stream still delivers the next occurrence.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_stream_on_the_socket_outlives_the_limit_of_the_control_requests() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let board = crate::support::start().await;
+    board.project("DEM").await;
+    let mut live = within(
+        "the subscription",
+        board.client(&board.agent("watcher")).subscribe(
+            "issue.changed",
+            &serde_json::json!({}),
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("the subscription starts on the socket");
+    let mut partial = tokio::net::UnixStream::connect(board.server.socket_path())
+        .await
+        .expect("a connection");
+    partial
+        .write_all(b"GET /server HTTP/1.1\r\nHost: quadratique.invalid\r\n")
+        .await
+        .expect("part of a control request");
+    let mut rest = Vec::new();
+    within(
+        "the end of the partial request's connection",
+        partial.read_to_end(&mut rest),
+    )
+    .await
+    .expect("the server cuts the partial request off");
+
+    let issue = board.issue("Write the parser").await;
+
+    let occurrence = occurrence_naming(&mut live, &issue).await;
+    assert_eq!(occurrence["operation"], "issue.create", "{occurrence}");
+    within("the shutdown", board.server.shutdown()).await;
 }

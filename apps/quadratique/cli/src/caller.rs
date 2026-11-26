@@ -9,6 +9,8 @@ use quadratique_server::app::{
 use quadratique_server::domain::{Actor, ActorError, Binding, Caller, WorkingCopy};
 use quadratique_server::git::environment;
 
+use crate::background::Endpoint;
+
 pub fn detect(binding: Binding) -> Result<Caller, ActorError> {
     match std::env::current_dir() {
         Ok(directory) => detect_in(binding, &directory),
@@ -52,7 +54,9 @@ pub fn claim_from(binding: Binding, named: &str) -> Result<(Caller, String), Act
     Ok((caller, worktree))
 }
 
-pub fn client(caller: &Caller, url: &str) -> Result<HttpClient, String> {
+/// The one client of every command, `quadratique mcp`, `init` and `upgrade --skills`: it carries the caller in its
+/// headers and reaches the server where `endpoint` says, on Unix only through the home's socket.
+pub fn client(caller: &Caller, endpoint: &Endpoint) -> Result<HttpClient, String> {
     let actor = serde_json::to_string(&caller.actor).map_err(|error| error.to_string())?;
     let copy = &caller.working_copy;
     let headers = [
@@ -61,10 +65,15 @@ pub fn client(caller: &Caller, url: &str) -> Result<HttpClient, String> {
         (WORKTREE_HEADER, copy.worktree.clone()),
         (BRANCH_HEADER, copy.branch.clone()),
     ];
+    let client = HttpClient::new(&endpoint.base)?;
+    let client = match &endpoint.socket {
+        Some(socket) => client.unix_socket(socket),
+        None => client,
+    };
     headers
         .into_iter()
         .filter_map(|(name, value)| Some((name, value?)))
-        .try_fold(HttpClient::new(url)?, |client, (name, value)| {
+        .try_fold(client, |client, (name, value)| {
             client.header(name, &encode_header(&value))
         })
 }
