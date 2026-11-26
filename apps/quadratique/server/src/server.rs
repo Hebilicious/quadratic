@@ -68,6 +68,8 @@ const LISTEN_BACKLOG: u32 = 1024;
 pub struct Waits {
     pub start: Duration,
     pub probe: Duration,
+    /// How long a client of the socket has to send a whole request.
+    pub socket_request: Duration,
 }
 
 impl Default for Waits {
@@ -75,6 +77,7 @@ impl Default for Waits {
         Waits {
             start: START_LIMIT,
             probe: PROBE_LIMIT,
+            socket_request: serve::SOCKET_REQUEST_LIMIT,
         }
     }
 }
@@ -588,6 +591,7 @@ pub async fn start_by_within(
     let waits = Waits {
         start: left,
         probe: PROBE_LIMIT.min(left),
+        ..Waits::default()
     };
     start_prepared(
         home,
@@ -809,8 +813,8 @@ async fn start_checked(
         serve::serve_socket(
             socket_listener,
             socket_file,
-            vec![(IDENTITY.into(), control)],
-            vec![(BASE.into(), surface)],
+            vec![(IDENTITY.into(), control), (BASE.into(), surface)],
+            waits.socket_request,
             &gate,
         )
     };

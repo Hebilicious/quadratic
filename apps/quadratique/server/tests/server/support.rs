@@ -47,6 +47,20 @@ pub async fn start() -> Running {
 }
 
 pub async fn start_looking_every(every: Duration) -> Running {
+    start_with(every, Waits::default()).await
+}
+
+/// A server whose socket gives a client `limit` to send a whole request, for a test that shows what the limit cuts off
+/// without waiting for the product's limit.
+pub async fn start_with_socket_limit(limit: Duration) -> Running {
+    let waits = Waits {
+        socket_request: limit,
+        ..Waits::default()
+    };
+    start_with(watcher::EVERY, waits).await
+}
+
+async fn start_with(every: Duration, waits: Waits) -> Running {
     environment::read_no_user_configuration();
     let home = private_home();
     let server = within(
@@ -56,7 +70,7 @@ pub async fn start_looking_every(every: Duration) -> Running {
             server::loopback(),
             WebApp::from_env(),
             every,
-            Waits::default(),
+            waits,
         ),
     )
     .await
