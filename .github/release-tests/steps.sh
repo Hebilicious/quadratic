@@ -11,7 +11,9 @@ work=$(mktemp -d "$here/../../.tmp/release-tests.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 step() { uv run --quiet --with pyyaml==6.0.3 python -I "$here/run_step.py" "$workflow" "$@"; }
 export PATH="$here:$PATH" GITHUB_REPOSITORY=Hebilicious/quadratique STEP_GH_TOKEN=fake
-CHECK="Check that the four files are there and that each archive matches its SHA-256 file"
+CHECK="Check that the files of every target are there and that each archive matches its SHA-256 file"
+# The targets of a release, as the workflow lists them.
+TARGETS=$(uv run --quiet --with pyyaml==6.0.3 python -I -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['env']['TARGETS'])" "$workflow")
 ATTACH="Attach the files, check the release, and publish it"
 NAME="Name the release to finish"
 CRATES="Name the crates that crates.io lacks"
@@ -29,12 +31,12 @@ check() {
 }
 
 # A repository with the merged release commit $MERGE (manifest 0.1.0), a later commit $LATER, and a draft release
-# v0.1.0 (id 7) whose tag points at $MERGE; the four built files are in $work/assets. Both crates are at 0.1.0 in
+# v0.1.0 (id 7) whose tag points at $MERGE; the built files of every target are in $work/assets. Both crates are at 0.1.0 in
 # the workspace, and crates.io has only 0.0.9 of each.
 fresh() {
   rm -rf "$work/case" && mkdir -p "$work/case/assets" "$work/case/gh/assets" "$work/case/apps/quadratique"
   cd "$work/case/assets" || exit 1
-  for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+  for target in $TARGETS; do
     echo "archive for $target" > "quadratique-0.1.0-$target.tar.gz"
     sha256sum "quadratique-0.1.0-$target.tar.gz" > "quadratique-0.1.0-$target.tar.gz.sha256"
   done
@@ -56,7 +58,7 @@ draft() { python3 -c "import json; print(json.load(open('$work/case/gh/state.jso
 attached() { python3 -c "import json; print(' '.join(sorted(a['name'] for a in json.load(open('$work/case/gh/state.json'))['releases'][0]['assets'])))"; }
 changes() { grep -cE -- '-X (DELETE|POST|PATCH)' "$work/case/gh/calls" 2> /dev/null || true; }
 attach_all() { (cd assets && for f in *; do gh api -X POST "https://uploads.github.com/repos/Hebilicious/quadratique/releases/7/assets?name=$f" -H "Content-Type: application/octet-stream" --input "$f" > /dev/null; done); : > gh/calls; }
-four="quadratique-0.1.0-aarch64-unknown-linux-gnu.tar.gz quadratique-0.1.0-aarch64-unknown-linux-gnu.tar.gz.sha256 quadratique-0.1.0-x86_64-unknown-linux-gnu.tar.gz quadratique-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256"
+all=$(for target in $TARGETS; do printf '%s ' "quadratique-0.1.0-$target.tar.gz" "quadratique-0.1.0-$target.tar.gz.sha256"; done | xargs -n 1 | LC_ALL=C sort | paste -sd ' ' -)
 name_release() { out=$work/case/output; : > "$out"; GITHUB_OUTPUT=$out step pending "$NAME" > /dev/null 2> "$work/case/err"; }
 name_crates() { out=$work/case/output; : > "$out"; GITHUB_OUTPUT=$out step crates "$CRATES" > /dev/null 2> "$work/case/err"; }
 # The SHA-256 of the package that the fake cargo makes of a crate at 0.1.0.
@@ -77,17 +79,20 @@ publications() { grep '^cargo publish' "$work/case/gh/calls" 2> /dev/null | sed 
 packagings() { grep '^cargo package --no-verify' "$work/case/gh/calls" 2> /dev/null | sed 's/^cargo package --no-verify --locked --allow-dirty //' | paste -sd ';' -; }
 
 echo "# the publish job's check of the artifacts"
-fresh; step publish "$CHECK" > /dev/null; check $? 0 "the check accepts the four files"
+fresh; step publish "$CHECK" > /dev/null; check $? 0 "the check accepts the files of every target"
 fresh; rm assets/quadratique-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256; step publish "$CHECK" > /dev/null 2>&1; check $? 1 "the check refuses a missing SHA-256 file"
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  fresh; rm assets/quadratique-0.1.0-$target.tar.gz*; step publish "$CHECK" > /dev/null 2>&1; check $? 1 "the check refuses the files without the archive for $target"
+done
 fresh; echo extra > assets/notes.txt; step publish "$CHECK" > /dev/null 2>&1; check $? 1 "the check refuses an unexpected file"
 fresh; echo tampered >> assets/quadratique-0.1.0-x86_64-unknown-linux-gnu.tar.gz; step publish "$CHECK" > /dev/null 2>&1; check $? 1 "the check refuses an archive that does not match its SHA-256 file"
 fresh; cp assets/quadratique-0.1.0-aarch64-unknown-linux-gnu.tar.gz.sha256 assets/quadratique-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256; step publish "$CHECK" > /dev/null 2>&1; check $? 1 "the check refuses a SHA-256 file that names the other archive"
 fresh; STEP_VERSION=0.2.0 step publish "$CHECK" > /dev/null 2>&1; check $? 1 "the check refuses archives of another version"
 
 echo "# the publish job's attach and publication"
-fresh; step publish "$ATTACH" > /dev/null; check $? 0 "a draft with no files gets the four and is published"
-check "$(draft) $(attached)" "False $four" "the published release holds the four files"
-fresh; attach_all; edit "s['releases'][0]['draft'] = False"; step publish "$ATTACH" > /dev/null; check $? 0 "a public release with the four matching digests is complete"
+fresh; step publish "$ATTACH" > /dev/null; check $? 0 "a draft with no files gets them all and is published"
+check "$(draft) $(attached)" "False $all" "the published release holds the files of every target"
+fresh; attach_all; edit "s['releases'][0]['draft'] = False"; step publish "$ATTACH" > /dev/null; check $? 0 "a public release with every matching digest is complete"
 check "$(changes)" 0 "and nothing is changed on it"
 fresh; attach_all; edit "s['releases'][0]['draft'] = False"; echo wrong > gh/assets/101; step publish "$ATTACH" > /dev/null 2>&1; check $? 1 "a public release with a wrong file fails"
 check "$(changes)" 0 "and nothing is changed on it"
@@ -96,11 +101,11 @@ check "$(changes)" 0 "and nothing is changed on it"
 fresh; edit "s['fail_upload_of'] = 'quadratique-0.1.0-x86_64-unknown-linux-gnu.tar.gz'"; step publish "$ATTACH" > /dev/null 2>&1; check $? 1 "an attach whose upload fails fails"
 check "$(draft)" True "the release is still a draft after a failed upload"
 : > gh/calls; step publish "$ATTACH" > /dev/null; check $? 0 "running the attach again succeeds"
-check "$(draft) $(attached)" "False $four" "the second run leaves the four files and publishes"
+check "$(draft) $(attached)" "False $all" "the second run leaves every file and publishes"
 check "$(grep -c -- '-X POST' gh/calls)" 2 "the second run uploads only the file that was missing and its checksum"
 fresh; attach_all; echo "stale copy" > gh/assets/104; edit "s['releases'][0]['assets'].append({'id': 99, 'name': 'quadratique-0.0.9-x86_64-unknown-linux-gnu.tar.gz'})"; echo old > gh/assets/99
 step publish "$ATTACH" > /dev/null; check $? 0 "an attach over a stale copy and a foreign file succeeds"
-check "$(draft) $(attached)" "False $four" "the stale copy is replaced and the foreign file removed"
+check "$(draft) $(attached)" "False $all" "the stale copy is replaced and the foreign file removed"
 fresh; edit "s['corrupt_upload_of'] = 'quadratique-0.1.0-aarch64-unknown-linux-gnu.tar.gz'"; step publish "$ATTACH" > /dev/null 2>&1; check $? 1 "an attach whose uploaded file differs from the checked one fails"
 check "$(draft)" True "and leaves the release a draft"
 fresh; edit "s['tags']['v0.1.0'] = '$OTHER'"; step publish "$ATTACH" > /dev/null 2>&1; check $? 1 "an attach fails when the tag no longer points at the built commit"
@@ -124,7 +129,7 @@ fresh; edit "s['compare'] = {}"; STEP_CREATED='' GITHUB_SHA=$LATER name_release;
 fresh; edit "s['releases'][0]['target_commitish'] = '$OTHER'"; STEP_CREATED='' GITHUB_SHA=$LATER name_release; check $? 1 "a draft that targets another commit than its tag fails"
 fresh; edit "s['releases'] = []"; STEP_CREATED=false GITHUB_SHA=$LATER name_release; check $? 0 "with no release for the manifest's version, naming succeeds"
 check "$(wc -c < "$out")" 0 "and nothing is built"
-fresh; attach_all; edit "s['releases'][0]['draft'] = False"; STEP_CREATED=false GITHUB_SHA=$LATER name_release; check $? 0 "a published release with its four files needs no build"
+fresh; attach_all; edit "s['releases'][0]['draft'] = False"; STEP_CREATED=false GITHUB_SHA=$LATER name_release; check $? 0 "a published release with the files of every target needs no build"
 check "$(tr '\n' ' ' < "$out")" "version=0.1.0 crates-sha=$MERGE " "and only its version and the commit of its crates are named"
 fresh; attach_all; edit "s['releases'][0]['draft'] = False; s['compare'] = {}"; STEP_CREATED=false GITHUB_SHA=$LATER name_release; check $? 1 "a published release whose tag is outside the pushed history fails"
 check "$(wc -c < "$out")" 0 "and names nothing"
@@ -134,6 +139,10 @@ check "$(wc -c < "$out")" 0 "and names no commit for its crates"
 grep -q "was built from $MERGE" err; check $? 0 "and says which commit the release was built from"
 fresh; attach_all; edit "s['releases'][0]['draft'] = False"; echo wrong > gh/assets/101; STEP_CREATED=false GITHUB_SHA=$LATER name_release; check $? 1 "a published release whose archive does not match its SHA-256 file fails"
 check "$(changes)" 0 "and nothing is changed on it"
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  fresh; rm assets/quadratique-0.1.0-$target.tar.gz*; attach_all; edit "s['releases'][0]['draft'] = False"; STEP_CREATED=false GITHUB_SHA=$LATER name_release; check $? 1 "a published release without the archive for $target is unfinished, and fails"
+  grep -q "quadratique-0.1.0-$target.tar.gz" err; check $? 0 "and names the archive for $target"
+done
 fresh; edit "s['releases'].append(dict(s['releases'][0], id=8))"; STEP_CREATED=false GITHUB_SHA=$LATER name_release; check $? 1 "two releases with the same tag fail"
 
 echo "# the release's publication does not wait for crates.io"
@@ -226,6 +235,8 @@ for name in crates crates-build crates-publish; do
 done
 
 echo "# the build's artifact"
+check "$(uv run --quiet --with pyyaml==6.0.3 python -I -c "import sys, yaml; print(' '.join(sorted(t['target'] for t in yaml.safe_load(open(sys.argv[1]))['jobs']['binaries']['strategy']['matrix']['include'])))" "$workflow")" "$TARGETS" "the build matrix builds exactly the targets that a complete release holds"
+check "$TARGETS" "aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu" "a release holds Linux and macOS on arm64 and x86-64"
 check "$(uv run --quiet --with pyyaml==6.0.3 python -I -c "import sys, yaml; steps = yaml.safe_load(open(sys.argv[1]))['jobs']['binaries']['steps']; print(next(s for s in steps if s.get('uses', '').startswith('actions/upload-artifact'))['with'].get('overwrite'))" "$workflow")" True "a re-run of a build replaces its artifact (overwrite: true)"
 
 [ "$failures" = 0 ] || { echo "$failures case(s) failed"; exit 1; }

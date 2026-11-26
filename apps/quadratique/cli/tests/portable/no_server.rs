@@ -78,3 +78,125 @@ fn serve_on_windows_refuses_before_it_creates_the_data_folder() {
         "serve created the data folder before it refused"
     );
 }
+
+/// The release archive that a build for this platform installs, as the release workflow names it.
+fn this_platform() -> Option<&'static str> {
+    if cfg!(all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_arch = "x86_64"
+    )) {
+        Some("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_arch = "aarch64"
+    )) {
+        Some("aarch64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("x86_64-apple-darwin")
+    } else {
+        None
+    }
+}
+
+/// A release source on the loopback interface that describes the latest release as `description`, to every request.
+fn release_source(description: serde_json::Value) -> String {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let body = description.to_string();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    origin
+}
+
+/// The latest release, 99.0.0, with an archive for each of `targets`. `--check` downloads none of them.
+fn release_with(targets: &[&str]) -> serde_json::Value {
+    let assets: Vec<serde_json::Value> = targets
+        .iter()
+        .map(|target| {
+            let name = format!("quadratique-99.0.0-{target}.tar.gz");
+            serde_json::json!({
+                "name": name,
+                "browser_download_url": format!("http://127.0.0.1:9/download/{name}"),
+                "digest": format!("sha256:{}", "a".repeat(64)),
+            })
+        })
+        .collect();
+    serde_json::json!({ "tag_name": "v99.0.0", "assets": assets })
+}
+
+fn check_against(targets: &[&str]) -> serde_json::Value {
+    let parent = tempfile::tempdir().expect("a temporary folder");
+    let home = parent.path().join("home");
+    let origin = release_source(release_with(targets));
+    let elsewhere = tempfile::tempdir().expect("a folder outside any repository");
+    let run = Command::new(BINARY)
+        .env("QUADRATIQUE_HOME", &home)
+        .env("QUADRATIQUE_UPGRADE_SOURCE", &origin)
+        .current_dir(elsewhere.path())
+        .args(["upgrade", "--check"])
+        .output()
+        .expect("quadratique runs");
+    assert!(run.status.success(), "{run:?}");
+    assert!(!home.exists(), "upgrade --check created the data folder");
+    serde_json::from_slice(&run.stdout).expect("upgrade --check answers JSON")
+}
+
+#[test]
+fn upgrade_check_names_the_archive_of_this_platform_in_a_release_that_has_one() {
+    let answer = check_against(&[
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+    ]);
+
+    assert_eq!(answer["upToDate"], false, "{answer}");
+    match this_platform() {
+        Some(target) => assert_eq!(
+            answer["archive"],
+            format!("quadratique-99.0.0-{target}.tar.gz"),
+            "{answer}"
+        ),
+        None => assert!(
+            answer["noArchive"]
+                .as_str()
+                .is_some_and(|why| why.contains("no archive for this platform")),
+            "{answer}"
+        ),
+    }
+}
+
+#[test]
+fn upgrade_check_says_when_the_release_has_no_archive_for_this_platform() {
+    let answer = check_against(&["riscv64gc-unknown-linux-gnu"]);
+
+    assert!(answer.get("archive").is_none(), "{answer}");
+    assert!(
+        answer["noArchive"]
+            .as_str()
+            .is_some_and(|why| why.contains("no archive for this platform")
+                || why.contains("has no quadratique-99.0.0-")),
+        "{answer}"
+    );
+}

@@ -36,7 +36,7 @@ use crate::commands::{self, print_json, report};
 use release::{Release, Source, Version};
 use route::Route;
 
-pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and stops the server of this home if it ran the replaced file: before the rename it reads, on the home's socket, the server's generation and the file it runs, and after it asks that generation to stop, so that the next command starts the new build. A server started with quadratique serve is stopped too, and the person restarts it the way they started it. A server that runs another file is left running, and a server from before the socket (release 0.1) gets what to stop. Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server: the home's server lists the projects when it runs; otherwise the command reads the store file once, read-only, and the store engine may leave its lock file (.workspace.db-lock) beside it.";
+pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and stops the server of this home if it ran the replaced file: before the rename it reads, on the home's socket, the server's generation and the file it runs, and after it asks that generation to stop, so that the next command starts the new build. A server started with quadratique serve is stopped too, and the person restarts it the way they started it. A server that runs another file is left running, and a server from before the socket (release 0.1) gets what to stop. Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version, name the latest release's archive for this platform (archive) or say that it has none (noArchive), and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server: the home's server lists the projects when it runs; otherwise the command reads the store file once, read-only, and the store engine may leave its lock file (.workspace.db-lock) beside it.";
 
 /// A release binary is about 23 MiB.
 const BINARY_LIMIT: u64 = 128 << 20;
@@ -165,6 +165,12 @@ async fn run(request: &Request) -> Result<Value, String> {
             }
             answer["then"] = json!(then);
         }
+        if route.manager().is_none() {
+            match archive_of(&release) {
+                Ok(archive) => answer["archive"] = json!(archive),
+                Err(missing) => answer["noArchive"] = json!(missing),
+            }
+        }
         answer["run"] = json!(route.command());
         answer["skills"] = skills::report().await;
         return Ok(answer);
@@ -248,7 +254,7 @@ async fn install_release(
     Ok(answer)
 }
 
-/// The releases carry archives for Linux only; QUA-6 brings the other platforms.
+/// The releases carry archives for Linux and macOS only; Windows waits on QUA-38.
 #[cfg(not(unix))]
 async fn install_release(
     _home: &Home,
@@ -431,6 +437,25 @@ async fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result
             home.prepared().database().display(),
         )),
         (before, _) => Ok(before),
+    }
+}
+
+/// The name of the release's archive for this platform, or why there is none.
+fn archive_of(release: &Release) -> Result<String, String> {
+    let latest = release.version.to_string();
+    let Some(target) = target::THIS else {
+        return Err(format!(
+            "The releases carry no archive for this platform ({})",
+            target::described()
+        ));
+    };
+    let archive = target::files(&latest, target).archive;
+    if release.assets.contains_key(&archive) {
+        Ok(archive)
+    } else {
+        Err(format!(
+            "Release {latest} has no {archive} for this platform"
+        ))
     }
 }
 
