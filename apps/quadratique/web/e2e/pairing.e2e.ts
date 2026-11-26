@@ -191,3 +191,27 @@ test("a second link of quadratique ui, or a fake one, reaches an open tab withou
     await expect(notPaired(page)).toHaveCount(0);
   });
 });
+
+test("after server sign-out, a new link of quadratique ui reaches the open tab, which keeps the draft and saves it with the new token", async ({
+  page,
+  workspace,
+}) => {
+  seed(workspace);
+  const issue = page.getByRole("article");
+  const description = issue.getByRole("textbox", { name: "Description" });
+  await page.goto(workspace.url("/issues/DEM-1"));
+  await expect(issue).toContainText("Serve the web app");
+  await issue.getByRole("button", { name: "Edit description" }).click();
+  await description.fill("Kept across the sign-out");
+  workspace.quadratique("human", workspace.repository, "server", "sign-out");
+
+  const exchanged = page.waitForResponse((answer) => new URL(answer.url()).pathname === "/session");
+  await page.goto(workspace.url("/issues/DEM-1"));
+  expect((await exchanged).status()).toBe(200);
+  await expect(description).toHaveValue("Kept across the sign-out");
+
+  await issue.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(description).toHaveCount(0);
+  await expect(issue).toContainText("Kept across the sign-out");
+  await expect(notPaired(page)).toHaveCount(0);
+});

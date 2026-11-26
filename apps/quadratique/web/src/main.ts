@@ -15,7 +15,7 @@ import { ALL, shiftPlan, shownGroups } from "./board/view.ts";
 import { atPast, createRouter, paths, switched } from "./route.ts";
 import { vaporComponent } from "./vapor.ts";
 import { workspaceKey } from "./workspace.ts";
-import { pairingMachine } from "./pairing/pairing.machine.ts";
+import { pairingMachine, type AppSession } from "./pairing/pairing.machine.ts";
 import {
   NOT_PAIRED_AFTER,
   NOT_PAIRED_BEFORE,
@@ -34,7 +34,7 @@ const root = document.getElementById("app") ?? document.body;
 
 /** The app with the bearer `token`, mounted in `mount`; the function it resolves to ends it. */
 async function startApp(
-  token: string,
+  token: () => string,
   unauthorized: () => void,
   mount: HTMLElement,
 ): Promise<() => Promise<void>> {
@@ -173,12 +173,13 @@ async function startApp(
 }
 
 /** Starts the app; ending it before it has started ends it as soon as it has. */
-function openApp(token: string, unauthorized: () => void): () => void {
+function openApp(token: string, unauthorized: () => void): AppSession {
   const mount = document.createElement("div");
   root.replaceChildren(mount);
+  let current = token;
   let ended = false;
   let close: (() => Promise<void>) | undefined;
-  void startApp(token, unauthorized, mount).then(
+  void startApp(() => current, unauthorized, mount).then(
     (started) => {
       if (ended) {
         void started();
@@ -190,10 +191,15 @@ function openApp(token: string, unauthorized: () => void): () => void {
       reportError(error);
     },
   );
-  return () => {
-    ended = true;
-    void close?.();
-    mount.remove();
+  return {
+    end: () => {
+      ended = true;
+      void close?.();
+      mount.remove();
+    },
+    use: (next) => {
+      current = next;
+    },
   };
 }
 

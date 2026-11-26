@@ -10,12 +10,26 @@ class Ports {
   readonly opened: string[] = [];
   readonly ended: string[] = [];
   readonly redeemed: string[] = [];
+  /** The tokens the running app was told to use for its later requests. */
+  readonly used: string[] = [];
   unauthorized: (() => void) | undefined;
   refuse = false;
+  /** While set, a redemption waits until the test settles it. */
+  hold = false;
+  readonly waiting: { code: string; settle: (refused: boolean) => void }[] = [];
 
   readonly ports = {
     redeem: async (code: string) => {
       this.redeemed.push(code);
+      if (this.hold) {
+        const refused = await new Promise<boolean>((settle) => {
+          this.waiting.push({ code, settle });
+        });
+        if (refused) {
+          throw new Error("refused");
+        }
+        return `token-for-${code}`;
+      }
       if (this.refuse) {
         throw new Error("refused");
       }
@@ -32,8 +46,13 @@ class Ports {
     open: (token: string, unauthorized: () => void) => {
       this.opened.push(token);
       this.unauthorized = unauthorized;
-      return () => {
-        this.ended.push(token);
+      return {
+        end: () => {
+          this.ended.push(token);
+        },
+        use: (next: string) => {
+          this.used.push(next);
+        },
       };
     },
   };
@@ -162,22 +181,74 @@ describe("a code that arrives in a paired tab", () => {
     expect(ports.saved).toBeUndefined();
   });
 
-  test("that gives a new token saves it, and the app restarts with it only once its token is refused", async () => {
+  test("that gives a new token saves it, and the running app uses it for its later requests without restarting", async () => {
     const ports = new Ports();
     const actor = started(ports, { code: undefined, saved: "old" });
 
     actor.send({ type: "code", code: "new" });
-    await waitFor(actor, (snapshot) => snapshot.matches({ paired: "running" }), HANG_GUARD);
+
     await waitFor(actor, () => ports.saved === "token-for-new", HANG_GUARD);
+    await waitFor(actor, (snapshot) => snapshot.matches({ paired: "running" }), HANG_GUARD);
+    expect(ports.used).toEqual(["token-for-new"]);
     expect(ports.ended).toEqual([]);
+    expect(ports.opened).toEqual(["old"]);
+  });
+
+  test("whose exchange outlives a 401 of the old token is kept, and the app goes on with the new token", async () => {
+    const ports = new Ports();
+    ports.saved = "old";
+    ports.hold = true;
+    const actor = started(ports, { code: undefined, saved: "old" });
+    actor.send({ type: "code", code: "fresh" });
+    await waitFor(actor, () => ports.waiting.length === 1, HANG_GUARD);
 
     ports.unauthorized?.();
+    expect(actor.getSnapshot().matches({ paired: { exchanging: "refused" } })).toBe(true);
+    expect(ports.saved).toBeUndefined();
+    ports.waiting[0]?.settle(false);
 
-    expect(actor.getSnapshot().matches("paired")).toBe(true);
-    expect(ports.ended).toEqual(["old"]);
-    expect(ports.opened).toEqual(["old", "token-for-new"]);
-    expect(ports.saved).toBe("token-for-new");
+    await waitFor(actor, (snapshot) => snapshot.matches({ paired: "running" }), HANG_GUARD);
+    expect(ports.saved).toBe("token-for-fresh");
+    expect(ports.used).toEqual(["token-for-fresh"]);
+    expect(ports.ended).toEqual([]);
   });
+
+  test("whose exchange fails after the old token was refused or cleared leaves the tab unpaired", async () => {
+    for (const loss of ["unauthorized", "cleared"] as const) {
+      const ports = new Ports();
+      ports.hold = true;
+      const actor = started(ports, { code: undefined, saved: "old" });
+      actor.send({ type: "code", code: "fake" });
+      await waitFor(actor, () => ports.waiting.length === 1, HANG_GUARD);
+
+      if (loss === "unauthorized") {
+        ports.unauthorized?.();
+      } else {
+        actor.send({ type: "cleared" });
+      }
+      ports.waiting[0]?.settle(true);
+
+      await waitFor(actor, (snapshot) => snapshot.matches("unpaired"), HANG_GUARD);
+      expect(ports.ended).toEqual(["old"]);
+    }
+  });
+});
+
+test("a second code that arrives while the first is redeemed replaces it", async () => {
+  const ports = new Ports();
+  ports.hold = true;
+  const actor = started(ports, { code: "first", saved: undefined });
+  await waitFor(actor, () => ports.waiting.length === 1, HANG_GUARD);
+
+  actor.send({ type: "code", code: "second" });
+  await waitFor(actor, () => ports.waiting.length === 2, HANG_GUARD);
+  ports.waiting[0]?.settle(false);
+  ports.waiting[1]?.settle(false);
+
+  await waitFor(actor, (snapshot) => snapshot.matches("paired"), HANG_GUARD);
+  expect(ports.redeemed).toEqual(["first", "second"]);
+  expect(ports.opened).toEqual(["token-for-second"]);
+  expect(ports.saved).toBe("token-for-second");
 });
 
 describe("the code in the address", () => {
