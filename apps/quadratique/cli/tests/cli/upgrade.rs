@@ -1174,11 +1174,10 @@ impl FakeServer {
             "interface": quadratique_server::app::interface(),
             "schema": 1,
             "generation": GENERATION,
-            "control": 1,
-            "controls": [1],
+            "control": 2,
+            "controls": [1, 2],
             "executable": { "path": installed.binary, "device": meta.dev(), "inode": meta.ino() },
             "started": "on-demand",
-            "url": "http://127.0.0.1:9/cli",
         })
         .to_string();
         let asked = Arc::new(Mutex::new(Vec::new()));

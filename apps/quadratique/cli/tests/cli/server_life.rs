@@ -310,7 +310,7 @@ fn server_status_reaches_the_server_over_its_socket_and_reports_its_generation_a
     assert_eq!(status.get("url"), None, "{status}");
     assert_eq!(status.get("runtime"), None, "{status}");
     assert_eq!(status.get("web"), None, "{status}");
-    assert_eq!(status["control"], 1, "{status}");
+    assert_eq!(status["control"], 2, "{status}");
     assert_eq!(status["started"], "on-demand", "{status}");
     let generation = status["generation"].as_str().expect("a generation");
     assert!(

@@ -85,11 +85,11 @@ fn identity(home: &Home, interface: &str, control: u32, controls: &[u32]) -> Val
 }
 
 fn this_build(home: &Home) -> Value {
-    identity(home, &quadratique_server::app::interface(), 1, &[1])
+    identity(home, &quadratique_server::app::interface(), 2, &[1, 2])
 }
 
 fn another_build(home: &Home) -> Value {
-    identity(home, "fnv1a64:0000000000000000", 1, &[1])
+    identity(home, "fnv1a64:0000000000000000", 2, &[1, 2])
 }
 
 /// A socket of this account with mode 0600 at the home's socket name.
@@ -574,6 +574,62 @@ fn row_a_server_of_another_build_is_refused_by_commands_and_stopped_by_its_gener
     stop_real(&home, pid);
 }
 
+/// A server of an earlier release (0.2, 0.3) speaks control version 1 and serves the command line's routes on TCP only,
+/// with the same catalog: this build names it older in every row, says to stop it, and stops it through control 1.
+#[test]
+fn row_a_server_of_an_earlier_release_is_named_older_and_stopped_through_its_control_version() {
+    let home = Home::new();
+    let held = hold_the_home(&home);
+    let interface = quadratique_server::app::interface();
+    let earlier = identity(&home, &interface, 1, &[1]);
+    let fake = Fake::start(
+        fake_socket(&home),
+        http("200 OK", &earlier.to_string()),
+        Some(held),
+    );
+
+    let seen = status(&home);
+    assert_eq!(
+        (&seen["running"], &seen["older"], &seen["sameInterface"]),
+        (&json!(true), &json!(true), &json!(false)),
+        "{seen}"
+    );
+    assert!(
+        seen["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("quadratique server stop")),
+        "{seen}"
+    );
+    for args in [&["project", "list"][..], &["ui"], &["mcp"]] {
+        let refused = run(&home, args);
+        assert_eq!(refused.code, UNAVAILABLE, "{args:?}: {refused:?}");
+        assert!(
+            message(&refused).contains("earlier release")
+                && message(&refused).contains("Run `quadratique server stop`"),
+            "{args:?}: {refused:?}"
+        );
+    }
+    nothing_started(&home);
+    assert!(
+        fake.requests()
+            .iter()
+            .all(|request| request.starts_with("GET /server ")),
+        "{:?}",
+        fake.requests()
+    );
+
+    let stopped = run(&home, &["server", "stop"]).ok();
+    assert_eq!(
+        (&stopped["stopped"], &stopped["generation"]),
+        (&json!(true), &json!(GENERATION)),
+        "{stopped}"
+    );
+    assert_eq!(
+        fake.requests().last().map(String::as_str),
+        Some("POST /server/stop HTTP/1.1")
+    );
+}
+
 /// A control version this build does not know: commands say to upgrade; a stop happens only when the server still
 /// lists this build's version; a take-over never replaces a newer server with an older one.
 #[test]
@@ -583,7 +639,7 @@ fn row_a_newer_server_is_stopped_only_when_it_lists_this_control_version_and_nev
     let interface = quadratique_server::app::interface();
     let unlisted = Fake::start(
         fake_socket(&home),
-        http("200 OK", &identity(&home, &interface, 2, &[2]).to_string()),
+        http("200 OK", &identity(&home, &interface, 3, &[3]).to_string()),
         None,
     );
 
@@ -612,7 +668,7 @@ fn row_a_newer_server_is_stopped_only_when_it_lists_this_control_version_and_nev
         fake_socket(&home),
         http(
             "200 OK",
-            &identity(&home, &interface, 2, &[1, 2]).to_string(),
+            &identity(&home, &interface, 3, &[2, 3]).to_string(),
         ),
         Some(held),
     );
@@ -771,7 +827,7 @@ fn a_newer_server_of_another_database_or_without_a_generation_is_never_stopped()
     let home = Home::new();
     let _held = hold_the_home(&home);
     let interface = quadratique_server::app::interface();
-    let mut elsewhere = identity(&home, &interface, 2, &[1, 2]);
+    let mut elsewhere = identity(&home, &interface, 3, &[2, 3]);
     elsewhere["database"] = json!("/elsewhere/workspace.db");
     let other_database = Fake::start(
         fake_socket(&home),
@@ -796,7 +852,7 @@ fn a_newer_server_of_another_database_or_without_a_generation_is_never_stopped()
     );
     std::fs::remove_file(home.path().join("server.sock")).expect("the fake socket goes");
 
-    let mut nameless = identity(&home, &interface, 2, &[1, 2]);
+    let mut nameless = identity(&home, &interface, 3, &[2, 3]);
     nameless
         .as_object_mut()
         .expect("an object")

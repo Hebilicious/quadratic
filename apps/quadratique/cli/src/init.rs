@@ -585,6 +585,10 @@ async fn running_server(home: &background::Home) -> Result<background::Endpoint,
         {
             Ok(home.endpoint())
         }
+        Observed::Older(_) => Err(
+            "a server of an earlier release holds this home, and a dry run uses none: run `quadratique server stop`"
+                .to_owned(),
+        ),
         Observed::Serving { .. } | Observed::Newer(_) => {
             Err("the server that runs is of another build, and a dry run replaces none".to_owned())
         }

@@ -126,10 +126,10 @@ impl FoundThenGone {
             schema: Some(quadratique_server::store::SCHEMA_VERSION),
             generation: Some("0123456789abcdef0123456789abcdef".to_owned()),
             control: Some(CONTROL),
-            controls: Some(vec![CONTROL]),
+            controls: Some(vec![server::EARLIER_CONTROL, CONTROL]),
             executable: None,
             started: Some(Started::Serve),
-            url: Some(server::COMPATIBLE_URL.to_owned()),
+            url: None,
             web: None,
             address_kept: None,
         };

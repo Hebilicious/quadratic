@@ -4,7 +4,6 @@ goes first on PATH and catches them too.
 
 from __future__ import annotations
 
-import getpass
 import hashlib
 import os
 import shutil
@@ -125,12 +124,10 @@ def system_path() -> str:
 SOCKET_PATH_LIMIT = 107
 
 
-def quadratique_home(root: Path) -> Path:
-    """The Quadratique data folder of the sandbox at `root`: a short folder of its own in the system's temporary folder,
-    because the server's socket in it must have a short path, and a run folder can be deep. The same root always gets
-    the same folder, so a later analysis of the run finds its store while the folder exists."""
-    digest = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"qeval-{getpass.getuser()}-{digest}"
+def _not_regular_files(folder: str, names: list[str]) -> list[str]:
+    """A socket or a lock left in the data folder is not kept."""
+    return [name for name in names if not (Path(folder, name).is_file() or Path(folder, name).is_dir())
+            or Path(folder, name).is_symlink()]
 
 
 @dataclass
@@ -139,14 +136,18 @@ class Sandbox:
     tool: str
     binaries: dict[str, Path]
     log: list[dict] = field(default_factory=list)
+    # Quadratique's data folder while the sandbox lives: private, with a name no other account can guess, and short,
+    # because the server's socket in it may have a path of at most 107 bytes and a run folder can be deep. Its files are
+    # kept in `<root>/qhome` when the sandbox is removed, and a later sandbox of the same run starts from them.
+    qhome: Path = field(init=False)
 
     @property
     def home(self) -> Path:
         return self.root / "home"
 
     @property
-    def qhome(self) -> Path:
-        return quadratique_home(self.root)
+    def kept_qhome(self) -> Path:
+        return self.root / "qhome"
 
     @property
     def bin(self) -> Path:
@@ -171,8 +172,9 @@ class Sandbox:
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         (self.home / "run").chmod(0o700)
         # Quadratique refuses a home that a group or other accounts may use, and a socket path that is too long.
-        self.qhome.mkdir(mode=0o700, exist_ok=True)
-        self.qhome.chmod(0o700)
+        self.qhome = Path(tempfile.mkdtemp(prefix="qeval-"))
+        if self.kept_qhome.is_dir():
+            shutil.copytree(self.kept_qhome, self.qhome, dirs_exist_ok=True)
         socket = len(str(self.qhome / "server.sock").encode())
         if socket > SOCKET_PATH_LIMIT:
             raise SystemExit(f"qeval: the Quadratique socket in {self.qhome} would be {socket} bytes long, more than "
@@ -183,6 +185,15 @@ class Sandbox:
             wrapper.write_text(f'#!/bin/sh\nexec env {exports} "{real}" "$@"\n')
             wrapper.chmod(0o755)
         return self
+
+    def remove(self) -> None:
+        """Keeps the data folder's files in `<root>/qhome`, then removes the data folder. Call it once the tracker's
+        server has stopped."""
+        if not self.qhome.is_dir():
+            return
+        shutil.rmtree(self.kept_qhome, ignore_errors=True)
+        shutil.copytree(self.qhome, self.kept_qhome, ignore=_not_regular_files)
+        shutil.rmtree(self.qhome)
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = {
