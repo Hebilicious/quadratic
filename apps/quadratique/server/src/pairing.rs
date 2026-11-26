@@ -484,7 +484,7 @@ impl Handler for BearerGuard {
     }
 }
 
-/// A call failure of AcidCat's HTTP binding, so that a client of the route reads a message, and the status the page
+/// A call failure of AcidCat's HTTP surface, so that a client of the route reads a message, and the status the page
 /// acts on.
 fn unauthorized() -> Response<ResponseBody> {
     let body = serde_json::json!({ "kind": "unavailable", "message": NOT_PAIRED }).to_string();

@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use acid_cat_core::Application;
-use acid_cat_core::http::{HttpBinding, HttpOptions};
+use acid_cat_core::http::{HttpOptions, HttpSurface};
 use acid_cat_core::remote::{Handler, RequestBody, ResponseBody, Routes};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -141,11 +141,11 @@ pub fn routes(
             base: base.into(),
             ..HttpOptions::default()
         };
-        let binding = Arc::new(HttpBinding::new(app.clone(), context, options));
+        let surface = Arc::new(HttpSurface::new(app.clone(), context, options));
         Arc::new(BearerGuard {
             pairing: Arc::clone(pairing),
             requirement: pairing::REQUIRED,
-            inner: binding,
+            inner: surface,
         }) as Arc<dyn Handler>
     };
     vec![

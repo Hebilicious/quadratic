@@ -165,14 +165,14 @@ settings:
 catalogs:
   default:
     '@acid-cat/cli':
-      specifier: 0.13.1
-      version: 0.13.1
+      specifier: 0.19.0
+      version: 0.19.0
     '@acid-cat/core-effect':
-      specifier: 0.13.1
-      version: 0.13.1
+      specifier: 0.19.0
+      version: 0.19.0
     '@acid-cat/spec-ts':
-      specifier: 0.13.1
-      version: 0.13.1
+      specifier: 0.19.0
+      version: 0.19.0
     '@hebilicious/cssforge':
       specifier: 0.9.0
       version: 0.9.0
@@ -224,16 +224,16 @@ importers:
     devDependencies:
       '@acid-cat/cli':
         specifier: 'catalog:'
-        version: 0.13.1(playwright@1.64.1)(redis@6.3.1)
+        version: 0.19.0(playwright@1.64.1)(redis@6.3.1)
 
   apps/quadratique/web:
     dependencies:
       '@acid-cat/core-effect':
         specifier: 'catalog:'
-        version: 0.13.1(effect@4.1.4)
+        version: 0.19.0(effect@4.1.4)
       '@acid-cat/spec-ts':
         specifier: 'catalog:'
-        version: 0.13.1
+        version: 0.19.0
       effect:
         specifier: 'catalog:'
         version: 4.1.4
@@ -283,12 +283,12 @@ importers:
 
 packages:
 
-  '@acid-cat/catalog@0.13.1':
-    resolution: {integrity: sha512-QyC/EYCmST/PyFBnTpbdaPmriPFdr7+UWEoHJUx99PmY30q/J94PmUD9utl4KqGXYgYMvSsyVd2mNY1TEYtqKA==}
+  '@acid-cat/catalog@0.19.0':
+    resolution: {integrity: sha512-6IsmH6Zu7mOEqEQfRvNL+sNqjdPySNCH/LP0grp67FlmLF1eGWljYP0B8h3ToguONuxSckTWyyYbfafILo+Abg==}
     engines: {node: '>=24'}
 
-  '@acid-cat/cli@0.13.1':
-    resolution: {integrity: sha512-95PM/kADdVN24zQMoI9HEwI+C5AcwQ8QwQV1URGecM9HumBG6ydj66S1shTMXCTISsua1FSplEhSlQ/kt4F47w==}
+  '@acid-cat/cli@0.19.0':
+    resolution: {integrity: sha512-Am9+adxbJVeInb/eQs6yOvqbq5Agzs2zjEULosqM2v6LKhYr5F+9LcPQZ9N4lNeFKiAdwX9suWVY+5GcMLhfBw==}
     engines: {node: '>=24'}
     hasBin: true
     peerDependencies:
@@ -297,8 +297,8 @@ packages:
       playwright:
         optional: true
 
-  '@acid-cat/core-effect@0.13.1':
-    resolution: {integrity: sha512-S+mLRH8liMsl5u0egJodSsw0ZTdeYgvE3sMyp5yTNeDBlR0SW4c9k7dKEWMdewiWKOankQEKD4Qf+qAqzR7utA==}
+  '@acid-cat/core-effect@0.19.0':
+    resolution: {integrity: sha512-JTD/eKFlx54U56rShMhojCaaU55WtuXVht4AGRHSRZvn8q+dK7SOKH0ZG9l8wgy6h+SD3Ul7mgKleeKbDWS/GA==}
     engines: {node: '>=24'}
     peerDependencies:
       '@effect/platform-node': ^4.0.0
@@ -307,12 +307,12 @@ packages:
       '@effect/platform-node':
         optional: true
 
-  '@acid-cat/mcp-handshake@0.13.1':
-    resolution: {integrity: sha512-r2HyU1/nONpcklNvFCurqgpPAxNtFEoatR4hbXE9lC0ORUW/E+w1NvPYyP3vyWql3z/k6pvPHZwDWt56Jdidww==}
+  '@acid-cat/mcp-handshake@0.19.0':
+    resolution: {integrity: sha512-xty4NDF8qqJiejr/e0p9atGeXq4OzkAJDtB+Srs7iIMPRgkj974BgH4tIdaguotb7U+Fh2ASWn0HntH8x7/xdw==}
     engines: {node: '>=24'}
 
-  '@acid-cat/spec-ts@0.13.1':
-    resolution: {integrity: sha512-I0HpdcZJ4nRA3QBE0RddsjCSrBCDGnTDyATqV5fELxzf0wZdjP6u3roN/JMwB5TqCfBGomgYQ+6KLdQ5NJJVIA==}
+  '@acid-cat/spec-ts@0.19.0':
+    resolution: {integrity: sha512-H4HcbvDEb1kAJmP5gD5WRW5yz6G2YyYOuHRvsPSviUJiP3wMSOCPizH2GX6d4R0DsXn94ewWr/wPpMUS5K7krA==}
     engines: {node: '>=24'}
 
   '@babel/helper-string-parser@7.29.15':
@@ -1724,12 +1724,12 @@ packages:
 
 snapshots:
 
-  '@acid-cat/catalog@0.13.1': {}
+  '@acid-cat/catalog@0.19.0': {}
 
-  '@acid-cat/cli@0.13.1(playwright@1.64.1)(redis@6.3.1)':
+  '@acid-cat/cli@0.19.0(playwright@1.64.1)(redis@6.3.1)':
     dependencies:
-      '@acid-cat/catalog': 0.13.1
-      '@acid-cat/spec-ts': 0.13.1
+      '@acid-cat/catalog': 0.19.0
+      '@acid-cat/spec-ts': 0.19.0
       '@effect/platform-node': 4.1.5(effect@4.1.4)(redis@6.3.1)
       '@effect/platform-node-shared': 4.1.5(effect@4.1.4)
       '@modelcontextprotocol/client': 2.4.0
@@ -1742,18 +1742,18 @@ snapshots:
       - redis
       - utf-8-validate
 
-  '@acid-cat/core-effect@0.13.1(effect@4.1.4)':
+  '@acid-cat/core-effect@0.19.0(effect@4.1.4)':
     dependencies:
-      '@acid-cat/catalog': 0.13.1
-      '@acid-cat/mcp-handshake': 0.13.1
-      '@acid-cat/spec-ts': 0.13.1
+      '@acid-cat/catalog': 0.19.0
+      '@acid-cat/mcp-handshake': 0.19.0
+      '@acid-cat/spec-ts': 0.19.0
       effect: 4.1.4
 
-  '@acid-cat/mcp-handshake@0.13.1':
+  '@acid-cat/mcp-handshake@0.19.0':
     dependencies:
-      '@acid-cat/spec-ts': 0.13.1
+      '@acid-cat/spec-ts': 0.19.0
 
-  '@acid-cat/spec-ts@0.13.1': {}
+  '@acid-cat/spec-ts@0.19.0': {}
 
   '@babel/helper-string-parser@7.29.15': {}
 

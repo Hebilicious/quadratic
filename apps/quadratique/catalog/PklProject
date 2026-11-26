@@ -1,5 +1,5 @@
 amends "pkl:Project"
 
 dependencies {
-  ["acidcat"] { uri = "package://pkg.pkl-lang.org/github.com/Hebilicious/acidcat/acid-cat-catalog@0.2.1" }
+  ["acidcat"] { uri = "package://pkg.pkl-lang.org/github.com/Hebilicious/acidcat/acid-cat-catalog@0.4.0" }
 }

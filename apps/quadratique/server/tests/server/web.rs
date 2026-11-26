@@ -454,15 +454,15 @@ async fn a_link_in_the_built_app_to_a_file_outside_it_is_not_served() {
 }
 
 #[test]
-fn every_target_the_server_serves_over_http_declares_the_http_binding() {
+fn every_target_the_server_serves_over_http_declares_the_http_surface() {
     let catalog: Value = serde_json::from_str(CATALOG_JSON).expect("the catalog is JSON");
     for target in [server::TARGET, WEB_TARGET, WEBMCP_TARGET] {
-        let bindings = &catalog["targets"][target]["bindings"];
+        let surfaces = &catalog["targets"][target]["surfaces"];
         assert!(
-            bindings
+            surfaces
                 .as_array()
-                .is_some_and(|bindings| bindings.contains(&json!("http"))),
-            "{target}: {bindings}"
+                .is_some_and(|surfaces| surfaces.contains(&json!("http"))),
+            "{target}: {surfaces}"
         );
     }
 }

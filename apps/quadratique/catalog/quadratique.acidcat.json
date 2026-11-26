@@ -4,11 +4,11 @@
   "description": "An issue tracker for one person working with many AI agents: ready work, atomic claims, full history, and the statuses of the work after the merge.",
   "targets": {
     "cli": {
-      "bindings": [
+      "surfaces": [
         "cli",
         "http"
       ],
-      "description": "The `quadratique` command line, for the human and for agents in their worktrees. It is a client of the server's HTTP binding of this target.",
+      "description": "The `quadratique` command line, for the human and for agents in their worktrees. It is a client of the server's HTTP surface of this target.",
       "options": {
         "cli": {
           "aliases": {
@@ -42,20 +42,20 @@
       }
     },
     "mcp": {
-      "bindings": [
+      "surfaces": [
         "mcp"
       ],
       "description": "Coding agents, through the MCP server that `quadratique mcp` starts: the agent interface, to find work, claim it, record it, finish it with evidence, and read the history."
     },
     "web": {
-      "bindings": [
+      "surfaces": [
         "typescript",
         "http"
       ],
       "description": "The web app of the human, through its TypeScript core."
     },
     "webmcp": {
-      "bindings": [
+      "surfaces": [
         "webmcp",
         "http"
       ],
