@@ -307,9 +307,10 @@ the commands above meet no Gatekeeper prompt.
 
 `install.sh` writes the binary into a new file, so the installed `quadratique` carries no
 quarantine mark even when you downloaded the archive with a browser (the release workflow checks
-this on its macOS runners). Only the unpacked `bin/quadratique` itself can carry it, for example
-when Finder unpacked a downloaded archive. Running that file can then stop with a message that
-Apple cannot check "quadratique" for malicious software. Install it with `install.sh` and run the
+this on its macOS runners). Only the unpacked `bin/quadratique` itself carries it: macOS's `tar`,
+like Finder, gives the files it unpacks the mark of a downloaded archive (seen on the runners).
+Running that file directly can then stop with a message that Apple cannot check "quadratique" for
+malicious software. Install it with `install.sh` and run the
 installed copy, or remove the mark from that file:
 
 ```sh
