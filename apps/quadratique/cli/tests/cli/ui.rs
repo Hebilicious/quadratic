@@ -614,3 +614,22 @@ fn a_running_server_says_its_address_is_kept_only_while_the_next_start_would_ask
     assert_eq!(after_edit["addressKept"], false, "{after_edit}");
     assert_eq!(after_removal["addressKept"], false, "{after_removal}");
 }
+
+#[test]
+fn the_first_start_after_strict_off_makes_a_new_token_even_with_no_strict_start_in_between() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let token = redeem(&link_of(&ui_url(&home, elsewhere.path(), &app)));
+
+    strict(&home, elsewhere.path(), "on");
+    strict(&home, elsewhere.path(), "off");
+    stop(&home, elsewhere.path());
+    let url = url_of(&ui_url(&home, elsewhere.path(), &app));
+
+    assert_eq!(
+        listed_with(&url, &token),
+        401,
+        "the old token outlived strict on and off"
+    );
+}
