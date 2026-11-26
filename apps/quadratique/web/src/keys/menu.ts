@@ -1,7 +1,7 @@
 import type { Command } from "../board/commands.machine.ts";
 import type { IssueSummary, Project } from "../board/model.ts";
 import type { IssuePatch } from "../core/quadratique.ts";
-import { closeChanges } from "../board/lifecycle.ts";
+import { finishChanges } from "../board/lifecycle.ts";
 import {
   ALL,
   GROUPINGS,
@@ -142,12 +142,12 @@ function issueItems(input: MenuInput): MenuItem[] {
       },
     });
   }
-  if (targets.length === 1 && closeChanges(first, project)) {
+  if (targets.length === 1 && finishChanges(first, project)) {
     items.push({
-      id: "close",
+      id: "finish",
       group: "Issues",
-      label: `Close ${first.id} with evidence…`,
-      action: { kind: "go", path: paths.closing(first.id) },
+      label: `Finish ${first.id} with evidence…`,
+      action: { kind: "go", path: paths.finishing(first.id) },
     });
   }
   return items;

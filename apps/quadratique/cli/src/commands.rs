@@ -230,7 +230,7 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
 
     let database = home.prepared().database();
     let value = match background::observe(home).await? {
-        Observed::Serving { identity, .. } => answered_over_socket(&identity),
+        Observed::Serving { identity, .. } => answered_over_socket(home, &identity),
         Observed::OtherDatabase(identity) => json!({
             "otherDatabase": identity.database,
             "pid": identity.pid,
@@ -309,7 +309,7 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
 }
 
 #[cfg(unix)]
-fn answered_over_socket(identity: &server::Identity) -> Value {
+fn answered_over_socket(home: &Home, identity: &server::Identity) -> Value {
     let same = identity.interface.as_deref() == Some(quadratique_server::app::interface().as_str());
     let mut value = json!({
         "running": true,
@@ -324,7 +324,7 @@ fn answered_over_socket(identity: &server::Identity) -> Value {
     if !same {
         value["interface"] = json!(identity.interface);
     }
-    if let Some(kept) = identity.address_kept {
+    if let Some(kept) = kept_by(home, identity) {
         value["addressKept"] = json!(kept);
     }
     if let Some(origin) = identity
@@ -484,16 +484,32 @@ async fn sign_out(home: &Home) -> Result<Value, String> {
     )
 }
 
-/// Whether the running server listens on the port its home keeps, as it says itself; a server that does not say gets the
-/// home's setting.
+/// Whether the next start of the server asks for the address of the server that runs now ([`server::address_kept`]);
+/// with no answer from a server that says, what the next start does.
 async fn address_kept(home: &Home) -> bool {
     #[cfg(unix)]
     if let Ok(identity) = server::identity_over_socket(home.prepared()).await
-        && let Some(kept) = identity.address_kept
+        && let Some(kept) = kept_by(home, &identity)
     {
         return kept;
     }
     !server::strict(home.prepared())
+}
+
+/// What the running server said at its start, checked against the home as it is now; nothing from a server that does
+/// not say, or names no address.
+fn kept_by(home: &Home, identity: &server::Identity) -> Option<bool> {
+    let said = identity.address_kept?;
+    let port = identity
+        .url
+        .as_deref()?
+        .strip_prefix("http://")?
+        .split('/')
+        .next()?
+        .parse::<std::net::SocketAddr>()
+        .ok()?
+        .port();
+    Some(server::address_kept(home.prepared(), said, port))
 }
 
 const OPENER: &str = if cfg!(target_os = "macos") {

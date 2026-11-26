@@ -28,7 +28,7 @@ use crate::web::{self, WebApp};
 mod address;
 mod closing;
 
-pub use address::{Listen, kept_port, set_strict, strict};
+pub use address::{Listen, address_kept, kept_port, set_strict, strict};
 
 pub const TARGET: &str = "cli";
 pub const BASE: &str = "/cli";
@@ -686,6 +686,8 @@ async fn start_checked(
 ) -> Result<Server, ServerError> {
     web::refuse_overlap(&web_app, home.folder()).map_err(ServerError::WebApp)?;
     let owner: closing::HomeLock = Arc::new(own(home, waits).await?);
+    // Read once, under the home's lock: everything this start does follows this one value.
+    let strict = address::strict(home);
     #[cfg(unix)]
     let (socket_listener, socket_file) = home::bind_socket(home).await?;
     let credentials = Credentials::open(home.credentials())?.holding(Arc::clone(&owner));
@@ -710,7 +712,7 @@ async fn start_checked(
     let identify: Arc<dyn Handler> = Arc::new(Identify {
         answer: Arc::clone(&answer),
     });
-    let pairing = Pairing::open(home, address::strict(home))?;
+    let pairing = Pairing::open(home, strict)?;
     let watcher = Watcher::start(store.clone(), look_every, GIT_LIMIT, watcher::READ_WAIT);
     let looks = watcher.looks();
     let origin = web::Origin::default();
@@ -750,7 +752,7 @@ async fn start_checked(
         web::OriginHeader::Required,
     ));
     let admit = callers::owner_only(own_account);
-    let listening = address::bind(home, listen).and_then(|bound| {
+    let listening = address::bind(home, listen, strict).and_then(|bound| {
         let (listener, record) = address::listen(bound, LISTEN_BACKLOG)?;
         let served = serve::serve_on(listener, routes, Arc::clone(&admit), serve::REFUSALS)?;
         Ok((served, record))

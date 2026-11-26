@@ -178,7 +178,7 @@ async fn a_given_port_even_zero_never_reads_or_writes_the_kept_port() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_strict_home_neither_reads_nor_writes_a_kept_port_and_lists_the_ports_it_served() {
+async fn a_strict_home_never_takes_a_kept_port_forgets_it_and_lists_the_ports_it_served() {
     let home = Home::strict();
     let held = held_port();
     home.write_kept(&format!("{}\n", held.port));
@@ -192,8 +192,8 @@ async fn a_strict_home_neither_reads_nor_writes_a_kept_port_and_lists_the_ports_
 
     assert_ne!(one, held.port, "a strict home read server.port");
     assert_ne!(one, two, "a strict home served a port twice");
-    assert_eq!(home.kept(), Some(format!("{}\n", held.port)));
-    assert_eq!(home.served(), vec![one, two]);
+    assert_eq!(home.kept(), None, "a strict start kept server.port");
+    assert_eq!(home.served(), vec![held.port, one, two]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

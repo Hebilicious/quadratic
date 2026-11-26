@@ -85,16 +85,16 @@ impl Workspace {
             .await;
     }
 
-    async fn close(&self, agent: &Who, issue: &str) {
-        let closed = self
+    async fn finish(&self, agent: &Who, issue: &str) {
+        let finished = self
             .board
             .ok(
                 agent,
-                "issue.close",
+                "issue.finish",
                 json!({ "issue": issue, "evidence": "the tests pass" }),
             )
             .await;
-        assert_eq!(closed["issue"]["status"], "in-review", "{closed}");
+        assert_eq!(finished["issue"]["status"], "in-review", "{finished}");
     }
 
     async fn squash_with_refs(&self, branch: &str, issue: &str) {
@@ -156,7 +156,7 @@ async fn a_branch_merged_with_no_ff_moves_its_claimed_issue_from_review_to_merge
         .repository
         .commit(&worktree, "parser.rs", "Parse the headers");
     space.board.look().await;
-    space.close(&agent, &issue).await;
+    space.finish(&agent, &issue).await;
 
     let merge = space
         .repository
@@ -218,8 +218,8 @@ async fn a_squash_merge_settles_the_issue_its_refs_trailer_names_and_nothing_wit
         .repository
         .commit(&second_worktree, "body.rs", "Parse the body");
     space.board.look().await;
-    space.close(&first, &named).await;
-    space.close(&second, &unnamed).await;
+    space.finish(&first, &named).await;
+    space.finish(&second, &unnamed).await;
 
     let root = &space.repository.root;
     git(root, &["merge", "--quiet", "--squash", "agent-a"]);
@@ -253,7 +253,7 @@ async fn a_github_squash_settles_the_issue_named_by_a_refs_line_in_any_paragraph
         .repository
         .commit(&worktree, "headers.rs", "Parse the headers");
     space.board.look().await;
-    space.close(&agent, &issue).await;
+    space.finish(&agent, &issue).await;
 
     let root = &space.repository.root;
     git(root, &["merge", "--quiet", "--squash", "agent-a"]);
@@ -346,7 +346,7 @@ async fn a_landing_while_the_server_is_down_is_settled_at_start_and_never_twice(
         .repository
         .commit(&worktree, "parser.rs", "Parse the headers");
     space.board.look().await;
-    space.close(&agent, &issue).await;
+    space.finish(&agent, &issue).await;
     let Workspace { board, repository } = space;
     let (home, code) = board.stop().await;
 
@@ -712,7 +712,7 @@ async fn a_claimed_branch_merged_on_the_remote_settles_its_issue_once_this_clone
         .repository
         .commit(&worktree, "parser.rs", "Parse the headers");
     space.board.look().await;
-    space.close(&agent, &issue).await;
+    space.finish(&agent, &issue).await;
     git(&worktree, &["push", "--quiet", "origin", "agent-a"]);
 
     let merge = remote.merge("agent-a");
@@ -754,7 +754,7 @@ async fn a_landing_after_the_remote_main_was_forced_back_and_moved_on_is_seen() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_squash_with_refs_before_close_leaves_the_claimed_issue_in_progress_with_its_landing() {
+async fn a_squash_with_refs_before_finish_leaves_the_claimed_issue_in_progress_with_its_landing() {
     let space = Workspace::new("ABC").await;
     let issue = space.issue("Parse the headers").await;
     let (agent, worktree) = space.agent_on("agent-a").await;
@@ -774,7 +774,7 @@ async fn a_squash_with_refs_before_close_leaves_the_claimed_issue_in_progress_wi
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_close_after_its_squash_with_refs_landed_puts_the_issue_in_review_where_later_looks_leave_it()
+async fn a_finish_after_its_squash_with_refs_landed_puts_the_issue_in_review_where_later_looks_leave_it()
  {
     let space = Workspace::new("ABC").await;
     let issue = space.issue("Parse the headers").await;
@@ -787,7 +787,7 @@ async fn a_close_after_its_squash_with_refs_landed_puts_the_issue_in_review_wher
     space.squash_with_refs("agent-a", &issue).await;
     space.board.look().await;
 
-    space.close(&agent, &issue).await;
+    space.finish(&agent, &issue).await;
     space.board.look().await;
 
     let (status, claim) = space.status(&issue).await;
@@ -886,7 +886,7 @@ async fn a_merged_issue_shows_its_branch_pull_request_and_landed_commit_without_
         .repository
         .commit(&worktree, "parser.rs", "Parse the headers");
     space.board.look().await;
-    space.close(&agent, &issue).await;
+    space.finish(&agent, &issue).await;
 
     space.squash_with_refs("parse-headers", &issue).await;
     let squashed = space.repository.tip(&space.repository.root, "main");
@@ -922,7 +922,7 @@ async fn a_merged_issue_shows_its_branch_pull_request_and_landed_commit_without_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn only_issue_get_answers_the_work_and_list_claim_and_close_stay_as_they_were() {
+async fn only_issue_get_answers_the_work_and_list_claim_and_finish_stay_as_they_were() {
     let space = Workspace::new("ABC").await;
     space.remote("origin", "git@github.com:Owner/repo.git");
     let issue = space.issue("Parse the headers").await;
@@ -934,11 +934,11 @@ async fn only_issue_get_answers_the_work_and_list_claim_and_close_stay_as_they_w
     space
         .repository
         .commit(&worktree, "parser.rs", "Parse the headers");
-    let closed = space
+    let finished = space
         .board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "the tests pass" }),
         )
         .await;
@@ -951,7 +951,7 @@ async fn only_issue_get_answers_the_work_and_list_claim_and_close_stay_as_they_w
         .ok(&space.repository.human(), "issue.ready", json!({}))
         .await;
 
-    for answer in [&claimed, &closed, &listed, &ready] {
+    for answer in [&claimed, &finished, &listed, &ready] {
         assert!(!answer.to_string().contains("\"work\""), "{answer}");
     }
     let shown = space.board.get(&issue).await;
@@ -1199,7 +1199,7 @@ async fn after_the_project_is_bound_to_another_repository_its_old_work_keeps_bra
         .repository
         .commit(&worktree, "parser.rs", "Parse the headers");
     space.board.look().await;
-    space.close(&agent, &issue).await;
+    space.finish(&agent, &issue).await;
     space.squash_with_refs("parse-headers", &issue).await;
     let squashed = space.repository.tip(&space.repository.root, "main");
     space.board.look().await;

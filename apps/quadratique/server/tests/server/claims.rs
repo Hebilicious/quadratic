@@ -482,7 +482,7 @@ mod in_process {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn close_answers_the_whole_issue_with_the_evidence_it_saved() {
+async fn finish_answers_the_whole_issue_with_the_evidence_it_saved() {
     let board = start().await;
     board.project("DEM").await;
     let issue = board.issue("Ship the parser").await;
@@ -491,17 +491,17 @@ async fn close_answers_the_whole_issue_with_the_evidence_it_saved() {
         .ok(&worker, "issue.claim", json!({ "issue": issue }))
         .await;
 
-    let closed = board
+    let finished = board
         .ok(
             &worker,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "cargo test: 12 passed at 1a2b3c4" }),
         )
         .await;
 
     assert_eq!(
-        closed["issue"]["evidence"], "cargo test: 12 passed at 1a2b3c4",
-        "{closed}"
+        finished["issue"]["evidence"], "cargo test: 12 passed at 1a2b3c4",
+        "{finished}"
     );
     let mut shown = board
         .ok(&worker, "issue.get", json!({ "issue": issue }))
@@ -511,7 +511,7 @@ async fn close_answers_the_whole_issue_with_the_evidence_it_saved() {
         .expect("an issue")
         .remove("work");
     assert_eq!(work, Some(json!({ "branch": "parser", "commits": [] })));
-    assert_eq!(closed["issue"], shown["issue"]);
+    assert_eq!(finished["issue"], shown["issue"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

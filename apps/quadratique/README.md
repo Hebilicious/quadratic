@@ -85,14 +85,15 @@ starts the server on the port you give (`0`: one the system chooses) and keeps n
 While the server is down, another account of this machine can listen on the kept port. A tab or a
 bookmark then reaches that account's program, which can read what the browser saved for that
 address. On a machine whose other accounts you do not trust, run `quadratique server strict on`:
-from the next start of the server, each start takes an address it never served and a new token,
-and you run `quadratique ui --open` after each restart. `quadratique server strict off` goes back
-to the default from the next start, which takes a new address and a new token, so each browser is
-let in once more with `quadratique ui --open`; after that both are kept. Neither command starts a
-server. `server status` and `ui` say `"addressKept": true` only when the running server listens on
-the port its home keeps: not under strict, not with `serve --port`, and not when `server.port`
-could not be written (the log says why). With no server running, `addressKept` says what the next
-start does.
+from the next start of the server, each start takes an address it never served and a new token, and
+you run `quadratique ui --open` after each restart. `quadratique server strict off` goes back to the
+default from the next start, which takes a new address and a new token, so each browser is let in
+once more with `quadratique ui --open`; after that both are kept. Neither command starts a server.
+`server status` and `ui` say `"addressKept": true` only when the next start would ask for the
+address the server listens on now: the server kept that port at its start (not with `serve --port`,
+and not when `server.port` could not be written; the log says why), strict is off now, and
+`server.port` still names that port. With no server running, `addressKept` says what the next start
+does.
 
 ### Let a browser in
 
@@ -550,7 +551,7 @@ The command answers `{ "moved": …, "left": … }`, each a count and the first 
 - **Missed:** an issue whose landing the server never saw. It sees a landing when it looks at the
   repository after `git fetch` or a merge; it does not see one from before its first look at the
   project, or a branch deleted before its next look. A squash merge without `Refs: DEM-12` names no
-  issue, and a squash merge before the agent's `close` leaves the issue in review. After
+  issue, and a squash merge before the agent's `finish` leaves the issue in review. After
   a rewrite of the default branch, an issue whose old landing is no longer in its history is never
   moved. Move such an issue yourself.
 
@@ -687,6 +688,30 @@ GitHub, and whoever can publish a release of `Hebilicious/quadratique`.
 The first start of a new binary upgrades the store to that binary's schema, one commit per
 step. A binary refuses a store newer than the schema it knows. Back up the store (see "Backups") before you upgrade, so that you can go back to the older binary
 with the store as it was.
+
+### `close` is now `finish`
+
+Release 0.2 renames the command that hands finished work to review, with its evidence:
+`quadratique close` is now `quadratique finish`, the capabilities `issue.close` and `issues.close`
+are now `issue.finish` and `issues.finish`, and the refusal `NotClosed` of several issues is now
+`NotFinished`. On GitHub, closing an issue without a merge drops it; here the work is done and
+waits for review, so the new word says that.
+
+The old names still work in 0.2 and go away in the release after it. `quadratique close`,
+`quadratique issue close`, `quadratique issues close` and `quadratique call issue.close` do what
+they did and answer what they answered, `NotClosed` included; after the answer or the refusal,
+which go to standard output, they add one line on standard error:
+`` quadratique: `close` is now `finish`; `close` goes away in the release after 0.2. ``. Over
+HTTP, `issue.close` and `issues.close` answer as before. The MCP tool is `issue.finish` only: an
+MCP client reads the tools from the server at each start, so an agent whose MCP session was open
+during the upgrade restarts it to see `issue.finish`.
+
+Every finish now writes the history operation `issue.finish`, whichever name was called. History
+written before 0.2 keeps `issue.close`; `history query` shows both as they were written, and the
+web app reads both as "finished with evidence". An older build shows `issue.finish` as it is
+written, in `history query` and in its web app. Update each repository's skill with
+`quadratique init` (see "Update a repository's skill after an upgrade"); scripts that call
+`quadratique close` need `finish` before the release after 0.2.
 
 ### The repositories after an upgrade
 
@@ -860,9 +885,11 @@ runs on every push to `main`:
    - "crates to publish" reads crates.io's index and names the crates that lack the release's
      version. When both are there, the next two jobs do not run.
    - "build the crates" checks out the tag's commit by its SHA, checks that both crates have the
-     release's version, runs `moon run quadratique-server:preflight` and
-     `cargo package --workspace`, which builds each crate from its package, and records the
-     SHA-256 of each package. It runs project code, so it holds no token.
+     release's version, builds the web app, stages it in the server crate and runs
+     `preflight.sh` (the steps of the task `quadratique-server:preflight`, which moon does not
+     run in a workflow), then runs `cargo package --workspace`, which builds each crate from its
+     package, and records the SHA-256 of each package. It runs project code, so it holds no
+     token.
    - "publish the crates to crates.io" runs the checkout, rustup and cargo, and no project code:
      no install script, no moon task, no build. It reads the index again, packages the missing
      crates with `cargo package --no-verify` and the staged web app of the build job, and stops
@@ -967,7 +994,9 @@ repository without asking:
 `moon run quadratique-server:preflight` first builds the web app and stages it (it depends on
 `stage-web`), then fails when a crate lacks the staged web app (or it is not the current build of
 `web/dist`), the catalog JSON, a skill file or the licence. It also catches a checkout without
-symbolic links, where git writes each link as a plain file holding a path.
+symbolic links, where git writes each link as a plain file holding a path. It is a task for a
+person's machine: `stage-web` and `preflight` have `runInCI: false`, so in a workflow moon answers
+"No tasks found" for them, and the Release workflow runs their steps itself.
 `moon run quadratique-server:package-test` checks the preflight's cases and each case of
 `build.rs`, on a copy of the crates that it stages and packages itself: it leaves this checkout's
 `server/web-dist` as it was.

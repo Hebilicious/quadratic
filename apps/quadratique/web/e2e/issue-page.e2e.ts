@@ -172,7 +172,7 @@ test("an issue stacked on another names it both ways, and its page shows why whi
     await writeFile(join(base, "guide.md"), "# The guide\n");
     await workspace.git(base, "add", "guide.md");
     await workspace.git(base, "commit", "--quiet", "--message", "Write the guide");
-    workspace.quadratique("agent", base, "close", "--issue", "DEM-1", "--evidence", "written");
+    workspace.quadratique("agent", base, "finish", "--issue", "DEM-1", "--evidence", "written");
     workspace.quadratique(
       "human",
       repository,

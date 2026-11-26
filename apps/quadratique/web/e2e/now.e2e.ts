@@ -90,7 +90,7 @@ test("the now view shows, live and across projects, what every agent is doing an
     workspace.quadratique(
       "agent",
       publish,
-      "close",
+      "finish",
       "--issue",
       "WEB-1",
       "--evidence",

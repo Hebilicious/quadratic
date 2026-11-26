@@ -507,7 +507,7 @@ mod issue_release {
     }
 }
 
-mod issue_close {
+mod issue_finish {
     use super::*;
 
     #[test]
@@ -515,7 +515,7 @@ mod issue_close {
         for board in boards() {
             assert_eq!(
                 decide(
-                    &Event::Close,
+                    &Event::Finish,
                     &board.issue(board.canceled),
                     &human(),
                     &board.project
@@ -536,7 +536,7 @@ mod issue_close {
             for status in [board.merged, board.done] {
                 let issue = assigned(board.issue(status), Assignee::Human);
                 assert_eq!(
-                    decide(&Event::Close, &issue, &other_agent(), &board.project),
+                    decide(&Event::Finish, &issue, &other_agent(), &board.project),
                     Ok(Outcome::Unchanged),
                     "{}: {status}",
                     board.label
@@ -553,7 +553,7 @@ mod issue_close {
                 Assignee::Human,
             );
             assert_eq!(
-                decide(&Event::Close, &issue, &agent(), &board.project),
+                decide(&Event::Finish, &issue, &agent(), &board.project),
                 Err(Failure::HumanOnly),
                 "{}",
                 board.label
@@ -566,7 +566,7 @@ mod issue_close {
         for board in boards() {
             let held = claimed(board.issue(board.in_progress), claim_of(&other_agent()));
             assert_eq!(
-                decide(&Event::Close, &held, &agent(), &board.project),
+                decide(&Event::Finish, &held, &agent(), &board.project),
                 Err(Failure::Held {
                     issue: "DEM-12".into(),
                     claim: Box::new(claim_of(&other_agent())),
@@ -576,7 +576,7 @@ mod issue_close {
             );
             assert_eq!(
                 decide(
-                    &Event::Close,
+                    &Event::Finish,
                     &board.issue(board.todo),
                     &agent(),
                     &board.project
@@ -597,7 +597,7 @@ mod issue_close {
             for status in [board.in_progress, board.in_review] {
                 let issue = claimed(board.issue(status), claim_of(&agent()));
                 assert_eq!(
-                    decide(&Event::Close, &issue, &agent(), &board.project),
+                    decide(&Event::Finish, &issue, &agent(), &board.project),
                     moved(board.in_review, ClaimAfter::Kept, true),
                     "{}: {status} -> in-review",
                     board.label
@@ -612,16 +612,16 @@ mod issue_close {
             let on_main = agent_in("/w/demo", "main");
             let issue = claimed(board.issue(board.in_review), claim_of(&on_main));
             assert_eq!(
-                decide(&Event::Close, &issue, &on_main, &board.project),
+                decide(&Event::Finish, &issue, &on_main, &board.project),
                 moved(board.merged, ClaimAfter::Ended, true),
                 "{}: in-review -> merged",
                 board.label
             );
             let held_by_another = claimed(board.issue(board.in_review), claim_of(&other_agent()));
             assert_eq!(
-                decide(&Event::Close, &held_by_another, &human(), &board.project),
+                decide(&Event::Finish, &held_by_another, &human(), &board.project),
                 moved(board.merged, ClaimAfter::Ended, true),
-                "{}: the human closes",
+                "{}: the human finishes",
                 board.label
             );
         }
@@ -689,7 +689,7 @@ mod ref_watcher_merge {
     }
 
     #[test]
-    fn row_1_a_trailer_lands_a_claimed_issue_that_its_holder_closed_into_review() {
+    fn row_1_a_trailer_lands_a_claimed_issue_that_its_holder_finished_into_review() {
         for board in boards() {
             let issue = claimed(board.issue(board.in_review), claim_of(&agent()));
             assert_eq!(

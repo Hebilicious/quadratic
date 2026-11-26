@@ -196,7 +196,7 @@ async fn a_branch_merged_with_no_ff_moves_at_the_merge_and_not_at_a_commit_befor
         .board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "the tests pass" }),
         )
         .await;
@@ -314,7 +314,7 @@ async fn a_rebind_between_the_look_and_the_write_moves_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_squash_with_refs_before_the_holders_close_waits_in_review_and_is_left() {
+async fn a_squash_with_refs_before_the_holders_finish_waits_in_review_and_is_left() {
     let space = Workspace::new(&AFTER_THE_MERGE).await;
     let issue = space
         .issue(json!({ "acceptance": "It is done.", "title": "Parse the headers" }))
@@ -340,7 +340,7 @@ async fn a_squash_with_refs_before_the_holders_close_waits_in_review_and_is_left
         .board
         .ok(
             &agent,
-            "issue.close",
+            "issue.finish",
             json!({ "issue": issue, "evidence": "the tests pass" }),
         )
         .await;

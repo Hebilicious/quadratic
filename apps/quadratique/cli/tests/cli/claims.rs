@@ -219,12 +219,12 @@ fn a_claim_on_the_command_line_names_the_worktree_it_runs_in_or_is_refused() {
 }
 
 #[test]
-fn close_with_the_issue_flag_twice_closes_both_issues_with_the_same_evidence() {
+fn finish_with_the_issue_flag_twice_finishes_both_issues_with_the_same_evidence() {
     let home = Home::new();
     let repository = Repository::new();
     let worktree = repository.worktree("parser");
     home.quadratique(&repository.root)
-        .args(["project", "create", "--key", "CLO", "--name", "Close"])
+        .args(["project", "create", "--key", "CLO", "--name", "Finish"])
         .run()
         .ok();
     for title in ["First", "Second"] {
@@ -243,11 +243,11 @@ fn close_with_the_issue_flag_twice_closes_both_issues_with_the_same_evidence() {
             .ok();
     }
 
-    let closed = home
+    let finished = home
         .quadratique(&worktree)
         .env("CLAUDECODE", "1")
         .args([
-            "close",
+            "finish",
             "--issue",
             "CLO-1",
             "--issue",
@@ -258,7 +258,7 @@ fn close_with_the_issue_flag_twice_closes_both_issues_with_the_same_evidence() {
         .run()
         .ok();
 
-    let statuses: Vec<_> = closed["items"]
+    let statuses: Vec<_> = finished["items"]
         .as_array()
         .expect("a list")
         .iter()
@@ -331,4 +331,113 @@ fn claim_mine_lists_the_claims_of_the_callers_session_in_every_worktree() {
             ("SES-2".into(), audit.display().to_string().into()),
         ]
     );
+}
+
+#[test]
+fn the_old_name_close_answers_as_finish_does_and_points_to_finish_on_standard_error() {
+    const POINTER: &str =
+        "quadratique: `close` is now `finish`; `close` goes away in the release after 0.2.";
+    let home = Home::new();
+    let repository = Repository::new();
+    let worktree = repository.worktree("parser");
+    home.quadratique(&repository.root)
+        .args(["project", "create", "--key", "CLO", "--name", "Close"])
+        .run()
+        .ok();
+    for issue in ["CLO-1", "CLO-2", "CLO-3", "CLO-4", "CLO-5"] {
+        home.quadratique(&repository.root)
+            .args(["create", "--title", issue, "--acceptance", "It is done."])
+            .run()
+            .ok();
+        home.quadratique(&worktree)
+            .env("CLAUDECODE", "1")
+            .args(["claim", "--issue", issue])
+            .run()
+            .ok();
+    }
+    let agent = |args: &[&str]| {
+        home.quadratique(&worktree)
+            .env("CLAUDECODE", "1")
+            .args(args)
+            .run()
+    };
+
+    let closed = agent(&["close", "--issue", "CLO-1", "--evidence", "checked"]);
+    assert_eq!(closed.code, 0, "{closed:?}");
+    assert_eq!(
+        closed.json()["items"][0]["status"],
+        "in-review",
+        "{closed:?}"
+    );
+    assert_eq!(closed.stderr.trim_end(), POINTER, "{closed:?}");
+
+    let one = agent(&[
+        "issue",
+        "close",
+        "--issue",
+        "CLO-2",
+        "--evidence",
+        "checked",
+    ]);
+    assert_eq!(one.code, 0, "{one:?}");
+    assert_eq!(one.json()["issue"]["evidence"], "checked", "{one:?}");
+    assert_eq!(one.stderr.trim_end(), POINTER, "{one:?}");
+
+    let refused = agent(&[
+        "close",
+        "--issue",
+        "CLO-3",
+        "--issue",
+        "CLO-9",
+        "--evidence",
+        "checked",
+    ]);
+    assert_eq!(refused.code, 1, "{refused:?}");
+    let failure = refused.json();
+    assert_eq!(failure["_tag"], "NotClosed", "{refused:?}");
+    assert_eq!(failure["failure"]["_tag"], "NotFound", "{refused:?}");
+    assert_eq!(refused.stderr.trim_end(), POINTER, "{refused:?}");
+
+    let several = agent(&[
+        "issues",
+        "close",
+        "--issue",
+        "CLO-4",
+        "--evidence",
+        "checked",
+    ]);
+    assert_eq!(several.code, 0, "{several:?}");
+    assert_eq!(several.stderr.trim_end(), POINTER, "{several:?}");
+
+    let called = agent(&[
+        "call",
+        "issue.close",
+        r#"{"issue":"CLO-5","evidence":"checked"}"#,
+    ]);
+    assert_eq!(called.code, 0, "{called:?}");
+    assert_eq!(called.json()["issue"]["evidence"], "checked", "{called:?}");
+    assert_eq!(called.stderr.trim_end(), POINTER, "{called:?}");
+
+    let misused = agent(&["close", "--issue", "CLO-3"]);
+    assert_eq!(misused.code, 3, "{misused:?}");
+    assert_eq!(
+        misused.stderr, "The flag --evidence is required.\n",
+        "a failure that is not an answer keeps standard error to itself: {misused:?}"
+    );
+
+    let finished = agent(&["finish", "--issue", "CLO-3", "--evidence", "checked"]);
+    assert_eq!(finished.code, 0, "{finished:?}");
+    assert_eq!(finished.stderr, "", "{finished:?}");
+    let history = home
+        .quadratique(&repository.root)
+        .args(["history", "query", "--project", "CLO"])
+        .run()
+        .ok();
+    let finishes = history["items"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter(|change| change["operation"] == "issue.finish")
+        .count();
+    assert_eq!(finishes, 5, "{history}");
 }

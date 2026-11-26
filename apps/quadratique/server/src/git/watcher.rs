@@ -15,7 +15,7 @@ pub const EVERY: Duration = Duration::from_secs(2);
 pub const READ_WAIT: Duration = EVERY;
 const MOVES_OF_A_HOLDER: [&str; 4] = [
     "issue.claim",
-    "issue.close",
+    "issue.finish",
     "issue.release",
     "issue.update",
 ];

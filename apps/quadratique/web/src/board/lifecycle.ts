@@ -1,7 +1,7 @@
 import type { IssueSummary, NotReadyReason, Project } from "./model.ts";
 import { isResolved } from "./now.ts";
 
-export function closeChanges(
+export function finishChanges(
   issue: Pick<IssueSummary, "category" | "status">,
   project: Project | undefined,
 ): boolean {

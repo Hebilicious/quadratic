@@ -187,8 +187,11 @@ pub fn application() -> Result<Arc<Application<Context>>, Vec<String>> {
         .capability(issues::update())
         .capability(lifecycle::claim())
         .capability(lifecycle::release())
-        .capability(lifecycle::close())
-        .capability(lifecycle::close_several())
+        .capability(lifecycle::finish_one("issue.finish"))
+        .capability(lifecycle::finish_several("issues.finish", "NotFinished"))
+        // The names before 0.2, until the release after it.
+        .capability(lifecycle::finish_one("issue.close"))
+        .capability(lifecycle::finish_several("issues.close", "NotClosed"))
         .capability(links::link())
         .capability(findings::import())
         .capability(advance::advance())

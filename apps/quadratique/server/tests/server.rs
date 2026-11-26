@@ -16,8 +16,6 @@ mod advance;
 mod changed;
 #[path = "server/claims.rs"]
 mod claims;
-#[path = "server/close_several.rs"]
-mod close_several;
 #[path = "server/creation.rs"]
 mod creation;
 #[path = "server/ended_holder.rs"]
@@ -26,6 +24,8 @@ mod ended_holder;
 mod failures;
 #[path = "server/findings.rs"]
 mod findings;
+#[path = "server/finish_several.rs"]
+mod finish_several;
 #[path = "server/git.rs"]
 mod git;
 #[path = "server/history.rs"]
@@ -46,6 +46,8 @@ mod process;
 mod projects;
 #[path = "server/ready.rs"]
 mod ready;
+#[path = "server/renamed.rs"]
+mod renamed;
 #[path = "server/socket.rs"]
 mod socket;
 #[path = "server/stacked.rs"]

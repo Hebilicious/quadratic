@@ -528,7 +528,7 @@ const phaseLabel = {
               v-for="each in opened"
               :key="each.id"
               :detail="each.actor"
-              :closing="route.closing"
+              :finishing="route.finishing"
               mode="page"
             />
           </template>
@@ -563,7 +563,7 @@ const phaseLabel = {
             v-for="each in opened"
             :key="each.id"
             :detail="each.actor"
-            :closing="false"
+            :finishing="false"
             mode="peek"
           />
         </aside>
