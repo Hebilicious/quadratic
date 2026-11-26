@@ -38,8 +38,10 @@ pub fn private_home() -> TempDir {
 /// refused. A plain drop closes one descriptor, while a child that another test spawns holds a copy of each descriptor
 /// of this process between its `fork` and its `exec`, and so keeps the socket listening for that moment.
 pub fn stop_listening(listener: std::os::unix::net::UnixListener) {
+    #[cfg(target_os = "linux")]
     rustix::net::shutdown(&listener, rustix::net::Shutdown::Both)
         .expect("the socket stops listening");
+    drop(listener);
 }
 
 /// Opens the web app's listener of `server`, as the first `quadratique ui` does, and gives its address.

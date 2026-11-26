@@ -4,6 +4,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use quadratique_server::home::{self, HomeError, SOCKET_FILE};
+#[cfg(target_os = "linux")]
 use quadratique_server::serve;
 use quadratique_server::server::{self, CONTROL, Paths, ServerError, Started};
 
@@ -79,15 +80,18 @@ async fn each_refusal_of_the_home_policy_comes_before_the_server_opens_its_lock_
         "{refusal}"
     );
 
-    let with_acl = base.join("with-acl");
-    std::fs::create_dir(&with_acl).expect("a home");
-    set_mode(&with_acl, 0o700);
-    write_named_user_acl(&with_acl);
-    let refusal = refusal_before_the_lock(&with_acl).await;
-    assert!(
-        matches!(&refusal, HomeError::SharedAccess { .. }),
-        "{refusal}"
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let with_acl = base.join("with-acl");
+        std::fs::create_dir(&with_acl).expect("a home");
+        set_mode(&with_acl, 0o700);
+        write_named_user_acl(&with_acl);
+        let refusal = refusal_before_the_lock(&with_acl).await;
+        assert!(
+            matches!(&refusal, HomeError::SharedAccess { .. }),
+            "{refusal}"
+        );
+    }
 
     let with_file = base.join("with-file");
     std::fs::create_dir(&with_file).expect("a home");
@@ -104,7 +108,8 @@ async fn each_refusal_of_the_home_policy_comes_before_the_server_opens_its_lock_
     );
 }
 
-/// User 65534 may read and enter the folder; the mask of `---` leaves its mode at 0700.
+/// User 65534 may read and enter the folder; the mask of `---` leaves its mode at 0700. A Linux ACL.
+#[cfg(target_os = "linux")]
 fn write_named_user_acl(path: &Path) {
     const UNDEFINED: u32 = u32::MAX;
     let mut value = 2u32.to_le_bytes().to_vec();
@@ -230,6 +235,8 @@ async fn a_socket_whose_mode_is_not_0600_is_not_trusted() {
 /// A hard link reaches the same socket as its name, and stays when the socket's name goes: through it, the test
 /// connects after the drop, while it holds a second descriptor of the listener, as a child between its `fork` and its
 /// `exec` holds one.
+/// Linux's `shutdown` takes a listening socket out of the listening state for every descriptor of it.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open() {
     use std::os::fd::AsFd;

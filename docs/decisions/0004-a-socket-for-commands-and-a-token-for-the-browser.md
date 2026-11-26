@@ -334,6 +334,16 @@ Decision (owner, 2026-11-26): the kept port and the lasting bearer by default; s
 | Windows | Its command line still looks for a server through `server.json` and TCP (`background/over_tcp.rs`); no server writes that file, and none starts on Windows. QUA-59 deletes that path with the signal paths it uses. |
 | A Windows browser on a server in WSL | Not measured: this machine has no Windows. The bearer no longer depends on the kernel, so the WSL relay is no obstacle in principle. |
 
+**As built in QUA-59 (2026-11-26), the cutover's second step.**
+
+| Point | What was built |
+| --- | --- |
+| The kernel check | Deleted: `server/src/peer.rs`, the admission and the refusal drain of the TCP accept loop (`serve.rs`), `OWNER_ONLY`, `Unanswered::OwnerOnly`, `ServerError::CallersUnknown`, the `callers` modules and their start checks. Nothing replaces it on TCP: the web app's data needs the bearer, and its pages and files are public. |
+| macOS | Serves with the same code as Linux. The server's integration tests (`tests/server.rs`) now build on every Unix; the tests that need Linux (an ACL through `system.posix_acl_access`, `shutdown` of a listening socket, the git watcher's pidfds and `/proc`, `/proc/net/tcp`) say so. The macOS portability job runs the web journeys without `continue-on-error`, and `test-as-nobody`. The command line's integration tests stay Linux-only: they watch processes through pidfds, `/proc` and inotify. |
+| Windows | `serve` refuses at start with `ServerError::Unsupported`, which names QUA-61. The command line's TCP path (`background/over_tcp.rs`, `Found`, `find`, `ask_to_stop`, `alive`) is deleted: `ensure`, `server status`, `server stop` and `serve --take-over` answer that Windows reaches no server until QUA-61; `upgrade --skills` reads the store file. `Endpoint` carries the socket only. |
+| `rustix`'s `net` feature | Kept on Linux for `stop_listening`, which the TCP listener and the socket both use; `a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open` (since QUA-50) shows it for the socket. |
+| `test-as-nobody` | Runs only the socket's tests (and the command line's), on Linux and macOS. |
+
 ## 5. Remote access (PRD §6, M7)
 
 The plan does not change, and one rule becomes clearer: "on the machine that runs the server" means

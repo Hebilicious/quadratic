@@ -1,26 +1,22 @@
-//! Where the server cannot tell which account connects to its local listener, it refuses to start instead of serving
-//! every account of the machine: macOS until QUA-33, Windows until QUA-34. On Linux, tests/server/process.rs shows
-//! the check itself.
-#![cfg(not(target_os = "linux"))]
+//! Commands and agents reach the server only through its Unix socket, which Windows lacks: there the server refuses to
+//! start, and says that QUA-61 brings it.
+#![cfg(windows)]
 
 use quadratique_server::server::{self, Paths, ServerError};
 
 #[tokio::test]
-async fn the_server_refuses_to_start_where_it_cannot_tell_who_connects() {
+async fn the_server_refuses_to_start_on_windows_and_names_the_issue_that_brings_it() {
     let home = tempfile::tempdir().expect("a temporary home");
     let paths = Paths::in_home(home.path()).expect("an absolute home");
 
     let refused = server::start(&paths, server::loopback()).await.err();
 
-    let Some(ServerError::CallersUnknown(message)) = refused else {
+    let Some(error @ ServerError::Unsupported) = refused else {
         panic!("the server did not refuse to start: {refused:?}");
     };
+    assert!(error.to_string().contains("QUA-61"), "{error}");
     assert!(
-        message.contains("cannot yet tell which account connects"),
-        "{message}"
-    );
-    assert!(
-        !paths.runtime.exists(),
-        "a refused server published its runtime file"
+        !home.path().join("workspace.db").exists(),
+        "a refused server opened its store"
     );
 }

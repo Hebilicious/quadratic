@@ -16,7 +16,7 @@ use acid_cat_core::remote::Routes;
 use super::LISTEN_BACKLOG;
 use super::address::{self, Listen};
 use crate::home::Prepared;
-use crate::serve::{self, Admit, Gate, Served};
+use crate::serve::{self, Gate, Served};
 use crate::web::Origin;
 
 /// Where the web app listens once it is open, and whether that is the port its home keeps.
@@ -26,13 +26,12 @@ pub struct Listening {
     pub kept: bool,
 }
 
-/// What opening needs: the port policy as this start read it, the routes, and what admits and stops a connection.
+/// What opening needs: the port policy as this start read it, the routes, and what stops its connections.
 pub(super) struct Opening {
     pub home: Prepared,
     pub listen: Listen,
     pub strict: bool,
     pub routes: Routes,
-    pub admit: Admit,
     pub gate: Gate,
     pub origin: Origin,
 }
@@ -106,11 +105,6 @@ impl WebListener {
 fn listen(opening: &Opening) -> std::io::Result<(Served, address::Record)> {
     let bound = address::bind(&opening.home, opening.listen, opening.strict)?;
     let (listener, record) = address::listen(bound, LISTEN_BACKLOG)?;
-    let served = serve::serve_on(
-        listener,
-        opening.routes.clone(),
-        Arc::clone(&opening.admit),
-        serve::REFUSALS,
-    )?;
+    let served = serve::serve_on(listener, opening.routes.clone())?;
     Ok((served, record))
 }

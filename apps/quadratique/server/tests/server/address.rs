@@ -6,7 +6,6 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use quadratique_server::home::{self, Prepared};
-use quadratique_server::serve::Connection;
 use quadratique_server::server::{self, Paths};
 use tempfile::TempDir;
 use tokio::net::TcpSocket;
@@ -89,21 +88,6 @@ fn held_port() -> HeldPort {
     }
 }
 
-async fn admits_only_its_owner(running: &server::Server) -> bool {
-    let address = web_address(running).await;
-    let client = std::net::TcpStream::connect(address).expect("a connection");
-    let own = Connection {
-        local: address,
-        peer: client.local_addr().expect("the client's address"),
-    };
-    let unconnected = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
-    let nobody_connected = Connection {
-        local: address,
-        peer: unconnected.local_addr().expect("its address"),
-    };
-    running.admits(own) && !running.admits(nobody_connected)
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn the_server_takes_the_kept_port_even_while_a_socket_that_does_not_listen_holds_it() {
     let home = Home::new();
@@ -118,7 +102,7 @@ async fn the_server_takes_the_kept_port_even_while_a_socket_that_does_not_listen
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn by_default_the_server_restarts_on_its_address_and_still_admits_only_its_owner() {
+async fn by_default_the_server_restarts_on_its_address() {
     let home = Home::new();
     let first = home.start().await;
     let address = web_address(&first).await;
@@ -127,12 +111,9 @@ async fn by_default_the_server_restarts_on_its_address_and_still_admits_only_its
 
     let restarted = home.start().await;
 
-    let again = (
-        web_address(&restarted).await,
-        admits_only_its_owner(&restarted).await,
-    );
+    let again = web_address(&restarted).await;
     restarted.shutdown().await;
-    assert_eq!(again, (address, true));
+    assert_eq!(again, address);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -147,13 +128,11 @@ async fn when_the_kept_port_is_taken_the_server_listens_on_another_publishes_it_
 
     let moved = web_address(&restarted).await;
     let published = home.published().await;
-    let admits = admits_only_its_owner(&restarted).await;
     restarted.shutdown().await;
     drop(squatter);
     assert_ne!(moved, address);
     assert_eq!(published, Some(moved));
     assert_eq!(home.kept(), Some(format!("{}\n", moved.port())));
-    assert!(admits, "the server on the new port admits only its owner");
 }
 
 #[tokio::test(flavor = "multi_thread")]

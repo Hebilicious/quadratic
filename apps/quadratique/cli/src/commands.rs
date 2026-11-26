@@ -11,8 +11,6 @@ use quadratique_server::domain::Binding;
 use quadratique_server::server::{self, Paths, ServerError};
 use serde_json::{Value, json};
 
-#[cfg(not(unix))]
-use crate::background::Found;
 use crate::background::{self, Home, Stopped};
 use crate::{caller, mcp};
 
@@ -308,37 +306,10 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
     Ok(located(home, value))
 }
 
-/// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
+/// No command reaches a server on Windows yet (QUA-61).
 #[cfg(not(unix))]
-async fn status(home: &Home) -> Result<Value, background::LifeError> {
-    let database = home.prepared().database();
-    let value = match background::find(home).await? {
-        Found::Ours(runtime) => json!({
-            "running": true,
-            "sameInterface": true,
-            "pid": runtime.pid,
-            "url": runtime.url,
-            "database": runtime.database,
-        }),
-        Found::OtherInterface { runtime, theirs } => json!({
-            "running": true,
-            "sameInterface": false,
-            "interface": theirs.named(),
-            "pid": runtime.pid,
-            "url": runtime.url,
-            "database": runtime.database,
-        }),
-        Found::Refused { reason } => match home.held() {
-            Ok(true) => unreachable(home, reason),
-            Ok(false) => json!({ "running": false, "database": database }),
-            Err(error) => match home.unusable(error, background::Attempt::Start) {
-                background::LifeError::Unreachable { reason } => unreachable(home, reason),
-                other => return Err(other),
-            },
-        },
-        Found::Nobody => json!({ "running": false, "database": database }),
-    };
-    Ok(located(home, value))
+async fn status(_home: &Home) -> Result<Value, background::LifeError> {
+    Err(background::LifeError::Unsupported)
 }
 
 #[cfg(unix)]
@@ -365,6 +336,7 @@ fn answered_over_socket(home: &Home, identity: &server::Identity) -> Value {
     value
 }
 
+#[cfg(unix)]
 fn unreachable(home: &Home, reason: String) -> Value {
     json!({
         "reachable": false,

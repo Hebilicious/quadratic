@@ -44,7 +44,7 @@ tokio-util.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
 
-# The caller check of the local listener (src/peer.rs) asks the Linux kernel.
+# A listener stops listening for every copy of its descriptor (src/serve.rs, stop_listening).
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["net"] }
 
@@ -62,5 +62,5 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-util.workspace = true
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(unix)'.dev-dependencies]
 rustix = { workspace = true, features = ["event", "fs", "net", "process"] }

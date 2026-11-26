@@ -324,17 +324,14 @@ The TCP listener on `127.0.0.1` serves only the web app, and opens only once a b
 (`Host: 127.0.0.1:<port>`); any other name, `localhost` included, gets `403`. Anyone who reaches it
 gets the app's pages and files, and only a request with the token gets data: `/web`, `/webmcp` and
 their live channel answer `401` without it. The command line's routes and the control requests
-(`/cli`, `/server` and below) answer `404` there. On Linux it also answers only processes of the
-account that runs it. At each connection it asks the kernel which account owns the caller's socket
-(`NETLINK_SOCK_DIAG`). A process of any other account, `root` included, gets `403` "This server
-answers only processes of its own account." That `403` is the TCP listener's rule only. A server that cannot ask the kernel who is
-connecting, in a sandbox that forbids netlink or on a kernel without its `inet_diag` module, does
-not start and says why. So does a server that runs in a user namespace where its account is not
-mapped, where the kernel would show every unmapped caller as that same account. If a lookup
-fails once the server runs, the server refuses that connection and says so once in its log.
-Every process of your own account is you, whatever name it gives. The rule sees only the process at the other end of the connection: a proxy or port
-forward that runs as you (`ssh -L`, socat, the userland forwarders of rootless containers) is
-that process, so everyone who connects through it counts as you.
+(`/cli`, `/server` and below) answer `404` there. The listener does not ask which account connects:
+another account of the machine that reaches it gets the public pages and files, and `401` for
+every request of data, as a page without the token does. A forward that runs as you (`ssh -L`,
+socat, the userland forwarders of rootless containers) lets whoever connects through it reach the
+web app the same way.
+
+The server runs on Linux and macOS with the same rules. On Windows it refuses to start, because
+commands reach it only through a socket for one account, which Windows lacks until QUA-61.
 
 The data folder must be private. The server and every command check it before they open a lock
 file in it, touch the store or start a server. When the check refuses the folder, the command

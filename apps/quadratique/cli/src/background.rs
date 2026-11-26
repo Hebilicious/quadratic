@@ -1,3 +1,7 @@
+//! The server's life as the commands see it: the state table of record 0004, §2, on the home's socket.
+//! Windows reaches no server until QUA-61: every entry point refuses there, and the life cycle below is Unix's.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -5,13 +9,13 @@ use std::time::{Duration, Instant};
 
 use quadratique_server::app::interface;
 use quadratique_server::home::{self, Prepared};
-#[cfg(not(unix))]
-use quadratique_server::server::identity;
+#[cfg(unix)]
+use quadratique_server::server::Unanswered;
 #[cfg(unix)]
 use quadratique_server::server::{
     CONTROL, Identity, PROBE_LIMIT, StopAnswer, identity_over_socket_within, stop_over_socket,
 };
-use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT, Unanswered};
+use quadratique_server::server::{Paths, RuntimeFile, START_LIMIT};
 use quadratique_server::store::canonical_folder;
 
 use crate::process::detach;
@@ -19,8 +23,6 @@ use crate::route::McpTool;
 
 #[cfg(unix)]
 mod legacy;
-#[cfg(not(unix))]
-mod over_tcp;
 
 pub const STOP_LIMIT: Duration = Duration::from_secs(30);
 /// Set in the environment of a server that a command starts, so that its identity says it was started on demand.
@@ -29,19 +31,14 @@ pub const ON_DEMAND: &str = "on-demand";
 const POLL: Duration = Duration::from_millis(20);
 const LOG_TAIL: usize = 2000;
 
-/// Windows has no socket yet (QUA-61), so the rows that only the socket shows never happen there.
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug)]
 pub enum LifeError {
     Io(std::io::Error),
     /// The home policy refuses the data folder, or its path is not one: the person changes the folder.
     Refused(String),
-    /// The runtime file names another database: only Windows reads it to find a server (QUA-61).
+    /// Windows has no socket for one account yet (QUA-61), so no command reaches a server there.
     #[cfg(not(unix))]
-    OtherDatabase {
-        runtime: PathBuf,
-        database: PathBuf,
-    },
+    Unsupported,
     Exited {
         status: std::process::ExitStatus,
         log: PathBuf,
@@ -117,7 +114,6 @@ pub enum LifeError {
     },
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hang {
     NotReady,
@@ -128,16 +124,6 @@ pub enum Hang {
 pub enum TheirInterface {
     Named(String),
     FromABuildBeforeInterfaces,
-}
-
-impl TheirInterface {
-    #[cfg(not(unix))]
-    pub fn named(&self) -> Option<&str> {
-        match self {
-            TheirInterface::Named(interface) => Some(interface),
-            TheirInterface::FromABuildBeforeInterfaces => None,
-        }
-    }
 }
 
 impl std::fmt::Display for TheirInterface {
@@ -159,11 +145,8 @@ impl std::fmt::Display for LifeError {
             }
             LifeError::Refused(reason) => formatter.write_str(reason),
             #[cfg(not(unix))]
-            LifeError::OtherDatabase { runtime, database } => write!(
-                formatter,
-                "the runtime file {} names a server of another database, {}: stop that server, or set QUADRATIQUE_HOME",
-                runtime.display(),
-                database.display()
+            LifeError::Unsupported => formatter.write_str(
+                "Quadratique cannot reach a server on Windows yet: commands reach it only through a socket for one account, which Windows lacks (QUA-61). Nothing was started.",
             ),
             LifeError::Exited { status, log, tail } => write!(
                 formatter,
@@ -312,9 +295,6 @@ impl std::fmt::Display for LifeError {
     }
 }
 
-#[cfg(unix)]
-const PROBE: Duration = PROBE_LIMIT;
-#[cfg(not(unix))]
 const PROBE: Duration = quadratique_server::server::PROBE_LIMIT;
 
 /// What a person does about a server that this command line will not signal: the process number comes from the
@@ -418,11 +398,10 @@ impl Home {
     }
 
     /// The socket of this home, which a command calls once `observe` has found its server there.
-    #[cfg(unix)]
     pub fn endpoint(&self) -> Endpoint {
         Endpoint {
             base: quadratique_server::server::base_over_socket(),
-            socket: Some(self.prepared.socket()),
+            socket: self.prepared.socket(),
         }
     }
 
@@ -530,87 +509,6 @@ fn cannot_write(error: &std::io::Error) -> bool {
     )
 }
 
-/// What the runtime file and TCP show. Only Windows, which has no socket yet (QUA-61), finds a server this way.
-#[cfg(not(unix))]
-pub enum Found {
-    Nobody,
-    Ours(RuntimeFile),
-    OtherInterface {
-        runtime: RuntimeFile,
-        theirs: TheirInterface,
-    },
-    /// The probe was refused (`EPERM`, `EACCES` or the owner-only `403`). It names a server of this home only while the
-    /// home is held: otherwise the runtime file is stale and its port belongs to someone else.
-    Refused {
-        reason: String,
-    },
-}
-
-#[cfg(not(unix))]
-impl Found {
-    fn refusal(runtime: &RuntimeFile, theirs: TheirInterface) -> LifeError {
-        LifeError::OtherInterface {
-            pid: runtime.pid,
-            theirs,
-        }
-    }
-
-    fn unanswered(runtime: &RuntimeFile, unanswered: Unanswered) -> Found {
-        let address = runtime.address;
-        match unanswered {
-            Unanswered::NotPermitted(error) => Found::Refused {
-                reason: format!("connecting to {address} is not permitted ({error})"),
-            },
-            Unanswered::OwnerOnly => Found::Refused {
-                reason: format!(
-                    "the server at {address} answers only processes of its own account"
-                ),
-            },
-            Unanswered::NotListening(_)
-            | Unanswered::PathError(_)
-            | Unanswered::Stalled
-            | Unanswered::Malformed(_)
-            | Unanswered::NotReady(_) => Found::Nobody,
-        }
-    }
-}
-
-#[cfg(not(unix))]
-pub async fn find(home: &Home) -> Result<Found, LifeError> {
-    let Some(runtime) = home.runtime_file() else {
-        return Ok(Found::Nobody);
-    };
-    let database = home.database();
-    if runtime.database != database {
-        return Err(LifeError::OtherDatabase {
-            runtime: home.prepared.runtime(),
-            database: runtime.database,
-        });
-    }
-    Ok(match identity(runtime.address).await {
-        Ok(identity) if identity.database == database => {
-            let runtime = RuntimeFile {
-                pid: identity.pid,
-                control: identity.control,
-                ..runtime
-            };
-            match identity.interface {
-                Some(theirs) if theirs == interface() => Found::Ours(runtime),
-                Some(theirs) => Found::OtherInterface {
-                    runtime,
-                    theirs: TheirInterface::Named(theirs),
-                },
-                None => Found::OtherInterface {
-                    runtime,
-                    theirs: TheirInterface::FromABuildBeforeInterfaces,
-                },
-            }
-        }
-        Ok(_) => Found::Nobody,
-        Err(unanswered) => Found::unanswered(&runtime, unanswered),
-    })
-}
-
 /// What the socket of this home shows, kept apart as the record's state table needs it (§2).
 #[cfg(unix)]
 #[derive(Debug)]
@@ -648,9 +546,6 @@ async fn on_socket_within(home: &Home, limit: Duration) -> OnSocket {
         Err(Unanswered::NotReady(why)) => return OnSocket::NotReady(why),
         Err(Unanswered::Stalled) => return OnSocket::Stalled,
         Err(Unanswered::Malformed(why)) => return OnSocket::Malformed(why),
-        Err(Unanswered::OwnerOnly) => {
-            return OnSocket::Malformed("the socket answered as a TCP listener does".to_owned());
-        }
     };
     // The generation and the database keep their meaning in every control version, so they are checked first: a newer
     // server is stopped only by its generation, and only in its own home.
@@ -851,22 +746,11 @@ fn refusal(home: &Home, observed: Observed, attempt: Attempt) -> LifeError {
     }
 }
 
-/// Where a command reaches the server of a home: on Unix its socket, and never TCP; on Windows, which has no socket
-/// yet (QUA-61), the TCP address of its runtime file.
+/// Where a command reaches the server of a home: its socket, and never TCP.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
     pub base: String,
-    pub socket: Option<PathBuf>,
-}
-
-impl Endpoint {
-    #[cfg(not(unix))]
-    pub fn over_tcp(runtime: &RuntimeFile) -> Endpoint {
-        Endpoint {
-            base: runtime.url.clone(),
-            socket: None,
-        }
-    }
+    pub socket: PathBuf,
 }
 
 pub async fn ensure(home: &Home) -> Result<Endpoint, LifeError> {
@@ -971,10 +855,8 @@ fn not_ready_by_the_deadline(
 }
 
 #[cfg(not(unix))]
-async fn ensure_within(home: &Home, limit: Duration) -> Result<Endpoint, LifeError> {
-    over_tcp::ensure(home, limit)
-        .await
-        .map(|runtime| Endpoint::over_tcp(&runtime))
+async fn ensure_within(_home: &Home, _limit: Duration) -> Result<Endpoint, LifeError> {
+    Err(LifeError::Unsupported)
 }
 
 /// `start.lock`, held: no command starts a server while its holder starts, stops or hands off one. It carries the
@@ -1031,14 +913,8 @@ pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
 }
 
 #[cfg(not(unix))]
-pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
-    let deadline = Deadline::after(START_LIMIT);
-    let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
-    over_tcp::stop(home, deadline.left().unwrap_or_default(), false).await?;
-    Ok(StartLockHeld {
-        _start_lock: start_lock,
-        deadline,
-    })
+pub async fn take_over(_home: &Home) -> Result<StartLockHeld, LifeError> {
+    Err(LifeError::Unsupported)
 }
 
 /// Tries the lock only while the deadline has not passed.
@@ -1141,13 +1017,8 @@ pub fn refused_to_stop(home: &Home, observed: Observed) -> String {
 }
 
 #[cfg(not(unix))]
-async fn stop_within(home: &Home, limit: Duration) -> Result<Stopped, LifeError> {
-    over_tcp::stop(home, limit, false)
-        .await
-        .map(|stopped| match stopped {
-            over_tcp::Stop::Done(stopped) => stopped,
-            over_tcp::Stop::NotLegacy => Stopped::NotRunning,
-        })
+async fn stop_within(_home: &Home, _limit: Duration) -> Result<Stopped, LifeError> {
+    Err(LifeError::Unsupported)
 }
 
 #[cfg(unix)]
@@ -1281,15 +1152,6 @@ async fn stop_holding(
                     }
                     Err(Unanswered::NotReady(why) | Unanswered::Malformed(why)) => {
                         return Err(refusal(home, Observed::Malformed(why), attempt));
-                    }
-                    Err(Unanswered::OwnerOnly) => {
-                        return Err(refusal(
-                            home,
-                            Observed::Malformed(
-                                "the socket answered as a TCP listener does".to_owned(),
-                            ),
-                            attempt,
-                        ));
                     }
                 }
             }

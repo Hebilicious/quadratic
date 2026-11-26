@@ -75,10 +75,10 @@ jobs:
         run: moon run quadratique-server:test-as-nobody
 
   # The same checks on macOS and Windows, one step per area, so that each platform reports every area that fails and
-  # not only the first. The server serves only on Linux until it can check who connects to its local listener
-  # elsewhere (docs/decisions/0003-the-caller-check-on-macos-and-windows.md), and the installer is Linux-only until the
-  # install stages of QUA-6. The steps that fail for those reasons say so and carry `continue-on-error`, so the job
-  # stays green on them and turns red on any other failure. Remove each one when its issue lands.
+  # not only the first. The server serves on macOS as on Linux; on Windows it refuses to start until it has a socket
+  # for one account (QUA-61), and the installer is Linux-only until the install stages of QUA-6. The steps that fail
+  # for those reasons say so and carry `continue-on-error` on that system only, so the job stays green on them and
+  # turns red on any other failure. Remove each one when its issue lands.
   portability:
     name: checks on ${{ matrix.os }}
     strategy:
@@ -168,9 +168,12 @@ jobs:
       - name: Web checks
         if: ${{ !cancelled() }}
         run: moon run quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test
-      # Expected to fail: the journeys start a server, which refuses to start here. Removing this continue-on-error is
-      # part of the acceptance of QUA-33 (macOS) and QUA-34 (Windows).
-      - name: Web journeys (expected to fail until QUA-33, QUA-34)
+      # Expected to fail on Windows only: the journeys start a server, which refuses to start there until QUA-61.
+      - name: Web journeys (expected to fail on Windows until QUA-61)
         if: ${{ !cancelled() }}
-        continue-on-error: true
+        continue-on-error: ${{ runner.os == 'Windows' }}
         run: moon run quadratique-web:e2e
+      # The runner's sudo needs no password, and /tmp lets the account nobody reach a test home's folder.
+      - name: Another account against the server's socket
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        run: moon run quadratique-server:test-as-nobody

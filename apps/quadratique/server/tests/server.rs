@@ -1,7 +1,6 @@
-//! Every test here starts a server, and the server serves only on Linux until it can tell which account connects to
-//! its local listener elsewhere (docs/decisions/0003-the-caller-check-on-macos-and-windows.md). The issues that bring
-//! the check to macOS (QUA-33) and Windows (QUA-34) make these tests run there.
-#![cfg(target_os = "linux")]
+//! Every test here starts a server, which serves on Linux and macOS. Windows has no socket for one account yet
+//! (QUA-61), and the server refuses to start there (tests/platform.rs).
+#![cfg(unix)]
 
 #[path = "server/repository.rs"]
 mod repository;
@@ -60,6 +59,8 @@ mod tokens;
 mod updates;
 #[path = "server/views.rs"]
 mod views;
+/// The git watcher's tests find the git processes it runs through pidfds and /proc.
+#[cfg(target_os = "linux")]
 #[path = "server/watcher.rs"]
 mod watcher;
 #[path = "server/web.rs"]
