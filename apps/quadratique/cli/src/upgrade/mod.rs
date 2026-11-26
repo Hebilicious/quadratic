@@ -165,7 +165,7 @@ async fn run(request: &Request) -> Result<Value, String> {
 
     let home = match home {
         Some(home) => home,
-        None => commands::home().map_err(unchanged)?,
+        None => commands::home().map_err(|error| unchanged(error.to_string()))?,
     };
     install_release(&home, &source, &release, &binary, started_as, &running).await
 }

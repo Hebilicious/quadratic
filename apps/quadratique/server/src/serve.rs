@@ -40,10 +40,10 @@ pub struct Connection {
 
 pub type Admit = Arc<dyn Fn(Connection) -> bool + Send + Sync>;
 
-/// How long one connection to the Unix socket may last, from the first byte of its request to the end of its answer.
-/// The socket serves only the control requests, which a client sends whole and with `Connection: close`; a client that
-/// sends part of a request, or keeps the connection idle, is cut off here. QUA-53, which moves the commands and their
-/// event streams to the socket, gives those routes their own bounds.
+/// How long a client of the Unix socket has to send a whole request, head and body, from the moment the connection
+/// opens or its last answer ends: a client that sends part of a request, or keeps the connection idle, is cut off. An
+/// answer has no limit once its request has arrived whole, because a call may wait and an event stream lasts. TCP has
+/// no such limit.
 pub const SOCKET_REQUEST_LIMIT: Duration = Duration::from_secs(5);
 
 /// The listeners of one server, as its stop request sees them: [`Gate::close`] takes every registered listener out of
@@ -101,6 +101,160 @@ pub struct StopAfterAnswer {
 impl StopAfterAnswer {
     pub fn set(&self) {
         self.set.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Where a connection to the Unix socket is, for its request limit.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum Phase {
+    /// A request is on its way: its head and its body must have arrived by `by`.
+    Receiving { by: tokio::time::Instant },
+    /// The request has arrived whole, and its answer is being made or written: an answer may wait or stream, so it has
+    /// no limit.
+    Answering,
+}
+
+/// The request limit of one connection to the Unix socket. The connection starts receiving; a request whose body has
+/// arrived whole moves it to answering; the end of that answer moves it back to receiving, with a new deadline for
+/// the next request. A connection still receiving at its deadline is cut off.
+#[cfg(unix)]
+#[derive(Clone)]
+struct RequestLimit {
+    phase: Arc<tokio::sync::watch::Sender<Phase>>,
+    limit: Duration,
+}
+
+#[cfg(unix)]
+impl RequestLimit {
+    fn starting(limit: Duration) -> RequestLimit {
+        RequestLimit {
+            phase: Arc::new(tokio::sync::watch::Sender::new(Phase::Receiving {
+                by: tokio::time::Instant::now() + limit,
+            })),
+            limit,
+        }
+    }
+
+    fn received(&self) {
+        self.phase.send_replace(Phase::Answering);
+    }
+
+    fn answered(&self) {
+        self.phase.send_replace(Phase::Receiving {
+            by: tokio::time::Instant::now() + self.limit,
+        });
+    }
+
+    /// Resolves when the connection is still receiving at its deadline.
+    async fn expired(&self) {
+        let mut phases = self.phase.subscribe();
+        loop {
+            let phase = *phases.borrow_and_update();
+            match phase {
+                Phase::Receiving { by } => tokio::select! {
+                    () = tokio::time::sleep_until(by) => return,
+                    _ = phases.changed() => {}
+                },
+                Phase::Answering => {
+                    let _ = phases.changed().await;
+                }
+            }
+        }
+    }
+}
+
+/// Runs `at_end` once, when the body has given its last frame or is dropped, whichever comes first. It keeps the body's
+/// size, so that an answer of known length is still sent with its `Content-Length`.
+#[cfg(unix)]
+fn on_end<E: Send + 'static>(
+    body: http_body_util::combinators::UnsyncBoxBody<Bytes, E>,
+    at_end: impl FnOnce() + Send + Unpin + 'static,
+) -> http_body_util::combinators::UnsyncBoxBody<Bytes, E> {
+    OnEnd {
+        body,
+        at_end: Some(at_end),
+    }
+    .boxed_unsync()
+}
+
+#[cfg(unix)]
+struct OnEnd<B, F: FnOnce()> {
+    body: B,
+    at_end: Option<F>,
+}
+
+#[cfg(unix)]
+impl<B, F: FnOnce()> OnEnd<B, F> {
+    fn fire(&mut self) {
+        if let Some(at_end) = self.at_end.take() {
+            at_end();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl<B, F: FnOnce()> Drop for OnEnd<B, F> {
+    fn drop(&mut self) {
+        self.fire();
+    }
+}
+
+#[cfg(unix)]
+impl<B, F> hyper::body::Body for OnEnd<B, F>
+where
+    B: hyper::body::Body + Unpin,
+    F: FnOnce() + Unpin,
+{
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<B::Data>, B::Error>>> {
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.body).poll_frame(context);
+        if matches!(polled, std::task::Poll::Ready(None)) || this.body.is_end_stream() {
+            this.fire();
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+/// What a connection to the Unix socket gives each of its requests and their answers.
+#[cfg(unix)]
+#[derive(Clone)]
+struct OnSocket {
+    stop_after: StopAfterAnswer,
+    limit: RequestLimit,
+}
+
+#[cfg(unix)]
+impl OnSocket {
+    fn receive(&self, mut request: Request<RequestBody>) -> Request<RequestBody> {
+        use hyper::body::Body;
+
+        request.extensions_mut().insert(self.stop_after.clone());
+        if request.body().is_end_stream() {
+            self.limit.received();
+            return request;
+        }
+        let limit = self.limit.clone();
+        request.map(|body| on_end(body, move || limit.received()))
+    }
+
+    fn answer(&self, response: Response<ResponseBody>) -> Response<ResponseBody> {
+        let limit = self.limit.clone();
+        response.map(|body| on_end(body, move || limit.answered()))
     }
 }
 
@@ -168,6 +322,15 @@ impl Served {
 
     pub async fn close(mut self) {
         self.tasks.close().await;
+    }
+
+    /// Accepts no other connection, for every copy of the listener's descriptor; open connections go on.
+    pub fn stop_listening(&self) {
+        closer(
+            Arc::clone(&self.listener),
+            self.tasks.accepting.clone(),
+            self.address.to_string(),
+        )();
     }
 }
 
@@ -336,12 +499,14 @@ impl Drop for ServedSocket {
 }
 
 /// Accepts on a socket that `home::bind_socket` bound and checked. The socket is registered with `gate` before it
-/// accepts its first connection, and a handler that sets [`StopAfterAnswer`] stops the server through it.
+/// accepts its first connection, and a handler that sets [`StopAfterAnswer`] stops the server through it. Each request
+/// must arrive whole within `limit` (the product's is [`SOCKET_REQUEST_LIMIT`]); an answer has no limit.
 #[cfg(unix)]
 pub fn serve_socket(
     listener: tokio::net::UnixListener,
     file: crate::home::SocketFile,
     routes: Routes,
+    limit: Duration,
     gate: &Gate,
 ) -> ServedSocket {
     let listener = Arc::new(listener);
@@ -378,9 +543,14 @@ pub fn serve_socket(
                 gate: gate.clone(),
             };
             tokio::spawn(async move {
-                let answering = answer(stream, routes, Some(when_answered.after.clone()));
+                let on_socket = OnSocket {
+                    stop_after: when_answered.after.clone(),
+                    limit: RequestLimit::starting(limit),
+                };
+                let limit = on_socket.limit.clone();
                 tokio::select! {
-                    _ = tokio::time::timeout(SOCKET_REQUEST_LIMIT, answering) => {}
+                    () = answer(stream, routes, Some(on_socket)) => {}
+                    () = limit.expired() => {}
                     () = stopped.cancelled() => {}
                 }
                 drop(when_answered);
@@ -400,17 +570,40 @@ pub fn serve_socket(
     }
 }
 
-async fn answer<S>(stream: S, routes: Arc<Routes>, stop_after: Option<StopAfterAnswer>)
+#[cfg(not(unix))]
+#[derive(Clone)]
+enum OnSocket {}
+
+#[cfg(not(unix))]
+impl OnSocket {
+    fn receive(&self, _request: Request<RequestBody>) -> Request<RequestBody> {
+        match *self {}
+    }
+
+    fn answer(&self, _response: Response<ResponseBody>) -> Response<ResponseBody> {
+        match *self {}
+    }
+}
+
+async fn answer<S>(stream: S, routes: Arc<Routes>, on_socket: Option<OnSocket>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
         let routes = routes.clone();
-        let mut request = request_body(request);
-        if let Some(stop_after) = &stop_after {
-            request.extensions_mut().insert(stop_after.clone());
+        let on_socket = on_socket.clone();
+        let request = request_body(request);
+        let request = match &on_socket {
+            Some(on_socket) => on_socket.receive(request),
+            None => request,
+        };
+        async move {
+            let response = route(&routes, request).await;
+            Ok::<_, Infallible>(match &on_socket {
+                Some(on_socket) => on_socket.answer(response),
+                None => response,
+            })
         }
-        async move { Ok::<_, Infallible>(route(&routes, request).await) }
     });
     let _ = hyper::server::conn::http1::Builder::new()
         .serve_connection(hyper_util::rt::TokioIo::new(stream), service)

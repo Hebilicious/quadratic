@@ -63,13 +63,13 @@ async fn projects() -> Result<Vec<PathBuf>, String> {
 async fn from_the_server(home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
     use background::Observed;
 
-    let runtime = match background::observe(home).await {
-        Ok(Observed::Serving { runtime, .. }) => runtime,
+    match background::observe(home).await {
+        Ok(Observed::Serving { .. }) => {}
         Ok(Observed::Unreachable(reason)) => return Err(reason),
         Ok(_) => return Ok(None),
         Err(error) => return Err(error.to_string()),
-    };
-    list_projects(&runtime.url).await.map(Some)
+    }
+    list_projects(&home.endpoint()).await.map(Some)
 }
 
 /// Windows has no socket yet (QUA-61): the runtime file and TCP find the server.
@@ -83,12 +83,14 @@ async fn from_the_server(home: &Home) -> Result<Option<Vec<PathBuf>>, String> {
         Ok(Found::Refused { reason }) => return Err(reason),
         Err(error) => return Err(error.to_string()),
     };
-    list_projects(&runtime.url).await.map(Some)
+    list_projects(&background::Endpoint::over_tcp(&runtime))
+        .await
+        .map(Some)
 }
 
-async fn list_projects(url: &str) -> Result<Vec<PathBuf>, String> {
+async fn list_projects(endpoint: &background::Endpoint) -> Result<Vec<PathBuf>, String> {
     let caller = caller::detect(Binding::Cli).map_err(|error| error.to_string())?;
-    let client = caller::client(&caller, url)?;
+    let client = caller::client(&caller, endpoint)?;
     let projects = match client.invoke("project.list", &json!({})).await {
         Outcome::Value(value) => value,
         Outcome::Failure(failure) => return Err(failure.to_string()),

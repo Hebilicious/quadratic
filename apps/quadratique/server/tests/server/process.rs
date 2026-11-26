@@ -144,6 +144,7 @@ async fn no_identity_probe_outlasts_the_wait_of_a_starting_server() {
     let waits = Waits {
         start: Duration::from_millis(200),
         probe: LONGER_THAN_THE_TEST,
+        ..Waits::default()
     };
     let refused = within(
         "the start against a stale address that accepts and never answers",

@@ -247,7 +247,13 @@ async fn a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open()
         .try_clone_to_owned()
         .expect("a second descriptor of the listener");
     let socket = file.path().to_path_buf();
-    let served = serve::serve_socket(listener, file, Vec::new(), &serve::Gate::default());
+    let served = serve::serve_socket(
+        listener,
+        file,
+        Vec::new(),
+        serve::SOCKET_REQUEST_LIMIT,
+        &serve::Gate::default(),
+    );
     let other_name = home.path().join("same-socket");
     std::fs::hard_link(&socket, &other_name).expect("a hard link to the socket");
     std::os::unix::net::UnixStream::connect(&other_name).expect("the link reaches the socket");
@@ -622,19 +628,37 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
     );
 }
 
-/// A client that sends part of a request, its head or its body, is cut off within the socket's request limit, and the
-/// server stops nothing and goes on answering.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_partial_control_request_is_cut_off_within_the_limit_and_stops_nothing() {
-    use futures::FutureExt;
+/// A short limit for a client of the socket to send a whole request: the tests that show what it cuts off wait this
+/// long, not the product's limit. It is far above the time a test's own requests take to arrive.
+const SHORT_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Sends `bytes` on a new connection to the socket of `running`, then reads until the server closes the connection:
+/// what it answered before it cut the connection off. Without a cut, the hang guard fails the test.
+async fn answered_before_the_cut(running: &crate::support::Running, bytes: &[u8]) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let home = crate::support::private_home();
-    let paths = Paths::in_home(home.path()).expect("an absolute home");
-    let running = server::start(&paths, server::loopback())
+    let mut stream = tokio::net::UnixStream::connect(running.server.socket_path())
         .await
-        .expect("the server starts");
-    let prepared = prepared_at(home.path());
+        .expect("a connection");
+    stream.write_all(bytes).await.expect("the bytes are sent");
+    let mut answered = Vec::new();
+    within(
+        "the server's cut of the connection",
+        stream.read_to_end(&mut answered),
+    )
+    .await
+    .expect("the server closes the connection");
+    String::from_utf8_lossy(&answered).into_owned()
+}
+
+/// A client that sends part of a control request, its head or its body, is cut off at the socket's request limit, and
+/// the server stops nothing and goes on answering.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_control_request_is_cut_off_at_the_limit_and_stops_nothing() {
+    use futures::FutureExt;
+
+    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    let prepared = prepared_at(board.home());
     let generation = server::identity_over_socket(&prepared)
         .await
         .expect("the server answers")
@@ -646,32 +670,147 @@ async fn a_partial_control_request_is_cut_off_within_the_limit_and_stops_nothing
     );
 
     for partial in [partial_head, partial_body] {
-        let mut stream = tokio::net::UnixStream::connect(prepared.socket())
-            .await
-            .expect("a connection");
-        stream
-            .write_all(partial.as_bytes())
-            .await
-            .expect("part of a request");
-        let started = std::time::Instant::now();
-        let mut rest = Vec::new();
-        within(
-            "the end of a partial request's connection",
-            stream.read_to_end(&mut rest),
-        )
-        .await
-        .expect("the server closes the connection");
-        assert!(
-            started.elapsed() < serve::SOCKET_REQUEST_LIMIT * 2,
-            "{partial:?}: closed after {:?}",
-            started.elapsed()
-        );
+        let answered = answered_before_the_cut(&board, partial.as_bytes()).await;
+        assert_eq!(answered, "", "{partial:?}");
     }
 
-    assert!(running.stop_requested().now_or_never().is_none());
+    assert!(board.server.stop_requested().now_or_never().is_none());
     let still = server::identity_over_socket(&prepared)
         .await
         .expect("the socket still answers");
     assert_eq!(still.generation, Some(generation));
-    running.shutdown().await;
+    within("the shutdown", board.server.shutdown()).await;
+}
+
+/// The limit covers the body of a request to the command line's routes as it covers a control request's: a body that
+/// never arrives whole is cut off.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_request_whose_body_never_arrives_whole_is_cut_off_at_the_limit() {
+    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+
+    let answered = answered_before_the_cut(
+        &board,
+        b"POST /cli/capabilities/issue.list HTTP/1.1\r\nHost: quadratique.invalid\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{",
+    )
+    .await;
+
+    assert_eq!(answered, "");
+    within("the shutdown", board.server.shutdown()).await;
+}
+
+/// A complete answer that neither streams nor waits, here a `404`, lifts nothing: the connection that stays idle after
+/// it is cut off at the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_connection_after_a_complete_answer_is_cut_off_at_the_limit() {
+    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+
+    let answered = answered_before_the_cut(
+        &board,
+        b"GET /cli/nothing HTTP/1.1\r\nHost: quadratique.invalid\r\n\r\n",
+    )
+    .await;
+
+    assert!(answered.starts_with("HTTP/1.1 404"), "{answered}");
+    within("the shutdown", board.server.shutdown()).await;
+}
+
+/// After a complete answer, the next request on the same connection is held to the limit again: sent in part, it is
+/// cut off, and gets no answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_request_after_a_complete_answer_on_the_same_connection_is_cut_off_at_the_limit()
+{
+    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+
+    let answered = answered_before_the_cut(
+        &board,
+        b"GET /cli/nothing HTTP/1.1\r\nHost: quadratique.invalid\r\n\r\nGET /server HTTP/1.1\r\nHost: quadratique.invalid\r\n",
+    )
+    .await;
+
+    assert!(answered.starts_with("HTTP/1.1 404"), "{answered}");
+    assert_eq!(answered.matches("HTTP/1.1 ").count(), 1, "{answered}");
+    within("the shutdown", board.server.shutdown()).await;
+}
+
+type Occurrences = futures::stream::BoxStream<
+    'static,
+    Result<acid_cat_core::Occurrence, acid_cat_core::CallFailure>,
+>;
+
+/// The next occurrence that names `issue`; panics when the stream ends first.
+async fn occurrence_naming(occurrences: &mut Occurrences, issue: &str) -> serde_json::Value {
+    use futures::StreamExt;
+
+    loop {
+        match within("an occurrence", occurrences.next()).await {
+            Some(Ok(occurrence)) if occurrence.data.to_string().contains(issue) => {
+                return occurrence.data;
+            }
+            Some(Ok(_)) => {}
+            ended => panic!("the event stream ended before an occurrence named {issue}: {ended:?}"),
+        }
+    }
+}
+
+/// The test helpers, as the command line, call the command line's routes and follow their event stream on the socket
+/// only: once the TCP listener refuses every connection, they still work.
+#[tokio::test(flavor = "multi_thread")]
+async fn calls_and_their_event_stream_answer_on_the_socket_while_tcp_refuses_every_connection() {
+    let board = crate::support::start().await;
+    board.server.stop_listening_on_tcp();
+    let tcp = tokio::net::TcpStream::connect(board.server.address()).await;
+    assert_eq!(
+        tcp.as_ref().map_err(std::io::Error::kind).err(),
+        Some(std::io::ErrorKind::ConnectionRefused),
+        "{tcp:?}"
+    );
+
+    let mut live = within(
+        "the subscription",
+        board.client(&board.agent("watcher")).subscribe(
+            "issue.changed",
+            &serde_json::json!({}),
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("the subscription starts on the socket");
+    board.project("DEM").await;
+    let issue = board.issue("Write the parser").await;
+
+    let occurrence = occurrence_naming(&mut live, &issue).await;
+    assert_eq!(occurrence["operation"], "issue.create", "{occurrence}");
+    within("the shutdown", board.server.shutdown()).await;
+}
+
+/// An answer that streams has no limit once its request is complete: a partial request opened after the stream is cut
+/// off at the limit, and the stream still delivers the next occurrence.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_stream_on_the_socket_outlives_the_limit_of_a_request() {
+    let board = crate::support::start_with_socket_limit(SHORT_LIMIT).await;
+    board.project("DEM").await;
+    let mut live = within(
+        "the subscription",
+        board.client(&board.agent("watcher")).subscribe(
+            "issue.changed",
+            &serde_json::json!({}),
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("the subscription starts on the socket");
+    let answered = answered_before_the_cut(
+        &board,
+        b"GET /server HTTP/1.1\r\nHost: quadratique.invalid\r\n",
+    )
+    .await;
+    assert_eq!(answered, "");
+
+    let issue = board.issue("Write the parser").await;
+
+    let occurrence = occurrence_naming(&mut live, &issue).await;
+    assert_eq!(occurrence["operation"], "issue.create", "{occurrence}");
+    within("the shutdown", board.server.shutdown()).await;
 }
