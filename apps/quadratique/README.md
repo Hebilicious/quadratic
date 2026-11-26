@@ -857,7 +857,9 @@ runs on every push to `main`:
 
 1. release-please opens or updates the release pull request. It sets the new version in
    `Cargo.toml`, `Cargo.lock`, the three `package.json` files, `pyproject.toml` and `uv.lock`
-   together, and adds the changes to `CHANGELOG.md`.
+   together, and adds the changes to `CHANGELOG.md`. It writes the pull request again at every
+   push (`always-update`), also when the push adds nothing to the changelog, so the pull request
+   always contains `main`.
 2. When that pull request is merged, release-please creates the tag `v<version>` on the merge
    commit and a draft GitHub release.
 3. A job that checks out nothing names the release to finish: the release whose tag is `v` and
