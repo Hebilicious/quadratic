@@ -294,7 +294,13 @@ fn an_accept_loop_on_a_socket_that_was_shut_down_leaves_its_thread_to_other_task
                 .as_fd()
                 .try_clone_to_owned()
                 .expect("a second descriptor of the listener");
-            let served = serve::serve_socket(listener, file, Vec::new(), &serve::Gate::default());
+            let served = serve::serve_socket(
+                listener,
+                file,
+                Vec::new(),
+                serve::SOCKET_REQUEST_LIMIT,
+                &serve::Gate::default(),
+            );
 
             rustix::net::shutdown(&copy, rustix::net::Shutdown::Both)
                 .expect("the socket stops listening");
