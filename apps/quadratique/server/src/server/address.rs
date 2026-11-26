@@ -260,12 +260,9 @@ fn read_small(path: &Path, limit: u64) -> Option<String> {
 
 #[cfg(all(test, unix))]
 mod home_tests {
-    use std::net::{Ipv4Addr, SocketAddr};
     use std::os::unix::fs::PermissionsExt;
 
-    use tokio::net::TcpSocket;
-
-    use super::{Listen, Record, add_served, bind, listen, record, served_list};
+    use super::{Record, add_served, record, served_list};
     use crate::home::{self, Prepared};
     use crate::server::Paths;
 
@@ -279,7 +276,11 @@ mod home_tests {
         (folder, prepared)
     }
 
-    fn held_port() -> (TcpSocket, u16) {
+    #[cfg(target_os = "linux")]
+    fn held_port() -> (tokio::net::TcpSocket, u16) {
+        use std::net::{Ipv4Addr, SocketAddr};
+        use tokio::net::TcpSocket;
+
         let socket = TcpSocket::new_v4().expect("a socket");
         socket.set_reuseaddr(true).expect("SO_REUSEADDR");
         socket
@@ -289,11 +290,15 @@ mod home_tests {
         (socket, port)
     }
 
-    /// Two starts may race for the kept port: both bind it, as `SO_REUSEADDR` allows while neither listens, and the
-    /// one that listens second must not fail.
+    /// Two starts may race for the kept port: both bind it, as `SO_REUSEADDR` allows on Linux while neither listens,
+    /// and the one that listens second must not fail. macOS refuses the second bind already, and the server then takes
+    /// another port at its bind.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn when_another_socket_listens_on_the_kept_port_between_the_bind_and_the_listen_the_server_takes_another()
      {
+        use super::{Listen, bind, listen};
+
         let (_folder, home) = home();
         let (other, port) = held_port();
         std::fs::write(home.kept_port(), format!("{port}\n")).expect("a kept port");
