@@ -119,28 +119,21 @@ build new
   || fail "the test's build changed $install_build, which the install copies"
 pass "the test builds into its own target folder, and an inherited QUADRATIQUE_WEB_DIST does not choose the web app"
 
-# The release archives are made on Linux with GNU tar and sha256sum (QUA-36 brings them elsewhere).
-if tar --version 2> /dev/null | grep -q 'GNU tar' && command -v sha256sum > /dev/null; then
-  target=$(rustc -vV | sed -n 's/^host: //p')
-  archive=$(sh "$here/package.sh" "$scratch/quadratique-new" 9.8.7 "$target" "$scratch/release")
-  [ "$archive" = "$scratch/release/quadratique-9.8.7-$target.tar.gz" ] || fail "package.sh names its archive $archive"
-  (cd "$scratch/release" && sha256sum -c --quiet "quadratique-9.8.7-$target.tar.gz.sha256") \
-    || fail "the archive does not match its SHA-256 file"
-  [ "$(tar -tzf "$archive" | LC_ALL=C sort | tr '\n' ' ')" = "quadratique-9.8.7-$target/ quadratique-9.8.7-$target/LICENSE quadratique-9.8.7-$target/README.md quadratique-9.8.7-$target/bin/ quadratique-9.8.7-$target/bin/quadratique quadratique-9.8.7-$target/install.sh " ] \
-    || fail "the archive holds $(tar -tzf "$archive" | tr '\n' ' ')"
-  mkdir "$scratch/download"
-  tar -xzf "$archive" -C "$scratch/download"
-  release=$scratch/download/quadratique-9.8.7-$target
-  cmp -s "$release/bin/quadratique" "$scratch/quadratique-new" && [ -x "$release/bin/quadratique" ] \
-    || fail "the archive's quadratique is not the packaged binary, or is not executable"
-  pass "package.sh makes one archive named for the version and the target, with its SHA-256 file, the binary alone in bin/ and install.sh"
-else
-  release=$scratch/unpacked
-  mkdir -p "$release/bin"
-  cp "$scratch/quadratique-new" "$release/bin/quadratique"
-  cp "$here/install.sh" "$release/install.sh"
-  echo "skipped: package.sh needs GNU tar and sha256sum (QUA-36); the install below uses the binary as an archive holds it"
-fi
+# The release archive, made with GNU tar and sha256sum on Linux, with bsdtar and shasum on macOS.
+if command -v sha256sum > /dev/null; then sha256="sha256sum"; else sha256="shasum -a 256"; fi
+target=$(rustc -vV | sed -n 's/^host: //p')
+archive=$(sh "$here/package.sh" "$scratch/quadratique-new" 9.8.7 "$target" "$scratch/release")
+[ "$archive" = "$scratch/release/quadratique-9.8.7-$target.tar.gz" ] || fail "package.sh names its archive $archive"
+(cd "$scratch/release" && $sha256 -c "quadratique-9.8.7-$target.tar.gz.sha256" > /dev/null) \
+  || fail "the archive does not match its SHA-256 file"
+[ "$(tar -tzf "$archive" | LC_ALL=C sort | tr '\n' ' ')" = "quadratique-9.8.7-$target/ quadratique-9.8.7-$target/LICENSE quadratique-9.8.7-$target/README.md quadratique-9.8.7-$target/bin/ quadratique-9.8.7-$target/bin/quadratique quadratique-9.8.7-$target/install.sh " ] \
+  || fail "the archive holds $(tar -tzf "$archive" | tr '\n' ' ')"
+mkdir "$scratch/download"
+tar -xzf "$archive" -C "$scratch/download"
+release=$scratch/download/quadratique-9.8.7-$target
+cmp -s "$release/bin/quadratique" "$scratch/quadratique-new" && [ -x "$release/bin/quadratique" ] \
+  || fail "the archive's quadratique is not the packaged binary, or is not executable"
+pass "package.sh makes one archive named for the version and the target, with its SHA-256 file, the binary alone in bin/ and install.sh"
 
 cd "$scratch"
 before_install=$(outside_the_install)

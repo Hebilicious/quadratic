@@ -555,6 +555,7 @@ fn check_and_skills_change_nothing_and_start_no_server() {
     assert_eq!(answer["installed"], CURRENT, "{answer}");
     assert_eq!(answer["latest"], LATEST, "{answer}");
     assert_eq!(answer["run"], "quadratique upgrade", "{answer}");
+    assert_eq!(answer["archive"], archive_name(LATEST), "{answer}");
     assert_eq!(
         answer["skills"],
         json!({ "current": [], "older": [] }),

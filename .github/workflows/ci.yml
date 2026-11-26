@@ -160,9 +160,8 @@ jobs:
         run: |
           moon run quadratique-web:build
           sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target/release-build
-      # Expected to fail on Windows only: build.sh names the binary without .exe there (QUA-36, QUA-38). On macOS the
-      # test skips the release archive, which package.sh makes with GNU tar and sha256sum (QUA-36).
-      - name: Install test (expected to fail on Windows until QUA-36, QUA-38)
+      # Expected to fail on Windows only: build.sh names the binary without .exe there (QUA-38).
+      - name: Install test (expected to fail on Windows until QUA-38)
         if: ${{ !cancelled() }}
         continue-on-error: ${{ runner.os == 'Windows' }}
         run: moon run quadratique-install:test

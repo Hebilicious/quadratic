@@ -19,6 +19,11 @@ on:
 permissions:
   contents: read
 
+# The platforms of a release, one archive and its SHA-256 file each: the build matrix below builds exactly these, and
+# a release is complete only when it holds the files of every one.
+env:
+  TARGETS: aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu
+
 concurrency:
   group: release-${{ github.event_name == 'push' && 'main' || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -51,8 +56,8 @@ jobs:
 
   # Names the release to finish, even when release-please failed after it made the draft: the release whose tag is
   # `v` and the version that `.release-please-manifest.json` says at the pushed commit. A draft is built when its tag
-  # points at the commit that release-please released; a published release with its four files needs no build; a
-  # published release without them fails here and is not changed. For a draft or a complete release, it also names
+  # points at the commit that release-please released; a published release with the files of every target needs no
+  # build; a published release without them fails here and is not changed. For a draft or a complete release, it also names
   # the commit that the crates are published from: the commit that both the tag and the release point at. Checks out
   # nothing and runs no project code; its token can see drafts, which needs write access to contents.
   pending:
@@ -105,7 +110,7 @@ jobs:
           id=$(jq -r '.[0].id' <<< "$releases")
           if [ "$(jq -r '.[0].draft' <<< "$releases")" = false ]; then
             missing=""
-            for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            for target in $TARGETS; do
               archive=quadratique-$version-$target.tar.gz
               digest=$(jq -r --arg name "$archive" '.[0].assets[] | select(.name == $name) | .digest' <<< "$releases")
               checksum=$(jq -r --arg name "$archive.sha256" '.[0].assets[] | select(.name == $name) | .id' <<< "$releases")
@@ -115,7 +120,7 @@ jobs:
               fi
             done
             [ -z "$missing" ] || fail "the release $tag is public, but these archives are missing or do not match their SHA-256 file:$missing. Nothing was changed. Attach them by hand as the README's \"When a release stops half-way\" says."
-            echo "The release $tag is published with its four files: no archive to build."
+            echo "The release $tag is published with the files of every target: no archive to build."
             sha=$(gh api "$repo/commits/refs/tags/$tag" --jq .sha) || fail "the release $tag has no tag $tag"
             target=$(jq -r '.[0].target_commitish' <<< "$releases")
             [ "$target" = "$sha" ] || fail "the tag $tag points at $sha, but the public release $tag was built from $target, so crates built from the tag would not match its binaries. Nothing was published. Point the tag back at $target (git push --force origin $target:refs/tags/$tag), then push to main again."
@@ -177,7 +182,9 @@ jobs:
         github.event_name == 'pull_request' ||
         needs.pending.outputs.tag != ''
       )
-    # The oldest hosted images (glibc 2.35), so that the binary runs on older distributions too.
+    # Each target builds on a runner of its own platform, so that the job can run what it built. The oldest hosted
+    # images: Ubuntu 22.04 (glibc 2.35), so that the binary runs on older distributions too, and macOS 15, which also
+    # has a hosted x86-64 image. The workflow's TARGETS lists the same targets.
     strategy:
       fail-fast: false
       matrix:
@@ -186,7 +193,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
+    # rustc and the C compiler of the store engine build for the same oldest macOS (ignored on Linux).
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     # Only stops a hang.
     timeout-minutes: 60
     steps:
@@ -204,8 +218,9 @@ jobs:
           TAG: ${{ needs.pending.outputs.tag }}
         run: test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$(git rev-parse HEAD)"
 
-      # The store engine is compiled from C and links zlib.
+      # The store engine is compiled from C and links zlib. The macOS images have both, with Xcode's command line tools.
       - name: Install the system packages
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends build-essential zlib1g-dev
@@ -223,8 +238,10 @@ jobs:
           RELEASED: ${{ needs.pending.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          host=$(rustc -vV | sed -n 's/^host: //p')
+          host=$(cd apps/quadratique && rustc -vV | sed -n 's/^host: //p')
           test "$host" = "$TARGET"
+          pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' apps/quadratique/rust-toolchain.toml)
+          (cd apps/quadratique && rustc -V) | grep -q "^rustc $pinned " || { echo "::error::the build would not use Rust $pinned" >&2; exit 1; }
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/quadratique/Cargo.toml)
           if [ -n "$RELEASED" ]; then test "$version" = "$RELEASED"; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -236,12 +253,23 @@ jobs:
           echo "BINARY=$binary" >> "$GITHUB_ENV"
 
       - name: Show the libraries and the newest glibc the binary needs
+        if: runner.os == 'Linux'
         env:
           TARGET: ${{ matrix.target }}
         run: |
           glibc=$(objdump -T "$BINARY" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
           libraries=$(objdump -p "$BINARY" | awk '/NEEDED/ { print $2 }' | tr '\n' ' ')
           echo "The binary for $TARGET needs glibc ${glibc#GLIBC_} or newer, and these libraries: $libraries" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Show the libraries and the oldest macOS the binary runs on
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          minos=$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
+          test "$minos" = "$MACOSX_DEPLOYMENT_TARGET"
+          libraries=$(otool -L "$BINARY" | tail -n +2 | awk '{ print $1 }' | tr '\n' ' ')
+          echo "The binary for $TARGET needs macOS $minos or newer, and these libraries: $libraries" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Check that the binary runs
         run: |
@@ -255,6 +283,13 @@ jobs:
         run: |
           archive=$(sh apps/quadratique/install/package.sh "$BINARY" "$VERSION" "$TARGET" "$RUNNER_TEMP/release")
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      # As a person installs it: the archive checked against its SHA-256 file, unpacked, installed by its install.sh in
+      # an empty home; then the installed binary gives its version, serves the web app and answers commands.
+      - name: Install the archive and use the installed binary
+        env:
+          VERSION: ${{ steps.build.outputs.version }}
+        run: sh apps/quadratique/install/try-archive.sh "$ARCHIVE" "$VERSION"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -280,13 +315,13 @@ jobs:
           path: assets
           merge-multiple: true
 
-      - name: Check that the four files are there and that each archive matches its SHA-256 file
+      - name: Check that the files of every target are there and that each archive matches its SHA-256 file
         working-directory: assets
         env:
           VERSION: ${{ needs.pending.outputs.version }}
         run: |
           set -euo pipefail
-          wanted=$(for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+          wanted=$(for target in $TARGETS; do
             printf '%s\n' "quadratique-$VERSION-$target.tar.gz" "quadratique-$VERSION-$target.tar.gz.sha256"
           done | LC_ALL=C sort | tr '\n' ' ')
           present=$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | tr '\n' ' ')
@@ -309,8 +344,8 @@ jobs:
           permission-contents: write
 
       # Works on the release by its ID. Changes assets only while the release is a draft, replaces only those whose
-      # digest differs, checks the four digests, and publishes last. A release that is already public is complete
-      # when its four digests match, and is never changed.
+      # digest differs, checks every digest, and publishes last. A release that is already public is complete when
+      # the digests of all its checked files match, and is never changed.
       - name: Attach the files, check the release, and publish it
         working-directory: assets
         env:
@@ -328,8 +363,8 @@ jobs:
           state=$(release)
           [ "$(jq -r .tag_name <<< "$state")" = "$TAG" ] || fail "the release $RELEASE is not $TAG"
           if [ "$(jq -r .draft <<< "$state")" = false ]; then
-            [ "$(attached)" = "$local" ] || fail "the release $TAG is already public, and its files are not the four checked ones. Nothing was changed. Attach them by hand as the README's \"When a release stops half-way\" says."
-            echo "The release $TAG is already public with these four files: nothing to do."
+            [ "$(attached)" = "$local" ] || fail "the release $TAG is already public, and its files are not the checked ones. Nothing was changed. Attach them by hand as the README's \"When a release stops half-way\" says."
+            echo "The release $TAG is already public with these files: nothing to do."
             exit 0
           fi
           [ "$(gh api "$repo/commits/refs/tags/$TAG" --jq .sha)" = "$SHA" ] || fail "the tag $TAG no longer points at $SHA"
@@ -343,11 +378,11 @@ jobs:
               gh api -X POST "$upload?name=$file" -H "Content-Type: application/octet-stream" --input "$file" > /dev/null
             fi
           done
-          [ "$(attached)" = "$local" ] || fail "the draft release $TAG does not hold the four checked files: run this job again"
+          [ "$(attached)" = "$local" ] || fail "the draft release $TAG does not hold the checked files: run this job again"
           [ "$(gh api "$repo/commits/refs/tags/$TAG" --jq .sha)" = "$SHA" ] || fail "the tag $TAG no longer points at $SHA"
           gh api -X PATCH "$repo/releases/$RELEASE" -F draft=false > /dev/null
           [ "$(release | jq -r .draft)" = false ] || fail "the release $TAG is still a draft"
-          echo "Published $TAG with its four files."
+          echo "Published $TAG with the files of every target."
 
   # The crates are published by three jobs, once the release is public with its files (or at once, for a release
   # that was already complete), so that crates.io never holds back the release. The first names what crates.io lacks;

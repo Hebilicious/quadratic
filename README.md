@@ -14,16 +14,17 @@ It has these parts:
 - The `quadratique` command line, and an MCP server for agents (`quadratique mcp`).
 - A web app (Vue) that the server serves.
 - A skill that `quadratique init` writes into a repository, so agents learn to use Quadratique.
-- An install script with a systemd user unit.
+- An install script that puts the binary on the `PATH`, and prebuilt binaries for Linux and macOS.
 - An evaluation harness that compares Quadratique with the trackers lific and Beads.
 
 ## Quick start
 
 You need:
 
-- Linux with a running systemd user manager (`systemctl --user status` answers).
+- Linux or macOS.
 - git, a C compiler and the zlib development files: the store engine is compiled from C. On
-  Debian or Ubuntu: `sudo apt install git build-essential zlib1g-dev`.
+  Debian or Ubuntu: `sudo apt install git build-essential zlib1g-dev`; on macOS, Xcode's command
+  line tools (`xcode-select --install`).
 - [proto](https://moonrepo.dev/proto), which installs the other tools at the versions that
   `.prototools` pins.
 
@@ -32,11 +33,13 @@ git clone https://github.com/Hebilicious/quadratique
 cd quadratique
 proto use                            # installs moon, Node.js, pnpm, Rust, Pkl, Java, Python and uv
 pnpm install                         # installs the JavaScript dependencies
-moon run quadratique-install:install   # builds the binary, installs it and starts the user service
+moon run quadratique-install:install   # builds the binary and puts it on the PATH
 ```
 
-To install a prebuilt binary instead, with no toolchain, see "Install from a release" in
-[`apps/quadratique/README.md`](apps/quadratique/README.md).
+To install a prebuilt binary instead, with no toolchain, on Linux, macOS or WSL, see "Install from
+a release" in [`apps/quadratique/README.md`](apps/quadratique/README.md): with `curl` and
+`install.sh`, with mise (`mise use -g github:Hebilicious/quadratique`) or with cargo. Windows waits
+for the store engine to support it.
 
 The install puts the binary in `~/.local/bin/quadratique` (or `$XDG_BIN_HOME/quadratique`): that
 folder must be on your `PATH`. Then, in the git repository where your agents work:
@@ -47,7 +50,7 @@ quadratique ui --open
 ```
 
 `init` writes the skill to `.agents/skills/quadratique/`, adds one line to `AGENTS.md` and creates
-the project. `ui --open` opens the web app in your browser through `xdg-open`; without a desktop,
+the project. `ui --open` opens the web app in your browser through `xdg-open` (`open` on macOS); without a desktop,
 `quadratique ui` prints the address to open.
 
 ## Documentation
