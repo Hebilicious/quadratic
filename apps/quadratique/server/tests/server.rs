@@ -40,6 +40,8 @@ mod instructions;
 mod links;
 #[path = "server/notes.rs"]
 mod notes;
+#[path = "server/pairing.rs"]
+mod pairing;
 #[path = "server/process.rs"]
 mod process;
 #[path = "server/projects.rs"]

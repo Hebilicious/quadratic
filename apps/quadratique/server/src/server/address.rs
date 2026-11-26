@@ -168,13 +168,16 @@ pub fn strict(home: &Prepared) -> bool {
 }
 
 /// Turns the strict setting on or off, for the next start of the server. On, the kept port joins the served ports and
-/// is forgotten, so that no later start asks for it. Off, the next start takes a port the system chooses and keeps it.
+/// is forgotten, so that no later start asks for it. Off, the next start takes a port the system chooses and keeps it,
+/// and makes a new token for the web app.
 pub fn set_strict(home: &Prepared, on: bool) -> std::io::Result<()> {
     if on {
         home::write_atomically(&home.strict(), b"on\n")?;
         return forget_kept_port(home);
     }
-    remove(&home.strict())
+    remove(&home.strict())?;
+    // The first start after strict off makes a new token for the web app, whether or not a strict start came between.
+    remove(&home.folder().join(crate::pairing::TOKEN_FILE))
 }
 
 /// The kept port joins the served ports, then `server.port` goes. `strict on` does it, and so does every strict start:

@@ -51,6 +51,73 @@ fn status_at(url: &str, path: &str) -> u16 {
         .unwrap_or_else(|| panic!("an HTTP status line, not {head:?}"))
 }
 
+/// Sends `request`, with `{host}` replaced by the server's address, and returns the status and the body.
+fn exchange(url: &str, request: &str) -> (u16, String) {
+    let address = origin(url)
+        .strip_prefix("http://")
+        .expect("an http URL")
+        .to_owned();
+    let request = request.replace("{host}", &address);
+    let answer = within("a request to the server", async move {
+        let mut stream = TcpStream::connect(&address).await.expect("a connection");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("the request is sent");
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).await.expect("an answer");
+        String::from_utf8_lossy(&answer).into_owned()
+    });
+    let (head, body) = answer.split_once("\r\n\r\n").expect("a head and a body");
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .expect("a status");
+    (status, body.to_owned())
+}
+
+fn link_of(printed: &Value) -> String {
+    printed["link"].as_str().expect("a link").to_owned()
+}
+
+/// The link a bootstrap file sends the browser to.
+fn opened_link(bootstrap: &str) -> String {
+    let page = std::fs::read_to_string(bootstrap).expect("the bootstrap file");
+    let start = page.find("url=").expect("a refresh") + "url=".len();
+    let end = page[start..].find('"').expect("the end of the refresh") + start;
+    page[start..end].to_owned()
+}
+
+/// What the page does with the code of a link: `POST /session`, for the token.
+fn redeem(link: &str) -> String {
+    let (url, code) = link.split_once("#pair=").expect("a code in the link");
+    let body = json!({ "code": code }).to_string();
+    let (status, answer) = exchange(
+        url,
+        &format!(
+            "POST /session HTTP/1.1\r\nHost: {{host}}\r\nOrigin: http://{{host}}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert_eq!(status, 200, "{answer}");
+    serde_json::from_str::<Value>(&answer).expect("a JSON answer")["token"]
+        .as_str()
+        .expect("a token")
+        .to_owned()
+}
+
+/// The status of `project.list` on the web target with the bearer `token`.
+fn listed_with(url: &str, token: &str) -> u16 {
+    exchange(
+        url,
+        &format!(
+            "POST /web/capabilities/project.list HTTP/1.1\r\nHost: {{host}}\r\nOrigin: http://{{host}}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        ),
+    )
+    .0
+}
+
 fn client(url: &str, route: &str, claimed: &Value) -> HttpClient {
     HttpClient::new(&format!("{}{route}", origin(url)))
         .and_then(|client| client.header("Origin", origin(url)))
@@ -118,10 +185,12 @@ fn ui_starts_the_server_prints_the_address_of_the_web_app_and_opens_it_when_aske
         .run()
         .ok();
     let url = printed["url"].as_str().expect("a URL").to_owned();
+    let link = link_of(&printed);
     assert_eq!(
         printed,
-        json!({ "url": url, "opened": false, "addressKept": true })
+        json!({ "url": url, "link": link, "opened": false, "addressKept": true })
     );
+    assert!(link.starts_with(&format!("{url}#pair=")), "{link}");
     assert_eq!(status_of(&url), 200, "the page at {url}");
 
     let reopened = home
@@ -134,7 +203,15 @@ fn ui_starts_the_server_prints_the_address_of_the_web_app_and_opens_it_when_aske
         reopened,
         json!({ "url": url, "opened": true, "addressKept": true })
     );
-    assert_eq!(await_file(&opened), url);
+    let bootstrap = await_file(&opened);
+    assert!(
+        Path::new(&bootstrap).starts_with(home.path()),
+        "the opener got {bootstrap}"
+    );
+    assert!(
+        opened_link(&bootstrap).starts_with(&format!("{url}#pair=")),
+        "{bootstrap}"
+    );
 }
 
 #[test]
@@ -263,8 +340,9 @@ fn by_default_after_a_restart_the_web_app_has_the_same_address_and_an_issue_page
     let after = ui_url(&home, elsewhere.path(), &app);
 
     assert_eq!(
-        after,
-        json!({ "url": url, "opened": false, "addressKept": true })
+        (&after["url"], &after["addressKept"]),
+        (&json!(url), &json!(true)),
+        "{after}"
     );
     assert_eq!(format!("http://127.0.0.1:{}/", kept.trim()), url);
     assert_eq!(
@@ -309,7 +387,10 @@ fn when_the_kept_port_is_taken_ui_opens_the_new_address_which_is_kept() {
         reopened,
         json!({ "url": after, "opened": true, "addressKept": true })
     );
-    assert_eq!(await_file(&opened), after);
+    assert!(
+        opened_link(&await_file(&opened)).starts_with(&format!("{after}#pair=")),
+        "the opener got another address"
+    );
     assert_eq!(
         status_at(&after, "/issues/ABC-1"),
         200,
@@ -449,6 +530,65 @@ fn strict_on_and_off_start_no_server_and_apply_from_the_next_start() {
 }
 
 #[test]
+fn a_browser_let_in_by_ui_stays_in_across_a_restart_until_server_sign_out() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let printed = ui_url(&home, elsewhere.path(), &app);
+    let url = url_of(&printed);
+    let token = redeem(&link_of(&printed));
+    assert_eq!(listed_with(&url, &token), 200);
+    let file = std::fs::read_to_string(home.path().join("web-token")).expect("the token file");
+    assert_eq!(file.trim(), token);
+
+    stop(&home, elsewhere.path());
+    let after = ui_url(&home, elsewhere.path(), &app);
+    assert_eq!(url_of(&after), url);
+    assert_eq!(
+        listed_with(&url, &token),
+        200,
+        "a restart signed the browser out"
+    );
+
+    let signed_out = home
+        .quadratique(elsewhere.path())
+        .args(["server", "sign-out"])
+        .run()
+        .ok();
+    assert_eq!(
+        (&signed_out["signedOut"], &signed_out["lasting"]),
+        (&json!(true), &json!(true)),
+        "{signed_out}"
+    );
+    assert!(!signed_out.to_string().contains(&token));
+    assert_eq!(listed_with(&url, &token), 401);
+    let again = redeem(&link_of(&ui_url(&home, elsewhere.path(), &app)));
+    assert_ne!(again, token);
+    assert_eq!(listed_with(&url, &again), 200);
+}
+
+#[test]
+fn in_strict_mode_a_restart_signs_every_browser_out_and_ui_lets_it_in_again() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    strict(&home, elsewhere.path(), "on");
+    stop(&home, elsewhere.path());
+    let first = ui_url(&home, elsewhere.path(), &app);
+    let token = redeem(&link_of(&first));
+    assert!(!home.path().join("web-token").exists());
+
+    stop(&home, elsewhere.path());
+    let second = ui_url(&home, elsewhere.path(), &app);
+    let url = url_of(&second);
+
+    assert_ne!(url, url_of(&first));
+    assert_eq!(listed_with(&url, &token), 401);
+    let again = redeem(&link_of(&second));
+    assert_eq!(listed_with(&url, &again), 200);
+}
+
+#[test]
 fn a_running_server_says_its_address_is_kept_only_while_the_next_start_would_ask_for_it() {
     let home = Home::new();
     let elsewhere = outside();
@@ -473,4 +613,23 @@ fn a_running_server_says_its_address_is_kept_only_while_the_next_start_would_ask
     );
     assert_eq!(after_edit["addressKept"], false, "{after_edit}");
     assert_eq!(after_removal["addressKept"], false, "{after_removal}");
+}
+
+#[test]
+fn the_first_start_after_strict_off_makes_a_new_token_even_with_no_strict_start_in_between() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let app = built_app(elsewhere.path());
+    let token = redeem(&link_of(&ui_url(&home, elsewhere.path(), &app)));
+
+    strict(&home, elsewhere.path(), "on");
+    strict(&home, elsewhere.path(), "off");
+    stop(&home, elsewhere.path());
+    let url = url_of(&ui_url(&home, elsewhere.path(), &app));
+
+    assert_eq!(
+        listed_with(&url, &token),
+        401,
+        "the old token outlived strict on and off"
+    );
 }

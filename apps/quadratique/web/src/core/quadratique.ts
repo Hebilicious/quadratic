@@ -24,7 +24,7 @@ import {
 } from "../board/model.ts";
 import type { SavedViewPorts, Snapshot } from "../board/saved-views.machine.ts";
 import { app, sharedCatalog } from "./catalog.ts";
-import { serverLayer } from "./server.ts";
+import { serverLayer, type Access } from "./server.ts";
 
 export interface Change {
   readonly cursor: string | undefined;
@@ -135,11 +135,12 @@ const decodeImported = Schema.decodeUnknownSync(ViewsImportedSchema);
 
 export async function openQuadratique(options: {
   readonly origin: string;
+  readonly access: Access;
   readonly modelContext: WebMcp.ModelContext | undefined;
   readonly writable: () => boolean;
 }): Promise<Quadratique> {
   const openings = new Map<string, () => void>();
-  const layer = serverLayer(options.origin, (target, event) => {
+  const layer = serverLayer(options.origin, options.access, (target, event) => {
     if (target === "web") {
       openings.get(event)?.();
     }
