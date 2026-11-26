@@ -288,11 +288,13 @@ fn generation() -> std::io::Result<String> {
 }
 
 /// `GET /server`: the identity fixed at the start, with where the web app listens once it does.
+#[cfg(unix)]
 struct Identify {
     identity: Identity,
     web: Arc<listener::WebListener>,
 }
 
+#[cfg(unix)]
 impl Identify {
     fn answer(&self) -> Bytes {
         let mut identity = self.identity.clone();
@@ -304,6 +306,7 @@ impl Identify {
     }
 }
 
+#[cfg(unix)]
 impl Handler for Identify {
     fn handle(&self, request: Request<RequestBody>) -> BoxFuture<'static, Response<ResponseBody>> {
         let (status, body) = if request.method() == Method::GET {
@@ -568,6 +571,7 @@ impl Server {
     }
 
     /// Stops accepting on every listener, lets open connections finish for up to `within`, then shuts down.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     pub async fn shutdown_draining(mut self, within: Duration) {
         let mut web = self.web.stop().await;
         let draining_web = async {

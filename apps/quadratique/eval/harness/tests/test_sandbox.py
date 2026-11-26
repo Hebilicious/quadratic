@@ -1,5 +1,6 @@
 import shutil
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from qeval import sandbox
 from qeval.adapters import quadratique
 
 
+@unittest.skipIf(sys.platform == "win32", "QUA-40: the harness runs commands in POSIX process groups")
 class QuadratiqueHome(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="qeval-test-"))

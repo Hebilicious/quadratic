@@ -4,6 +4,7 @@ goes first on PATH and catches them too.
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import os
 import shutil
@@ -129,7 +130,7 @@ def quadratique_home(root: Path) -> Path:
     because the server's socket in it must have a short path, and a run folder can be deep. The same root always gets
     the same folder, so a later analysis of the run finds its store while the folder exists."""
     digest = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"qeval-{os.getuid()}-{digest}"
+    return Path(tempfile.gettempdir()) / f"qeval-{getpass.getuser()}-{digest}"
 
 
 @dataclass
