@@ -52,9 +52,10 @@ the whole install: it starts nothing and writes nothing else. The first `quadrat
 the server in the background, and every later command uses it. Once it is done, the checkout is not
 needed: you can delete it.
 
-A copy replaces the file whole. A server that runs the earlier copy keeps running it until it stops:
-the next command says that the server is of another build, and `quadratique server stop` lets the
-next command start the new one.
+A copy replaces the file whole. A server that runs the earlier copy keeps running it until it stops,
+and `install.sh` says so when it finds one. The next command says that a server of another build
+(of release 0.2 or 0.3: of an earlier release) holds the data folder, and to run
+`quadratique server stop`; after it, the next command starts the new build.
 
 Open the web app:
 
@@ -62,68 +63,6 @@ Open the web app:
 quadratique ui --open
 quadratique server status
 ```
-
-### Keep the server up after a reboot
-
-Quadratique does not install a service: any command starts the server when it is not running, and
-it keeps running until you stop it or the machine stops. To have it running before the first
-command after a reboot, so that an open tab or a bookmark of the web app works at once, let your
-system start `quadratique serve`, which runs the server in the foreground:
-
-- **Linux, at login:** a systemd user unit, `~/.config/systemd/user/quadratique.service`:
-
-  ```ini
-  [Unit]
-  Description=Quadratique server
-
-  [Service]
-  ExecStart=%h/.local/bin/quadratique serve
-  Restart=on-failure
-  RestartPreventExitStatus=5
-
-  [Install]
-  WantedBy=default.target
-  ```
-
-  Then `systemctl --user daemon-reload` and `systemctl --user enable --now quadratique.service`.
-  Use the path of your binary in `ExecStart`, and add `Environment=QUADRATIQUE_HOME=…` if your
-  commands set it. Status 5 is a data folder or store that the server refuses: restarting cannot fix
-  it, and `systemctl --user status quadratique.service` shows why it stopped.
-- **Linux, before login:** the same unit, and `loginctl enable-linger` once, so that your user
-  manager starts at boot.
-- **macOS:** a LaunchAgent, `~/Library/LaunchAgents/quadratique.serve.plist`, with
-  `ProgramArguments` set to the binary and `serve`, and `RunAtLoad` and `KeepAlive` set to true;
-  load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/quadratique.serve.plist`.
-
-`quadratique upgrade` stops a server that runs the binary it replaces, and says to restart it the way
-you started it: `systemctl --user restart quadratique.service`, or
-`launchctl kickstart -k gui/$(id -u)/quadratique.serve`.
-
-### A unit that an earlier install wrote
-
-Releases 0.1 to 0.3 wrote a systemd user unit, `~/.config/systemd/user/quadratique.service`, that
-runs `"<binary>" serve --take-over`. It keeps working with the new binary, so nothing breaks, and
-you may keep it. To remove it:
-
-1. See what it runs and for which data folder: `systemctl --user cat quadratique.service` shows the
-   binary in `ExecStart` and, when it was set, `Environment=XDG_DATA_HOME=…`; the store is in
-   `<data home>/quadratique`.
-2. Stop and disable it: `systemctl --user disable --now quadratique.service`.
-3. Remove its file, and tell systemd: `rm ~/.config/systemd/user/quadratique.service`, then
-   `systemctl --user daemon-reload`.
-
-The store stays where it was, and the next command starts a server on it. If you installed with mise
-and also ran an earlier `install.sh`, the unit runs the copy in `~/.local/bin`: the same steps
-remove it, and after them the mise copy is the only one (remove `~/.local/bin/quadratique` too if it
-is still there and not the one you want on your PATH).
-
-From this release on, when the unit's server stops cleanly (`quadratique server stop`, or an
-upgrade), the unit stays inactive but enabled: its `Restart=on-failure` does not restart a server
-that exits with status 0. It starts again at your next login, and any command starts a server
-meanwhile. That is harmless.
-
-If you skipped releases and a server of release 0.1 still runs, or your kernel has no pidfds, the
-command line cannot stop that server itself: "A server of release 0.1" says how to stop it by hand.
 
 The web app is at `http://127.0.0.1:<port>/`. Its TCP listener opens at the start of the server
 when the data folder holds a web token (`web-token`): that is so after a first `quadratique ui`, and
@@ -158,6 +97,111 @@ address the server listens on now: the server kept that port at its start (not w
 and not when `server.port` could not be written; the log says why), strict is off now, and
 `server.port` still names that port. With no server running, `addressKept` says what the next start
 does.
+
+### Keep the server up after a reboot
+
+Quadratique does not install a service: any command starts the server when it is not running, and
+it keeps running until you stop it or the machine stops. To have it running before the first
+command after a reboot, so that an open tab or a bookmark of the web app works at once, let your
+system start `quadratique serve --take-over`. It runs the server in the foreground, as the main
+process of the job, and first stops a server that a command started before it.
+
+**Linux, at login:** a systemd user unit, `~/.config/systemd/user/quadratique.service`:
+
+```ini
+[Unit]
+Description=Quadratique server
+
+[Service]
+ExecStart=%h/.local/bin/quadratique serve --take-over
+Restart=on-failure
+RestartPreventExitStatus=5
+
+[Install]
+WantedBy=default.target
+```
+
+Use the path of your binary in `ExecStart` (`%h` is your home folder). A user manager does not read
+your shell's profile: if your shell sets `QUADRATIQUE_HOME` or `XDG_DATA_HOME`, add each as an
+`Environment=` line in `[Service]`, for example `Environment=XDG_DATA_HOME=%h/data`. Then:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now quadratique.service
+```
+
+`Restart=on-failure` starts the server again after a crash. Status 5 is a data folder or a store that
+the server refuses: starting it again cannot fix that, so `RestartPreventExitStatus=5` stops there,
+and `systemctl --user status quadratique.service` shows why. To have it start at boot rather than at
+login, run `loginctl enable-linger` once.
+
+**macOS:** a LaunchAgent, `~/Library/LaunchAgents/quadratique.serve.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>quadratique.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.local/bin/quadratique</string>
+    <string>serve</string>
+    <string>--take-over</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+</dict>
+</plist>
+```
+
+Use the absolute path of your binary. launchd does not read your shell's profile either: for
+`QUADRATIQUE_HOME` or `XDG_DATA_HOME`, add an `EnvironmentVariables` dictionary with them. Load it
+with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/quadratique.serve.plist`, and unload
+it with `launchctl bootout gui/$(id -u)/quadratique.serve`. `RunAtLoad` starts it at login, and
+`KeepAlive` with `SuccessfulExit` false starts it again only after a failure; a server that refuses
+its data folder (status 5) is started again every 10 seconds until you fix the cause or unload it.
+
+With both, a clean `quadratique server stop` leaves the server stopped until the next command or the
+next login: the job counts an exit with status 0 as done. So "Backups" holds as it is. `quadratique
+upgrade` stops a server that runs the binary it replaces; the next command then starts the new build,
+or restart the job: `systemctl --user restart quadratique.service`, or
+`launchctl kickstart -k gui/$(id -u)/quadratique.serve`.
+
+### A unit that an earlier install wrote
+
+Releases 0.1 to 0.3 wrote a systemd user unit, `~/.config/systemd/user/quadratique.service`, that
+runs `"<binary>" serve --take-over`. It keeps working with the new binary, so nothing breaks, and
+you may keep it: it is the unit of "Keep the server up after a reboot".
+
+1. See whether it runs the server: `systemctl --user status quadratique.service` names its main
+   process, the server's `pid` in `quadratique server status`. `systemctl --user cat
+   quadratique.service` shows the binary in `ExecStart` and, when it was set,
+   `Environment=XDG_DATA_HOME=…`; the store is in `<data home>/quadratique`.
+2. To stop it and keep it: `systemctl --user stop quadratique.service`. It starts again at your next
+   login.
+3. To remove it, stop and disable it: `systemctl --user disable --now quadratique.service`, then
+   remove its file and tell systemd: `rm ~/.config/systemd/user/quadratique.service`, then
+   `systemctl --user daemon-reload`.
+
+The store stays where it was, and the next command starts a server on it. If you installed with mise
+and also ran an earlier `install.sh`, the unit runs the copy in `~/.local/bin`: the same steps
+remove it, and after them the mise copy is the only one (remove `~/.local/bin/quadratique` too if it
+is still there and not the one you want on your PATH).
+
+From this release on, when the unit's server stops cleanly (`quadratique server stop`, or an
+upgrade), the unit stays inactive but enabled: its `Restart=on-failure` does not restart a server
+that exits with status 0. It starts again at your next login, and any command starts a server
+meanwhile. That is harmless.
+
+If you skipped releases and a server of release 0.1 still runs, or your kernel has no pidfds, the
+command line cannot stop that server itself: "A server of release 0.1" says how to stop it by hand.
 
 ### Let a browser in
 
@@ -847,11 +891,12 @@ root: it replaces the binary. Stop the server that runs the earlier build, and t
 
 ## Uninstall
 
-Stop the server, then remove the binary: `quadratique server stop`, then
-`rm ~/.local/bin/quadratique` (or `$XDG_BIN_HOME/quadratique`). The store stays in the data folder
-(see "Backups"); remove that folder too to delete every issue. If you set up a unit or a LaunchAgent
-(see "Keep the server up after a reboot"), or an earlier install wrote one (see "A unit that an
-earlier install wrote"), disable and remove it first.
+1. If you set up a unit or a LaunchAgent (see "Keep the server up after a reboot"), or an earlier
+   install wrote one (see "A unit that an earlier install wrote"), disable and remove it.
+2. Stop the server: `quadratique server stop`.
+3. Remove the binary: `rm ~/.local/bin/quadratique` (or `$XDG_BIN_HOME/quadratique`).
+
+The store stays in the data folder (see "Backups"); remove that folder too to delete every issue.
 
 ## Backups
 

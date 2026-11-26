@@ -725,6 +725,29 @@ fn a_binary_that_mise_installed_is_left_to_mise_and_an_unclear_marker_to_the_per
         "{answer}"
     );
     assert_eq!(installed.bytes(), before);
+    installed
+        .quadratique(&releases)
+        .args(["project", "list"])
+        .run()
+        .ok();
+    let with_a_server = installed.upgrade(&releases, &[]).ok();
+    assert_eq!(
+        with_a_server["then"],
+        json!(["quadratique server stop", "quadratique upgrade --skills"]),
+        "{with_a_server}"
+    );
+    assert!(
+        with_a_server["server"]
+            .as_str()
+            .is_some_and(|said| said
+                .contains("keeps running the earlier build until `quadratique server stop`")),
+        "{with_a_server}"
+    );
+    installed
+        .quadratique(&releases)
+        .args(["server", "stop"])
+        .run()
+        .ok();
 
     std::fs::write(
         &marker,

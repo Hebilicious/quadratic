@@ -156,7 +156,14 @@ async fn run(request: &Request) -> Result<Value, String> {
         if let Some(manager) = route.manager() {
             answer["managedBy"] = json!(manager);
             answer["binary"] = json!(binary);
-            answer["then"] = json!(["quadratique upgrade --skills"]);
+            let mut then = vec!["quadratique upgrade --skills"];
+            if let Some(pid) = running_server(home.as_ref()).await {
+                answer["server"] = json!(format!(
+                    "a server of this home (pid {pid}) runs: after the manager's upgrade, it keeps running the earlier build until `quadratique server stop`, and the next command then starts the new one"
+                ));
+                then.insert(0, "quadratique server stop");
+            }
+            answer["then"] = json!(then);
         }
         answer["run"] = json!(route.command());
         answer["skills"] = skills::report().await;
@@ -255,6 +262,22 @@ async fn install_release(
         "The releases carry no archive for this platform ({}). Nothing was changed.",
         target::described()
     ))
+}
+
+/// The process number of a server that serves this home now, of any build; nothing when none answers.
+#[cfg(unix)]
+async fn running_server(home: Option<&Home>) -> Option<u32> {
+    match background::observe(home?).await.ok()? {
+        background::Observed::Serving { identity }
+        | background::Observed::Older(identity)
+        | background::Observed::Newer(identity) => Some(identity.pid),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+async fn running_server(_home: Option<&Home>) -> Option<u32> {
+    None
 }
 
 /// After a run that was stopped between the rename and the stop, the binary is current while the server of this home

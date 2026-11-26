@@ -161,6 +161,30 @@ on_machine sh "$here/install.sh" "$scratch/quadratique-old" > /dev/null 2>> "$sc
   || fail "install.sh wrote through a link at a staging name"
 rm "$quadratique.new"
 pass "install.sh never writes through a file that already has a staging name"
+
+relative_home=$scratch/relative-home
+mkdir -p "$relative_home"
+(cd "$relative_home" && env -i PATH="$PATH" HOME="$relative_home" XDG_BIN_HOME=bin sh "$here/install.sh" "$scratch/quadratique-old" > /dev/null 2>&1) \
+  || fail "install.sh fails with a relative XDG_BIN_HOME"
+[ -x "$relative_home/.local/bin/quadratique" ] && [ ! -e "$relative_home/bin" ] \
+  || fail "install.sh used a relative XDG_BIN_HOME, which the XDG specification says to ignore"
+pass "install.sh ignores a relative XDG_BIN_HOME and installs in ~/.local/bin"
+
+locked_home=$scratch/locked-home
+mkdir -p "$locked_home/bin"
+chmod 555 "$locked_home/bin"
+if env -i PATH="$PATH" HOME="$locked_home" XDG_BIN_HOME="$locked_home/bin" sh "$here/install.sh" "$scratch/quadratique-old" > /dev/null 2> "$scratch/locked.log"; then
+  fail "install.sh succeeds in a folder it cannot write"
+fi
+chmod 755 "$locked_home/bin"
+grep -q "^install.sh: cannot write in $locked_home/bin" "$scratch/locked.log" && [ "$(wc -l < "$scratch/locked.log")" -eq 1 ] \
+  || fail "install.sh does not say in its own words what it could not do: $(cat "$scratch/locked.log")"
+if env -i PATH="$PATH" HOME="$locked_home" sh "$here/install.sh" "$scratch/no-such-binary" > /dev/null 2> "$scratch/missing.log"; then
+  fail "install.sh succeeds without a binary"
+fi
+grep -q "^install.sh: $scratch/no-such-binary is not a file" "$scratch/missing.log" && [ "$(wc -l < "$scratch/missing.log")" -eq 1 ] \
+  || fail "install.sh does not say in its own words that the binary is missing: $(cat "$scratch/missing.log")"
+pass "install.sh says in its own words what it could not do, and what to do"
 [ -x "$quadratique" ] && cmp -s "$quadratique" "$scratch/quadratique-old" || fail "install.sh did not copy the binary to $quadratique"
 [ "$(outside_the_install)" = "$before_install" ] || fail "install.sh wrote outside $bin_home: $(outside_the_install)"
 [ -z "$(owner "$quadratique" 2> /dev/null)" ] || fail "install.sh started a server"
@@ -180,12 +204,14 @@ pass "serve --take-over with no server running serves the home as its own main p
 on_machine "$quadratique" project create --key KEEP --name Kept > /dev/null
 on_machine "$quadratique" create --project KEEP --title "Before the upgrade" --acceptance "It is kept." > /dev/null
 rm -f "$scratch/cargo-called"
-on_machine env PATH="$scratch/fake-cargo:/usr/bin:/bin" sh "$release/install.sh" "$release/bin/quadratique" > /dev/null 2>> "$scratch/install.log" \
+on_machine env PATH="$scratch/fake-cargo:/usr/bin:/bin" sh "$release/install.sh" "$release/bin/quadratique" > "$scratch/over.log" 2>> "$scratch/install.log" \
   || fail "the release's install.sh fails over a running server"
+grep -q "keeps running the earlier build until \`quadratique server stop\`" "$scratch/over.log" \
+  || fail "install.sh does not say that the running server keeps the earlier build: $(cat "$scratch/over.log")"
 [ ! -e "$scratch/cargo-called" ] || fail "the install from the release called cargo"
 cmp -s "$quadratique" "$scratch/quadratique-new" || fail "the release's install.sh did not replace $quadratique"
 [ "$(owner "$quadratique")" = "$supervised" ] || fail "the install changed the server that runs"
-pass "an install from a release, with no Rust toolchain on PATH, replaces the binary and leaves the running server alone"
+pass "an install from a release, with no Rust toolchain on PATH, replaces the binary, leaves the running server alone and says that it keeps the earlier build until server stop"
 
 (exec_on_machine "$quadratique" serve --take-over < /dev/null >> "$scratch/serve.log" 2>&1) &
 taken_over_by=$!
