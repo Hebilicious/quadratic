@@ -153,6 +153,7 @@ fn an_identity_of_another_database_or_of_a_newer_control_version_is_never_runnin
     assert!(newer.get("running").is_none(), "{newer}");
 }
 
+/// A server sets its socket's mode after `bind`, while its start holds `start.lock`.
 #[test]
 fn the_lock_tells_a_starting_server_from_a_stopped_home() {
     let home = Home::new();
@@ -160,10 +161,20 @@ fn the_lock_tells_a_starting_server_from_a_stopped_home() {
 
     let held = hold_the_home(&home);
     let starting = status(&home);
+    let start = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.path().join("start.lock"))
+        .expect("the start lock");
+    start
+        .lock()
+        .expect("a start under way holds the start lock");
     let path = home.path().join("server.sock");
     let socket = UnixListener::bind(&path).expect("a socket not yet private");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).expect("mode 0660");
     let not_ready_while_held = status(&home);
+    free(start);
     free(held);
     let not_ready_while_free = status(&home);
     drop(socket);
