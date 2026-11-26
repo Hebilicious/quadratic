@@ -5,7 +5,7 @@ use crate::support::{BINARY, Home, await_until};
 #[test]
 fn a_server_whose_account_is_not_mapped_in_its_user_namespace_refuses_to_start() {
     let home = Home::new();
-    let runtime = home.path().join("server.json");
+    let socket = home.path().join("server.sock");
     let mut server = Command::new("unshare")
         .args(["--user", BINARY, "serve"])
         .env_clear()
@@ -18,11 +18,11 @@ fn a_server_whose_account_is_not_mapped_in_its_user_namespace_refuses_to_start()
         .spawn()
         .expect("unshare runs");
 
-    await_until("the server to exit or to publish its runtime file", || {
-        runtime.exists() || server.try_wait().is_ok_and(|status| status.is_some())
+    await_until("the server to exit or to bind its socket", || {
+        socket.exists() || server.try_wait().is_ok_and(|status| status.is_some())
     });
 
-    let started = runtime.exists();
+    let started = socket.exists();
     if started {
         let _ = server.kill();
     }

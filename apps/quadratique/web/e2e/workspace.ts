@@ -1,6 +1,6 @@
 import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { watch } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
@@ -57,7 +57,8 @@ export class Workspace {
   }
 
   /** Starts `quadratique serve` on `port`, 0 letting the system choose; `"kept"` starts it as a person does, on the
-   * port the home kept. */
+   * port the home kept. The web app listens at the start once a browser was let in; before that, `quadratique ui` opens
+   * it, as a person's first visit does. */
   async start(port: number | "kept" = 0): Promise<string> {
     if (this.server !== undefined) {
       throw new Error("The workspace's server already runs");
@@ -79,7 +80,8 @@ export class Workspace {
       log += chunk.toString();
     });
     try {
-      this.address = await this.published(child, exited);
+      const web = await this.served(child, exited);
+      this.address = web ?? new URL(this.ui().url).host;
       return this.address;
     } catch (error) {
       throw new Error(`quadratique serve did not start: ${String(error)}\n${log}`, {
@@ -218,43 +220,49 @@ export class Workspace {
     };
   }
 
-  private async published(child: ChildProcess, exited: Promise<void>): Promise<string> {
-    const runtime = join(this.home, "server.json");
-    const read = async (): Promise<string | undefined> => {
-      const text = await readFile(runtime, "utf8").catch((error: unknown) => {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-          return undefined;
-        }
-        throw error;
+  /** `quadratique server status` once it names the server that `child` runs: the address of its web app, which is
+   * missing while the web app does not listen. It looks again at each change in the home, where the server binds its
+   * socket. */
+  private async served(child: ChildProcess, exited: Promise<void>): Promise<string | undefined> {
+    const status = async (): Promise<{ readonly pid?: unknown; readonly web?: unknown }> =>
+      await new Promise((resolve, reject) => {
+        execFile(
+          BINARY,
+          ["server", "status"],
+          { cwd: this.root, env: this.environment("human"), timeout: HANG_GUARD_MS },
+          (error, stdout) => {
+            if (error === null) {
+              // BOUNDARY: the command line writes JSON; only the pid and the web app's address are read.
+              resolve(JSON.parse(stdout));
+            } else {
+              reject(error);
+            }
+          },
+        );
       });
-      if (text === undefined) {
-        return undefined;
-      }
-      // BOUNDARY: the runtime file that the server writes; only its pid and address are read.
-      const written: unknown = JSON.parse(text);
-      if (
-        typeof written === "object" &&
-        written !== null &&
-        "pid" in written &&
-        "address" in written &&
-        written.pid === child.pid
-      ) {
-        return String(written.address);
-      }
-      return undefined;
-    };
     const watcher = watch(this.home);
     try {
-      return await new Promise<string>((resolve, reject) => {
+      return await new Promise<string | undefined>((resolve, reject) => {
+        let checking = false;
+        let again = false;
         const timer = setTimeout(() => {
-          reject(new Error("no runtime file within the hang guard"));
+          reject(new Error("the server did not answer within the hang guard"));
         }, HANG_GUARD_MS);
         const check = () => {
-          void read().then(
-            (address) => {
-              if (address !== undefined) {
+          if (checking) {
+            again = true;
+            return;
+          }
+          checking = true;
+          void status().then(
+            (answer) => {
+              checking = false;
+              if (answer.pid === child.pid) {
                 clearTimeout(timer);
-                resolve(address);
+                resolve(typeof answer.web === "string" ? new URL(answer.web).host : undefined);
+              } else if (again) {
+                again = false;
+                check();
               }
             },
             (error: unknown) => {

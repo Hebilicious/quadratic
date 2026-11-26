@@ -4,16 +4,13 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
 
+use quadratique_server::web::WEB_BASE;
+
 use crate::support::{HANG_GUARD, Running, call, start, within};
 
 /// The web app's client: the `web` target, from the server's own page.
-fn page(board: &Running) -> HttpClient {
-    let url = board.server.url().replace("/cli", "/web");
-    let origin = format!("http://{}", board.server.address());
-    HttpClient::new(&url)
-        .expect("the web target's URL")
-        .header("Origin", &origin)
-        .expect("a valid header")
+async fn page(board: &Running) -> HttpClient {
+    board.page(WEB_BASE).await
 }
 
 async fn ok(page: &HttpClient, id: &str, input: Value) -> Value {
@@ -49,7 +46,7 @@ fn items(views: &Value) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn views_are_created_replaced_renamed_and_deleted_in_their_order_with_a_growing_revision() {
     let board = start().await;
-    let page = page(&board);
+    let page = page(&board).await;
     assert_eq!(
         ok(&page, "view.list", json!({})).await,
         json!({ "revision": 0, "items": [] })
@@ -126,8 +123,8 @@ async fn views_are_created_replaced_renamed_and_deleted_in_their_order_with_a_gr
 #[tokio::test(flavor = "multi_thread")]
 async fn a_save_from_an_older_list_never_changes_a_view_it_did_not_mean() {
     let board = start().await;
-    let first = page(&board);
-    let second = page(&board);
+    let first = page(&board).await;
+    let second = page(&board).await;
     ok(
         &second,
         "view.save",
@@ -178,7 +175,7 @@ async fn a_save_from_an_older_list_never_changes_a_view_it_did_not_mean() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hundred_views_is_the_most() {
     let board = start().await;
-    let page = page(&board);
+    let page = page(&board).await;
     let views: Vec<Value> = (0..100)
         .map(|number| json!({ "old": format!("o{number}"), "name": format!("View {number}"), "filter": "" }))
         .collect();
@@ -210,7 +207,7 @@ async fn a_hundred_views_is_the_most() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_import_keeps_a_receipt_per_old_view_so_two_old_views_never_become_one() {
     let board = start().await;
-    let page = page(&board);
+    let page = page(&board).await;
     ok(
         &page,
         "view.save",
@@ -252,8 +249,8 @@ async fn an_import_keeps_a_receipt_per_old_view_so_two_old_views_never_become_on
 async fn a_view_change_reaches_every_page_with_every_view_and_no_issue_change_is_sent() {
     let board = start().await;
     board.project("DEM").await;
-    let first = page(&board);
-    let other = page(&board);
+    let first = page(&board).await;
+    let other = page(&board).await;
     let mut views = within(
         "the view subscription",
         other.subscribe("view.changed", &json!({}), None, None),

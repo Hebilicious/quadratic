@@ -85,11 +85,11 @@ fn identity(home: &Home, interface: &str, control: u32, controls: &[u32]) -> Val
 }
 
 fn this_build(home: &Home) -> Value {
-    identity(home, &quadratique_server::app::interface(), 1, &[1])
+    identity(home, &quadratique_server::app::interface(), 2, &[1, 2])
 }
 
 fn another_build(home: &Home) -> Value {
-    identity(home, "fnv1a64:0000000000000000", 1, &[1])
+    identity(home, "fnv1a64:0000000000000000", 2, &[1, 2])
 }
 
 /// A socket of this account with mode 0600 at the home's socket name.
@@ -250,10 +250,11 @@ fn nothing_started(home: &Home) {
     assert!(home.servers().is_empty());
 }
 
-/// Waits until the server that `process` runs has published its runtime file, then returns its pid.
-fn served_by(watch: &mut Watch, process: &mut Process) -> u32 {
-    watch.await_steps(&[Step::Published("server.json")]);
-    process.id()
+/// Waits until the server that `process` runs answers on the home's socket, then returns its pid.
+fn served_by(home: &Home, process: &mut Process) -> u32 {
+    let pid = process.id();
+    home.await_served_by(pid);
+    pid
 }
 
 fn stop_real(home: &Home, pid: u32) {
@@ -275,9 +276,8 @@ fn row_no_socket_and_a_free_lock_status_is_not_running_stop_finds_nothing_ensure
         "a stop of a free home reserved a start"
     );
 
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     let serving = status(&home);
     assert_eq!(
         (&serving["running"], &serving["pid"], &serving["started"]),
@@ -316,9 +316,8 @@ fn row_a_stale_socket_and_a_free_lock_is_not_running_and_the_next_server_replace
     stop_real(&home, pid);
 
     stop_listening(fake_socket(&home));
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     assert_eq!(status(&home)["pid"], pid);
     stop_real(&home, pid);
 }
@@ -382,17 +381,7 @@ fn row_a_held_lock_without_a_socket_is_starting_and_each_command_waits_for_ready
     drop(held);
     let started = ui.finish().ok();
     let serving = status(&home);
-    assert_eq!(
-        format!(
-            "{}/",
-            serving["url"]
-                .as_str()
-                .expect("a url")
-                .trim_end_matches("/cli")
-        ),
-        started["url"].as_str().expect("a url"),
-        "{serving}"
-    );
+    assert_eq!(serving["web"], started["url"], "{serving}");
     let pid = serving["pid"].as_u64().expect("a pid") as u32;
     stop_real(&home, pid);
 
@@ -432,7 +421,7 @@ fn row_a_held_lock_without_a_socket_is_starting_and_each_command_waits_for_ready
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
     watch.await_steps(&[Step::Opened("start.lock"), Step::Opened("server.lock")]);
     drop(held);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     assert_eq!(status(&home)["pid"], pid);
     stop_real(&home, pid);
 }
@@ -570,9 +559,8 @@ fn row_a_server_of_another_build_is_refused_by_commands_and_stopped_by_its_gener
         http("200 OK", &another_build(&home).to_string()),
         Some(held),
     );
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let pid = served_by(&mut watch, &mut take_over);
+    let pid = served_by(&home, &mut take_over);
     assert_eq!(
         fake.requests().last().map(String::as_str),
         Some("POST /server/stop HTTP/1.1")
@@ -586,6 +574,62 @@ fn row_a_server_of_another_build_is_refused_by_commands_and_stopped_by_its_gener
     stop_real(&home, pid);
 }
 
+/// A server of an earlier release (0.2, 0.3) speaks control version 1 and serves the command line's routes on TCP only,
+/// with the same catalog: this build names it older in every row, says to stop it, and stops it through control 1.
+#[test]
+fn row_a_server_of_an_earlier_release_is_named_older_and_stopped_through_its_control_version() {
+    let home = Home::new();
+    let held = hold_the_home(&home);
+    let interface = quadratique_server::app::interface();
+    let earlier = identity(&home, &interface, 1, &[1]);
+    let fake = Fake::start(
+        fake_socket(&home),
+        http("200 OK", &earlier.to_string()),
+        Some(held),
+    );
+
+    let seen = status(&home);
+    assert_eq!(
+        (&seen["running"], &seen["older"], &seen["sameInterface"]),
+        (&json!(true), &json!(true), &json!(false)),
+        "{seen}"
+    );
+    assert!(
+        seen["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("quadratique server stop")),
+        "{seen}"
+    );
+    for args in [&["project", "list"][..], &["ui"], &["mcp"]] {
+        let refused = run(&home, args);
+        assert_eq!(refused.code, UNAVAILABLE, "{args:?}: {refused:?}");
+        assert!(
+            message(&refused).contains("earlier release")
+                && message(&refused).contains("Run `quadratique server stop`"),
+            "{args:?}: {refused:?}"
+        );
+    }
+    nothing_started(&home);
+    assert!(
+        fake.requests()
+            .iter()
+            .all(|request| request.starts_with("GET /server ")),
+        "{:?}",
+        fake.requests()
+    );
+
+    let stopped = run(&home, &["server", "stop"]).ok();
+    assert_eq!(
+        (&stopped["stopped"], &stopped["generation"]),
+        (&json!(true), &json!(GENERATION)),
+        "{stopped}"
+    );
+    assert_eq!(
+        fake.requests().last().map(String::as_str),
+        Some("POST /server/stop HTTP/1.1")
+    );
+}
+
 /// A control version this build does not know: commands say to upgrade; a stop happens only when the server still
 /// lists this build's version; a take-over never replaces a newer server with an older one.
 #[test]
@@ -595,7 +639,7 @@ fn row_a_newer_server_is_stopped_only_when_it_lists_this_control_version_and_nev
     let interface = quadratique_server::app::interface();
     let unlisted = Fake::start(
         fake_socket(&home),
-        http("200 OK", &identity(&home, &interface, 2, &[2]).to_string()),
+        http("200 OK", &identity(&home, &interface, 3, &[3]).to_string()),
         None,
     );
 
@@ -624,7 +668,7 @@ fn row_a_newer_server_is_stopped_only_when_it_lists_this_control_version_and_nev
         fake_socket(&home),
         http(
             "200 OK",
-            &identity(&home, &interface, 2, &[1, 2]).to_string(),
+            &identity(&home, &interface, 3, &[2, 3]).to_string(),
         ),
         Some(held),
     );
@@ -659,9 +703,8 @@ fn row_a_server_of_this_build_is_used_stopped_by_its_generation_and_taken_over_b
     run(&home, &["project", "list"]).ok();
     assert_eq!(home.servers(), vec![old_pid]);
 
-    let mut watch = Watch::of(&home);
     let mut take_over = spawn(&home, &["serve", "--take-over"]);
-    let new_pid = served_by(&mut watch, &mut take_over);
+    let new_pid = served_by(&home, &mut take_over);
 
     await_exit(old_pid);
     let old_log =
@@ -708,7 +751,7 @@ fn a_take_over_hands_off_with_no_other_starter_in_between() {
     watch.await_steps(&[Step::Opened("start.lock")]);
     let during = spawn(&home, &["ui"]);
     release.send(()).expect("the old server lets go");
-    let new_pid = served_by(&mut watch, &mut take_over);
+    let new_pid = served_by(&home, &mut take_over);
 
     let refused = contender.finish();
     assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
@@ -719,14 +762,7 @@ fn a_take_over_hands_off_with_no_other_starter_in_between() {
     let answered = during.finish().ok();
     let new = status(&home);
     assert_eq!(new["pid"], new_pid, "{new}");
-    assert_eq!(
-        answered["url"],
-        format!(
-            "{}/",
-            new["url"].as_str().expect("a url").trim_end_matches("/cli")
-        ),
-        "{answered}"
-    );
+    assert_eq!(answered["url"], new["web"], "{answered}");
     assert_eq!(home.servers(), vec![new_pid]);
     stop_real(&home, new_pid);
 }
@@ -791,7 +827,7 @@ fn a_newer_server_of_another_database_or_without_a_generation_is_never_stopped()
     let home = Home::new();
     let _held = hold_the_home(&home);
     let interface = quadratique_server::app::interface();
-    let mut elsewhere = identity(&home, &interface, 2, &[1, 2]);
+    let mut elsewhere = identity(&home, &interface, 3, &[2, 3]);
     elsewhere["database"] = json!("/elsewhere/workspace.db");
     let other_database = Fake::start(
         fake_socket(&home),
@@ -816,7 +852,7 @@ fn a_newer_server_of_another_database_or_without_a_generation_is_never_stopped()
     );
     std::fs::remove_file(home.path().join("server.sock")).expect("the fake socket goes");
 
-    let mut nameless = identity(&home, &interface, 2, &[1, 2]);
+    let mut nameless = identity(&home, &interface, 3, &[2, 3]);
     nameless
         .as_object_mut()
         .expect("an object")

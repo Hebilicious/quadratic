@@ -506,18 +506,12 @@ fn a_command_during_a_take_over_is_refused_and_one_after_it_uses_the_new_server(
     );
     kill(old.pid());
     await_until("the take-over's server", || {
-        home.runtime()
-            .is_some_and(|runtime| runtime["pid"] == new_owner)
+        home.served_pid() == Some(new_owner)
     });
 
     let after = home.quadratique(elsewhere.path()).args(["ui"]).run().ok();
-    let runtime = home.runtime().expect("the new server's runtime file");
-    let new_url = runtime["url"]
-        .as_str()
-        .expect("a URL")
-        .trim_end_matches("cli")
-        .to_owned();
-    assert_eq!(after["url"], new_url, "{after}");
+    let served = home.served().expect("the new server answers");
+    assert_eq!(after["url"], served["web"], "{after}");
     assert_eq!(home.servers(), vec![new_owner]);
 }
 
@@ -540,10 +534,9 @@ fn a_stop_that_meant_a_generation_signals_no_server_from_before_the_socket() {
         "interface": quadratique_server::app::interface(),
         "schema": 1,
         "generation": "0123456789abcdef0123456789abcdef",
-        "control": 1,
-        "controls": [1],
+        "control": 2,
+        "controls": [1, 2],
         "started": "serve",
-        "url": "http://127.0.0.1:9/cli",
     })
     .to_string();
     std::thread::spawn(move || {

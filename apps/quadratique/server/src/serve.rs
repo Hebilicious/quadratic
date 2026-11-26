@@ -55,31 +55,43 @@ pub struct Gate {
 
 #[derive(Default)]
 struct GateInner {
-    closers: Mutex<Vec<Closer>>,
+    closers: Mutex<Closers>,
     stop: CancellationToken,
+}
+
+#[derive(Default)]
+struct Closers {
+    registered: Vec<Closer>,
+    closed: bool,
 }
 
 type Closer = Box<dyn Fn() + Send + Sync>;
 
 impl Gate {
+    /// A listener registered after [`Gate::close`] is closed at once: the web app's listener may open while a stop is
+    /// being answered.
     fn register(&self, closer: Closer) {
-        self.inner
-            .closers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(closer);
+        let mut closers = self.closers();
+        if closers.closed {
+            closer();
+        }
+        closers.registered.push(closer);
     }
 
     /// No registered listener accepts another connection once this returns; open connections go on.
     pub fn close(&self) {
-        let closers = self
-            .inner
-            .closers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for close in closers.iter() {
+        let mut closers = self.closers();
+        closers.closed = true;
+        for close in closers.registered.iter() {
             close();
         }
+    }
+
+    fn closers(&self) -> std::sync::MutexGuard<'_, Closers> {
+        self.inner
+            .closers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn request_stop(&self) {

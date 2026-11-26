@@ -87,9 +87,36 @@ impl Home {
         self.path().join("server.json")
     }
 
-    pub fn runtime(&self) -> Option<Value> {
-        let text = std::fs::read(self.runtime_path()).ok()?;
-        serde_json::from_slice(&text).ok()
+    /// The identity that the home's server answers on its socket, or nothing when no server listens there.
+    pub fn served(&self) -> Option<Value> {
+        use std::io::Read;
+
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(self.path().join("server.sock")).ok()?;
+        stream.set_read_timeout(Some(HANG_GUARD)).ok()?;
+        stream
+            .write_all(
+                b"GET /server HTTP/1.1\r\nHost: quadratique.invalid\r\nConnection: close\r\n\r\n",
+            )
+            .ok()?;
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).ok()?;
+        let (head, body) = answer.split_once("\r\n\r\n")?;
+        head.starts_with("HTTP/1.1 200")
+            .then(|| serde_json::from_str(body).ok())?
+    }
+
+    /// The process number of the server that answers on the home's socket.
+    pub fn served_pid(&self) -> Option<u32> {
+        Some(self.served()?["pid"].as_u64()? as u32)
+    }
+
+    /// Waits until the process `pid` answers on the home's socket. A socket exists from its `bind`, and takes
+    /// connections only from its `listen`, so the wait is for the answer.
+    pub fn await_served_by(&self, pid: u32) {
+        await_until(&format!("process {pid} serving the home"), || {
+            self.served_pid() == Some(pid)
+        });
     }
 
     pub fn quadratique(&self, directory: &Path) -> Quadratique {
@@ -439,8 +466,7 @@ pub fn await_until(what: &str, mut condition: impl FnMut() -> bool) {
 }
 
 /// What processes do in a home, as inotify reports it: a file opened, or renamed into place. A test waits on it for
-/// the step it needs, such as a command that has looked at the home's lock, or a server that has published its
-/// runtime file, instead of sleeping.
+/// the step it needs, such as a command that has looked at the home's lock, instead of sleeping.
 pub struct Watch {
     inotify: rustix::fd::OwnedFd,
     buffer: Vec<std::mem::MaybeUninit<u8>>,
@@ -452,7 +478,7 @@ pub struct Watch {
 pub enum Step<'a> {
     /// A process opened the file.
     Opened(&'a str),
-    /// A process renamed a file into place under this name, as a server publishes its runtime file.
+    /// A process renamed a file into place under this name.
     Published(&'a str),
 }
 

@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use acid_cat_core::http::HttpClient;
 use quadratique_server::git::remote;
 use quadratique_server::git::repository::Repository as GitRepository;
 use quadratique_server::git::watch::{Reached, step};
@@ -46,11 +45,7 @@ impl Workspace {
     }
 
     async fn status_on_the_web_page(&self, issue: &str) -> String {
-        let origin = format!("http://{}", self.board.server.address());
-        let page = HttpClient::new(&format!("{origin}{WEB_BASE}"))
-            .expect("the web route's URL")
-            .header("Origin", &origin)
-            .expect("a valid header");
+        let page = self.board.page(WEB_BASE).await;
         let shown = call(&page, "issue.get", json!({ "issue": issue }))
             .await
             .unwrap_or_else(|failure| panic!("issue.get failed: {failure}"));

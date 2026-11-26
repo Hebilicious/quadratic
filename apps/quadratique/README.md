@@ -77,16 +77,30 @@ quadratique server status
 quadratique ui --open
 ```
 
-The web app is at `http://127.0.0.1:<port>/`. The server keeps its port across restarts and
-upgrades, so open tabs and bookmarks keep working. It keeps the port in `server.port` in its data
+The web app is at `http://127.0.0.1:<port>/`. Its TCP listener opens at the start of the server
+when the data folder holds a web token (`web-token`): that is so after a first `quadratique ui`, and
+also in a data folder that a server of release 0.3 ran, because those servers wrote one at every
+start. Otherwise the first `quadratique ui` opens it, so a server that only agents and commands use
+listens on no TCP port. Without the token, the listener gives only the app's page and its files,
+never data. To stop listening at start, run `quadratique server strict on`: in strict mode the token
+is made at the first pairing after each start and kept nowhere, so the listener opens only at
+`quadratique ui`. The server keeps its port across
+restarts and upgrades, so open tabs and bookmarks keep working. It keeps the port in `server.port` in its data
 folder and asks for it again at each start. When another program holds that port, the server
 starts on a port the system chooses and keeps that one; `quadratique ui` prints the current
-address, and `quadratique server status` gives it as `web`. `quadratique serve --port <port>`
-starts the server on the port you give (`0`: one the system chooses) and keeps nothing.
+address, and `quadratique server status` gives it as `web` while the web app listens.
+`quadratique serve --port <port>` gives the web app the port you give (`0`: one the system chooses)
+and keeps nothing.
 
-While the server is down, another account of this machine can listen on the kept port. A tab or a
-bookmark then reaches that account's program, which can read what the browser saved for that
-address. On a machine whose other accounts you do not trust, run `quadratique server strict on`:
+The kept address has a risk on a machine with other accounts. While your server is down, one of
+them can listen on that port and serve its own page there. If you open a tab or a bookmark of
+Quadratique then, that page can read what your browser saved for the address, the token included.
+With the token, that account can read and change your issues whenever your server runs, until you
+sign out with `quadratique server sign-out`. Its page can also leave a service worker in your
+browser that keeps control of Quadratique's tabs at that address, even after your server is back.
+If you think this happened: run `quadratique server sign-out`, clear the site data of
+`http://127.0.0.1:<port>` in the browser, and turn strict mode on. A machine with only your account
+has no such risk. On a machine whose other accounts you do not trust, run `quadratique server strict on`:
 from the next start of the server, each start takes an address it never served and a new token, and
 you run `quadratique ui --open` after each restart. `quadratique server strict off` goes back to the
 default from the next start, which takes a new address and a new token, so each browser is let in
@@ -125,12 +139,28 @@ out, run `quadratique server sign-out`: it makes a new token, and every live cha
 the earlier one delivers nothing more once the command answers and closes, so each open page
 shows the sentence at once, and every other browser at its next request, until you run
 `quadratique ui --open` there again. In strict mode (`quadratique server strict on`) the token is
-made at each start of the server and kept in memory only, so every restart signs every browser
-out. A strict setting that you change applies from the next start of the server.
+made at the first pairing after each start of the server and kept in memory only, so every restart
+signs every browser out. A strict setting that you change applies from the next start of the server.
 
-Until the next release requires it (QUA-58), a request with no token is still served, as the
-kernel check of "Who can talk to the server" guards it; a request with a token that is not the
-current one gets `401`.
+Every request of the web app and its live channel needs the token: a request without it, or with
+an earlier one, gets `401`, and the page shows the sentence.
+
+### Use it over SSH
+
+The web app listens on the loopback address of the machine that runs the server. To use it from
+your own machine, forward the same port before you open the link:
+
+1. On the remote machine, run `quadratique ui` (without `--open`). It prints `url`, with the port,
+   and `link`, with a code valid for 60 seconds.
+2. On your machine, run `ssh -L <port>:127.0.0.1:<port> <host>` with that port.
+3. Open the `link` in your browser within the 60 seconds. If the code expired, run `quadratique ui`
+   again.
+
+Use the same port on both ends: the web app answers only under its own address,
+`127.0.0.1:<port>`. The forward runs as you on the remote machine, so everyone who can connect to
+its local end reaches the web app as you would; the page still needs the token. Do not forward the
+socket (`ssh -L ./q.sock:<data folder>/server.sock`) unless you mean it: whoever can connect to the
+forwarded socket can call every command as you, with no token.
 
 ## Install from a release
 
@@ -296,9 +326,13 @@ permissions decide who connects there: the socket has mode `0600` in a folder of
 process of another account cannot reach it, while `root` passes those permissions and can call the
 server like you. The server asks nothing more of a process on the socket.
 
-The TCP listener on `127.0.0.1` serves the web app, and until the next release (QUA-58) the routes
-of the command line too, which no command uses. On Linux it answers only processes of the account
-that runs it. At each connection it asks the kernel which account owns the caller's socket
+The TCP listener on `127.0.0.1` serves only the web app, and opens only once a browser was let in
+(see "Let a browser in"). It answers only requests that name its own numeric address
+(`Host: 127.0.0.1:<port>`); any other name, `localhost` included, gets `403`. Anyone who reaches it
+gets the app's pages and files, and only a request with the token gets data: `/web`, `/webmcp` and
+their live channel answer `401` without it. The command line's routes and the control requests
+(`/cli`, `/server` and below) answer `404` there. On Linux it also answers only processes of the
+account that runs it. At each connection it asks the kernel which account owns the caller's socket
 (`NETLINK_SOCK_DIAG`). A process of any other account, `root` included, gets `403` "This server
 answers only processes of its own account." That `403` is the TCP listener's rule only. A server that cannot ask the kernel who is
 connecting, in a sandbox that forbids netlink or on a kernel without its `inet_diag` module, does
@@ -307,8 +341,7 @@ mapped, where the kernel would show every unmapped caller as that same account. 
 fails once the server runs, the server refuses that connection and says so once in its log.
 Every process of your own account is you, whatever name it gives. The rule sees only the process at the other end of the connection: a proxy or port
 forward that runs as you (`ssh -L`, socat, the userland forwarders of rootless containers) is
-that process, so everyone who connects through it counts as you. No web page can call the routes
-of the command line, not even Quadratique's own.
+that process, so everyone who connects through it counts as you.
 
 The data folder must be private. The server and every command check it before they open a lock
 file in it, touch the store or start a server. When the check refuses the folder, the command
@@ -329,14 +362,15 @@ A missing data folder, and any missing folder above it, is made with mode `0700`
 The server also listens on the Unix socket `server.sock` in the data folder, with mode `0600`.
 `server status` asks it there first, and reports one state: `running`, `starting` (a server holds
 the folder and does not answer yet), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
-command line), `reachable: false` with the reason, or `legacy: true` for a server from before the
+command line), `older` (a server of release 0.2 or 0.3: run `quadratique server stop`), `reachable: false` with the reason, or `legacy: true` for a server from before the
 socket (release 0.1), which only TCP reaches. `server stop` and `serve --take-over` ask the server on
 the socket to stop, and never signal it. Every other command, `quadratique mcp`, `init` and
 `upgrade --skills` call the server on the socket too, and never over TCP: the command finds the
 server there first, as `server status` does, and only then sends its call through the same socket.
 So file permissions decide who can use the server from the command line: the socket's mode `0600`
-in a folder of mode `0700`. The TCP listener still serves the command line's routes until the
-next release (QUA-58), which leaves it to the web app; no command uses them.
+in a folder of mode `0700`. No server writes `server.json` any more, and no route of the command
+line answers on TCP: a tool that called `/cli` over TCP calls the socket instead
+(`curl --unix-socket <data folder>/server.sock http://quadratique.invalid/cli/...`).
 
 ### A server of release 0.1
 
@@ -410,11 +444,15 @@ limit. Each server start has a
 `control`, apart from the interface of the commands. A server keeps answering every control version
 it ever served, and lists them in `controls`. Two fields keep their meaning in every version:
 `generation` and `database`. A command line checks them before it looks at the control versions, so
-it stops a newer server only in its own folder and only by its generation. This is version 1:
+it stops a newer server only in its own folder and only by its generation. This is version 2, and the
+server still answers version 1, which releases 0.2 and 0.3 speak: their command lines take this
+server as newer, say to upgrade the command line, and still stop it. Version 2 means that the command
+line's routes are on the socket and nowhere else; a server of version 1 also served them on TCP, so
+this command line names it a server of an earlier release, uses none of it, and stops it when asked:
 
 | Request | Answer |
 | --- | --- |
-| `GET /server` | `200` and the identity: `pid`, `database`, `interface`, `schema`, `generation`, `control`, `controls`, `executable` (`path`, `device`, `inode`), `started` (`on-demand` or `serve`), `url` (the TCP address of the command line's routes, which no command uses). |
+| `GET /server` | `200` and the identity: `pid`, `database`, `interface`, `schema`, `generation`, `control`, `controls`, `executable` (`path`, `device`, `inode`), `started` (`on-demand` or `serve`), `web` (`http://127.0.0.1:<port>/`, while the web app listens) and `addressKept` with it. A server of version 1 also gives `url`, its command line's routes on TCP. |
 | `POST /server/stop` with `{"generation": "<generation>"}` | `202 {"generation": …}` if it names this server's generation: the server has closed its listeners, and starts to shut down once this answer is sent. Open connections get up to 2 seconds, then the server closes its store and frees the folder. `409 {"generation": <the serving one>}` for any other generation: nothing stops. `400` for a body that is not that JSON. |
 
 ```sh
@@ -629,6 +667,10 @@ app can import findings; the MCP server of agents does not offer it.
 ```sh
 quadratique upgrade
 ```
+
+Upgrade every copy of `quadratique` on the machine: a command line of release 0.2 or 0.3 cannot use
+this release's server, and says to upgrade the command line; this release's command line cannot use
+a server of release 0.2 or 0.3, and says to run `quadratique server stop`.
 
 `upgrade` asks the GitHub API for the latest release and compares it with the running binary.
 When the release is newer, it:

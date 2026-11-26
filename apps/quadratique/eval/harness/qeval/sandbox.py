@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -119,16 +120,34 @@ def system_path() -> str:
     return ":".join(dict.fromkeys(folders))
 
 
+# The longest path of the server's socket, `<QUADRATIQUE_HOME>/server.sock`, that Linux accepts.
+SOCKET_PATH_LIMIT = 107
+
+
+def _not_regular_files(folder: str, names: list[str]) -> list[str]:
+    """A socket or a lock left in the data folder is not kept."""
+    return [name for name in names if not (Path(folder, name).is_file() or Path(folder, name).is_dir())
+            or Path(folder, name).is_symlink()]
+
+
 @dataclass
 class Sandbox:
     root: Path
     tool: str
     binaries: dict[str, Path]
     log: list[dict] = field(default_factory=list)
+    # Quadratique's data folder while the sandbox lives: private, with a name no other account can guess, and short,
+    # because the server's socket in it may have a path of at most 107 bytes and a run folder can be deep. Its files are
+    # kept in `<root>/qhome` when the sandbox is removed, and a later sandbox of the same run starts from them.
+    qhome: Path = field(init=False)
 
     @property
     def home(self) -> Path:
         return self.root / "home"
+
+    @property
+    def kept_qhome(self) -> Path:
+        return self.root / "qhome"
 
     @property
     def bin(self) -> Path:
@@ -144,22 +163,37 @@ class Sandbox:
             "XDG_CACHE_HOME": str(home / ".cache"),
             "XDG_RUNTIME_DIR": str(home / "run"),
             "DO_NOT_TRACK": "1",
-            "QUADRATIQUE_HOME": str(self.root / "qhome"),
+            "QUADRATIQUE_HOME": str(self.qhome),
             "UV_CACHE_DIR": str(home / ".cache" / "uv"),
         }
 
     def create(self) -> "Sandbox":
-        for sub in ("home/.config", "home/.local/share", "home/.local/state", "home/.cache", "home/run", "qhome", "bin"):
+        for sub in ("home/.config", "home/.local/share", "home/.local/state", "home/.cache", "home/run", "bin"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         (self.home / "run").chmod(0o700)
-        # Quadratique refuses a home that a group or other accounts may use.
-        (self.root / "qhome").chmod(0o700)
+        # Quadratique refuses a home that a group or other accounts may use, and a socket path that is too long.
+        self.qhome = Path(tempfile.mkdtemp(prefix="qeval-"))
+        if self.kept_qhome.is_dir():
+            shutil.copytree(self.kept_qhome, self.qhome, dirs_exist_ok=True)
+        socket = len(str(self.qhome / "server.sock").encode())
+        if socket > SOCKET_PATH_LIMIT:
+            raise SystemExit(f"qeval: the Quadratique socket in {self.qhome} would be {socket} bytes long, more than "
+                             f"{SOCKET_PATH_LIMIT}: set TMPDIR to a shorter folder.")
         exports = " ".join(f'{k}="{v}"' for k, v in self.tool_env().items())
         for name, real in self.binaries.items():
             wrapper = self.bin / name
             wrapper.write_text(f'#!/bin/sh\nexec env {exports} "{real}" "$@"\n')
             wrapper.chmod(0o755)
         return self
+
+    def remove(self) -> None:
+        """Keeps the data folder's files in `<root>/qhome`, then removes the data folder. Call it once the tracker's
+        server has stopped."""
+        if not self.qhome.is_dir():
+            return
+        shutil.rmtree(self.kept_qhome, ignore_errors=True)
+        shutil.copytree(self.qhome, self.kept_qhome, ignore=_not_regular_files)
+        shutil.rmtree(self.qhome)
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = {

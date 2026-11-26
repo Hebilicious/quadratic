@@ -66,7 +66,11 @@ a boundary the operating system enforces. What holds, and what does not:
   (`qeval/processes.py`): its group ends with it, a read from it has a hang guard, and a setup
   that fails part-way stops the tracker's server. A process that leaves its group on purpose
   escapes that owner: Quadratique's server does, and the adapter stops it with
-  `quadratique server stop`.
+  `quadratique server stop`; a stop that fails fails the run.
+- Quadratique's data folder is the one place outside the run folder while a sandbox runs: a private
+  folder with an unpredictable name (`mkdtemp`) in the system's temporary folder, because the
+  server's socket path may be at most 107 bytes. Its files are kept in `<sandbox>/qhome` and the
+  folder is removed when the sandbox is torn down.
 - lific runs with `--no-service`: without it, `init` installs a systemd user unit, and the
   user's systemd manager is outside any throwaway home.
 - The binaries are cached in `harness/.cache/`, which git ignores.

@@ -1,9 +1,13 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
+use std::sync::Mutex;
+
 use quadratique_server::app::CATALOG_JSON;
 use quadratique_server::git::watcher;
-use quadratique_server::server::{self, Paths, Server, Waits};
+use quadratique_server::home::{self, Prepared};
+use quadratique_server::pairing::Issued;
+use quadratique_server::server::{self, Asked, Paths, Server, Waits};
 use quadratique_server::web::{EmbeddedFile, WEB_TARGET, WEBMCP_TARGET, WebApp};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -13,21 +17,42 @@ use tokio::net::TcpStream;
 use crate::support::within;
 
 pub struct Site {
-    pub server: Server,
+    _server: Server,
     pub home: TempDir,
+    address: SocketAddr,
+    bearer: Mutex<String>,
     _app: TempDir,
 }
 
 impl Site {
     pub fn address(&self) -> SocketAddr {
-        self.server.address()
+        self.address
     }
 
     pub fn origin(&self) -> String {
         format!("http://{}", self.address())
     }
+
+    /// The bearer the site's page holds.
+    pub fn bearer(&self) -> String {
+        self.bearer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Lets the page in again, as a new link of `quadratique ui` does, and gives the bearer it now holds.
+    pub async fn pair(&self) -> String {
+        let (_, bearer) = paired(self.home.path()).await;
+        *self
+            .bearer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = bearer.clone();
+        bearer
+    }
 }
 
+/// A server of the app `build` writes, and a page let in as `quadratique ui` lets one in.
 pub async fn start(build: impl FnOnce(&Path)) -> Site {
     let app = tempfile::tempdir().expect("a folder for the built app");
     build(app.path());
@@ -49,11 +74,71 @@ async fn start_app(web_app: WebApp, app: TempDir) -> Site {
     )
     .await
     .expect("the server starts");
+    let (address, bearer) = paired(home.path()).await;
     Site {
-        server,
+        _server: server,
         home,
+        address,
+        bearer: Mutex::new(bearer),
         _app: app,
     }
+}
+
+pub fn prepared(home: &Path) -> Prepared {
+    home::prepare(&Paths::in_home(home).expect("an absolute home")).expect("a private home")
+}
+
+/// What `quadratique ui` gets from the server of `home`: the server opens the web app's listener first.
+pub async fn pair(home: &Path, open: bool) -> Issued {
+    match server::pair_over_socket(&prepared(home), open).await {
+        Ok(Asked::Answered(issued)) => issued,
+        other => panic!("no link: {other:?}"),
+    }
+}
+
+pub fn code_of(issued: &Issued) -> String {
+    issued
+        .link
+        .split_once("#pair=")
+        .expect("a code in the link")
+        .1
+        .to_owned()
+}
+
+/// `POST /session` as the page sends it, from its own origin unless `origin` names another.
+pub async fn redeem(site_address: SocketAddr, code: &str, origin: Option<&str>) -> Answer {
+    let host = site_address.to_string();
+    let own = format!("http://{host}");
+    let headers = [("Host", host.as_str()), ("Origin", origin.unwrap_or(&own))];
+    request(
+        site_address,
+        "POST",
+        "/session",
+        &headers,
+        Some(json!({ "code": code })),
+    )
+    .await
+}
+
+pub fn token_of(answer: &Answer) -> String {
+    serde_json::from_str::<Value>(&answer.body).expect("a JSON answer")["token"]
+        .as_str()
+        .expect("a token")
+        .to_owned()
+}
+
+/// A link of `quadratique ui`, redeemed as the page does: the web app's address and the bearer.
+pub async fn paired(home: &Path) -> (SocketAddr, String) {
+    let issued = pair(home, false).await;
+    let address: SocketAddr = issued
+        .url
+        .strip_prefix("http://")
+        .and_then(|url| url.strip_suffix('/'))
+        .and_then(|authority| authority.parse().ok())
+        .expect("the web app's address");
+    let redeemed = redeem(address, &code_of(&issued), None).await;
+    assert_eq!(redeemed.status, 200, "{}", redeemed.body);
+    (address, token_of(&redeemed))
 }
 
 pub fn built(directory: &Path) {
@@ -146,7 +231,24 @@ fn unchunked(head: &str, body: &str) -> String {
 }
 
 impl Site {
+    /// A call of the site's page, with its bearer unless `extra` names an `Authorization`.
     pub async fn call(
+        &self,
+        route: &str,
+        id: &str,
+        input: Value,
+        extra: &[(&str, &str)],
+    ) -> Answer {
+        let bearer = format!("Bearer {}", self.bearer());
+        let mut headers = extra.to_vec();
+        if !extra.iter().any(|(name, _)| *name == "Authorization") {
+            headers.push(("Authorization", bearer.as_str()));
+        }
+        self.call_bare(route, id, input, &headers).await
+    }
+
+    /// A call of the site's page with only the headers `extra` adds to its `Host` and `Origin`.
+    pub async fn call_bare(
         &self,
         route: &str,
         id: &str,
@@ -257,59 +359,43 @@ async fn a_page_of_another_origin_or_another_host_name_is_refused() {
     );
 }
 
+/// The command line's routes and the control requests answer only on the socket: on TCP every method gets `404`, never
+/// the app's shell, from a page of the server's own origin or from any other client.
 #[tokio::test(flavor = "multi_thread")]
-async fn no_page_reaches_the_command_line_target_not_even_the_server_s_own() {
+async fn the_command_line_and_control_routes_are_not_found_on_tcp_not_even_as_the_shell() {
     let site = start(built).await;
-    let origin = site.origin();
-
-    let from_a_page = site
-        .call(
-            "/cli",
-            "project.list",
-            json!({}),
-            &[("Origin", origin.as_str())],
-        )
-        .await;
-    assert_eq!(from_a_page.status, 403, "{}", from_a_page.body);
-
     let host = site.address().to_string();
-    let from_the_command_line = request(
-        site.address(),
-        "POST",
+    let origin = site.origin();
+    let bearer = format!("Bearer {}", site.bearer());
+
+    for path in [
+        "/cli",
+        "/cli/x",
         "/cli/capabilities/project.list",
-        &[("Host", host.as_str())],
-        Some(json!({})),
-    )
-    .await;
-    assert_eq!(
-        from_the_command_line.status, 200,
-        "{}",
-        from_the_command_line.body
-    );
-
-    let web = site
-        .call(
-            "/web",
-            "project.list",
-            json!({}),
-            &[("Origin", origin.as_str())],
-        )
-        .await;
-    assert_eq!(web.status, 200, "{}", web.body);
-
-    let identity_from_a_page = request(
-        site.address(),
-        "GET",
         "/server",
-        &[("Host", host.as_str()), ("Origin", origin.as_str())],
-        None,
-    )
-    .await;
-    assert_eq!(
-        identity_from_a_page.status, 403,
-        "{}",
-        identity_from_a_page.body
-    );
+        "/server/x",
+        "/server/stop",
+        "/server/pair",
+    ] {
+        for method in ["GET", "HEAD", "POST"] {
+            for headers in [
+                vec![("Host", host.as_str())],
+                vec![
+                    ("Host", host.as_str()),
+                    ("Origin", origin.as_str()),
+                    ("Authorization", bearer.as_str()),
+                ],
+            ] {
+                let body = (method == "POST").then(|| json!({}));
+                let answer = request(site.address(), method, path, &headers, body).await;
+                assert_eq!(answer.status, 404, "{method} {path} {headers:?}");
+                assert!(
+                    !answer.body.contains("<title>"),
+                    "{method} {path}: the shell"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -467,57 +553,59 @@ fn every_target_the_server_serves_over_http_declares_the_http_surface() {
     }
 }
 
+/// One row of the route table: the method, the path, the headers beside `Host`, and the status under the own address.
+type Row<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)], u16);
+
+/// The route table of record 0004, §4, row by row: every route refuses a `Host` that is not the server's numeric
+/// address, `localhost` included, which may resolve to `[::1]`; under its own address each row answers as the table says.
 #[tokio::test(flavor = "multi_thread")]
-async fn every_route_refuses_a_host_that_is_not_the_server_s_own_address() {
+async fn every_route_answers_as_the_route_table_says_and_only_under_the_servers_own_address() {
     let site = start(built).await;
     let port = site.address().port();
+    let own = site.address().to_string();
+    let origin = site.origin();
+    let bearer = format!("Bearer {}", site.bearer());
     let foreign_host = format!("rebound.example:{port}");
-    let own_hosts = [site.address().to_string()];
     let localhost = format!("localhost:{port}");
-    let routes = [
-        ("POST", "/cli/capabilities/project.list"),
-        ("GET", "/server"),
-        ("POST", "/web/capabilities/project.list"),
-        ("POST", "/webmcp/capabilities/issue.list"),
-        ("GET", "/"),
+    let page = [
+        ("Origin", origin.as_str()),
+        ("Authorization", bearer.as_str()),
+    ];
+    let routes: [Row; 11] = [
+        ("GET", "/", &[], 200),
+        ("HEAD", "/issues/DEM-1", &[], 200),
+        ("GET", "/assets/app-1a2b.js", &[], 200),
+        ("POST", "/now", &[], 405),
+        ("GET", "/elsewhere", &[], 404),
+        ("POST", "/elsewhere", &[], 404),
+        ("POST", "/cli/capabilities/project.list", &page, 404),
+        ("GET", "/server", &[], 404),
+        ("POST", "/web/capabilities/project.list", &page, 200),
+        ("POST", "/webmcp/capabilities/issue.list", &page, 200),
+        (
+            "POST",
+            "/web/capabilities/project.list",
+            &[("Origin", origin.as_str())],
+            401,
+        ),
     ];
 
-    for (method, path) in routes {
+    for (method, path, extra, status) in routes {
         let body = (method == "POST").then(|| json!({}));
-        let rebound = request(
-            site.address(),
-            method,
-            path,
-            &[("Host", foreign_host.as_str())],
-            body.clone(),
-        )
-        .await;
-        assert_eq!(rebound.status, 403, "{method} {path} under {foreign_host}");
-        let named = request(
-            site.address(),
-            method,
-            path,
-            &[("Host", localhost.as_str())],
-            body.clone(),
-        )
-        .await;
-        assert_eq!(named.status, 403, "{method} {path} under {localhost}");
-
-        for own in &own_hosts {
-            let answer = request(
-                site.address(),
-                method,
-                path,
-                &[("Host", own.as_str())],
-                body.clone(),
-            )
-            .await;
-            assert_eq!(
-                answer.status, 200,
-                "{method} {path} under {own}: {}",
-                answer.body
-            );
+        for host in [foreign_host.as_str(), localhost.as_str()] {
+            let mut headers = vec![("Host", host)];
+            headers.extend_from_slice(extra);
+            let refused = request(site.address(), method, path, &headers, body.clone()).await;
+            assert_eq!(refused.status, 403, "{method} {path} under {host}");
         }
+        let mut headers = vec![("Host", own.as_str())];
+        headers.extend_from_slice(extra);
+        let answer = request(site.address(), method, path, &headers, body).await;
+        assert_eq!(
+            answer.status, status,
+            "{method} {path} under {own}: {}",
+            answer.body
+        );
     }
 }
 
@@ -533,13 +621,10 @@ async fn no_page_reaches_the_token_capabilities() {
     }
 }
 
-/// The bearer guards only `/web`, `/webmcp` and their event streams: while the command line's routes are on the TCP
-/// listener, only the kernel check keeps other accounts from them. QUA-58 removes them from TCP and requires the
-/// bearer in one step, so requiring the bearer while either route still answers on TCP fails here.
+/// The bearer guards `/web`, `/webmcp` and their event streams, now that no command-line route answers on TCP: a
+/// request without it gets `401`, and the same request with it `200`.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bearer_is_required_only_once_no_command_line_route_answers_on_tcp() {
-    use quadratique_server::pairing::{REQUIRED, Requirement};
-
     let site = start(built).await;
     let host = site.address().to_string();
     let command_line = request(
@@ -558,14 +643,97 @@ async fn the_bearer_is_required_only_once_no_command_line_route_answers_on_tcp()
         None,
     )
     .await;
+    let mut answers = Vec::new();
+    for (route, id) in [("/web", "project.list"), ("/webmcp", "issue.list")] {
+        let without = site.call_bare(route, id, json!({}), &[]).await;
+        let with = site.call(route, id, json!({}), &[]).await;
+        answers.push((route, without.status, with.status));
+    }
+    let stream_without = crate::pairing::EventStream::open(&site, None).await.err();
+    let stream_with = crate::pairing::EventStream::open(&site, Some(&site.bearer()))
+        .await
+        .err();
 
-    let answering: Vec<&str> = [("/cli", command_line.status), ("/server", identity.status)]
-        .into_iter()
-        .filter(|(_, status)| *status != 404)
-        .map(|(route, _)| route)
-        .collect();
-    assert!(
-        REQUIRED == Requirement::Optional || answering.is_empty(),
-        "the bearer is required while {answering:?} still answer on TCP without it"
+    assert_eq!((command_line.status, identity.status), (404, 404));
+    assert_eq!(
+        answers,
+        vec![("/web", 401, 200), ("/webmcp", 401, 200)],
+        "without the bearer, then with it"
+    );
+    assert_eq!(
+        (stream_without, stream_with),
+        (Some(401), None),
+        "the event stream without the bearer, then with it"
+    );
+}
+
+/// The command line's and the control's paths are not found on TCP even when the built app holds files under them:
+/// the guard, not the absence of a file, keeps them off TCP.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_of_the_built_app_under_the_command_line_and_control_paths_are_not_served() {
+    let site = start(|directory| {
+        built(directory);
+        for folder in ["cli", "server"] {
+            std::fs::create_dir(directory.join(folder)).expect("a folder in the built app");
+            std::fs::write(
+                directory.join(folder).join("x"),
+                "a file that must not be served",
+            )
+            .expect("a file in the built app");
+        }
+    })
+    .await;
+
+    for path in ["/cli/x", "/server/x"] {
+        let answer = site.page(path).await;
+        assert_eq!(answer.status, 404, "{path}");
+        assert!(
+            !answer.body.contains("must not be served"),
+            "{path}: {}",
+            answer.body
+        );
+    }
+}
+
+/// The `Host` is exact: one header, naming the server's own numeric address, and an absolute-form request line names
+/// no other authority. A browser sends neither of the refused forms.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_host_header_or_an_absolute_request_line_of_another_authority_is_refused() {
+    let site = start(built).await;
+    let own = site.address().to_string();
+
+    let twice = request(
+        site.address(),
+        "GET",
+        "/",
+        &[("Host", own.as_str()), ("Host", "rebound.example")],
+        None,
+    )
+    .await;
+    let elsewhere = request(
+        site.address(),
+        "GET",
+        "http://rebound.example/",
+        &[("Host", own.as_str())],
+        None,
+    )
+    .await;
+    let absolute_own = request(
+        site.address(),
+        "GET",
+        &format!("http://{own}/"),
+        &[("Host", own.as_str())],
+        None,
+    )
+    .await;
+
+    assert_eq!(twice.status, 403, "two Host headers");
+    assert_eq!(
+        elsewhere.status, 403,
+        "an absolute request line of another authority"
+    );
+    assert_eq!(
+        absolute_own.status, 200,
+        "an absolute request line of the own authority"
     );
 }

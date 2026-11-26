@@ -2,9 +2,10 @@
 //! the code at `POST /session` for the bearer, saves it, and sends it on every request.
 //! docs/decisions/0004-a-socket-for-commands-and-a-token-for-the-browser.md, §4 "Pairing contract".
 //!
-//! By default the bearer is one per data folder, kept in `web-token`, so that a bookmark or an open tab keeps working
-//! after a restart or an upgrade; `quadratique server sign-out` makes a new one, which signs every browser out. In
-//! strict mode the bearer is made at each start and kept in memory only.
+//! The bearer is made at the first pairing. By default it is one per data folder, kept in `web-token`, so that a
+//! bookmark or an open tab keeps working after a restart or an upgrade; `quadratique server sign-out` makes a new one,
+//! which signs every browser out. In strict mode it is made at the first pairing of each start and kept in memory only.
+//! Every request of the web app carries it: one without it gets `401`.
 //!
 //! An event stream admitted with the bearer ends when the bearer is replaced: a sign-out leaves no reader of the
 //! earlier bearer behind.
@@ -46,9 +47,6 @@ pub const CODE_LIFETIME: Duration = Duration::from_secs(60);
 pub const PENDING_LIMIT: usize = 16;
 /// The longest body of `POST /session`, and of the socket's pairing requests.
 pub const BODY_LIMIT: usize = 1024;
-/// Whether a request of the web app must carry the bearer. Until the cutover (QUA-58) a request without one is served,
-/// as the kernel check still guards TCP; a request with a bearer that is not the current one is refused already.
-pub const REQUIRED: Requirement = Requirement::Optional;
 /// The one sentence of a page that is not paired, also the message of a refused bearer.
 pub const NOT_PAIRED: &str =
     "To open Quadratique in this browser, run `quadratique ui --open` in a terminal.";
@@ -58,12 +56,6 @@ const SECRET_BYTES: usize = 32;
 const TOKEN_FILE_LIMIT: u64 = 64;
 const BOOTSTRAP_PREFIX: &str = "open-";
 const BOOTSTRAP_SUFFIX: &str = ".html";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Requirement {
-    Optional,
-    Required,
-}
 
 /// 32 random bytes. Compared in constant time, and never printed.
 #[derive(Clone)]
@@ -137,9 +129,9 @@ impl Bearer {
     }
 }
 
-/// The bearer of the web app and the codes waiting to be redeemed.
+/// The bearer of the web app, once a pairing made it, and the codes waiting to be redeemed.
 pub struct Pairing {
-    bearer: RwLock<Bearer>,
+    bearer: RwLock<Option<Bearer>>,
     lifetime: Lifetime,
     folder: PathBuf,
     pending: Mutex<Vec<Pending>>,
@@ -185,8 +177,8 @@ pub enum IssueError {
 
 impl Pairing {
     /// The pairing of the server of `home`: it removes the bootstrap files that an earlier server left, then loads the
-    /// folder's bearer, or makes it when it is missing or damaged. A strict home gets a bearer of this start, and the
-    /// folder's file is removed.
+    /// folder's bearer when the file holds one. A strict home starts with no bearer, and the folder's file is removed.
+    /// A missing bearer is made at the first pairing.
     pub fn open(home: &Prepared, strict: bool) -> std::io::Result<Arc<Pairing>> {
         Pairing::open_with(home.folder(), strict, Arc::new(Instant::now))
     }
@@ -196,20 +188,12 @@ impl Pairing {
         let file = folder.join(TOKEN_FILE);
         let (bearer, lifetime) = if strict {
             remove(&file)?;
-            (Secret::random()?, Lifetime::Start)
+            (None, Lifetime::Start)
         } else {
-            let bearer = match read_token(&file) {
-                Some(bearer) => bearer,
-                None => {
-                    let bearer = Secret::random()?;
-                    write_token(&file, &bearer)?;
-                    bearer
-                }
-            };
-            (bearer, Lifetime::Folder(file))
+            (read_token(&file), Lifetime::Folder(file))
         };
         Ok(Arc::new(Pairing {
-            bearer: RwLock::new(Bearer::new(bearer)),
+            bearer: RwLock::new(bearer.map(Bearer::new)),
             lifetime,
             folder: folder.to_path_buf(),
             pending: Mutex::new(Vec::new()),
@@ -217,13 +201,21 @@ impl Pairing {
         }))
     }
 
-    /// A new code for the web app at `origin`, valid for [`CODE_LIFETIME`], with a bootstrap file when asked. The
-    /// server's listener and routes exist before this is called, so the link names a listener of this server.
+    /// Whether a pairing made the bearer: by default at any earlier start of this home, in strict mode at this start. A
+    /// browser may hold it, so the web app must answer at its address.
+    pub fn paired(&self) -> bool {
+        self.current().is_some()
+    }
+
+    /// A new code for the web app at `origin`, valid for [`CODE_LIFETIME`], with a bootstrap file when asked; the first
+    /// code makes the bearer. The server's listener and routes exist before this is called, so the link names a
+    /// listener of this server.
     pub fn issue(
         self: &Arc<Self>,
         origin: SocketAddr,
         bootstrap: bool,
     ) -> Result<Issued, IssueError> {
+        self.make_bearer()?;
         let now = (self.clock)();
         let code = Secret::random()?;
         let url = format!("http://{origin}/");
@@ -261,7 +253,7 @@ impl Pairing {
         if let Some(file) = redeemed.bootstrap {
             let _ = std::fs::remove_file(file);
         }
-        Some(self.current().secret.encoded())
+        Some(self.current().as_ref()?.secret.encoded())
     }
 
     /// Whether `presented` is the current bearer.
@@ -272,6 +264,7 @@ impl Pairing {
     /// When `presented` is the current bearer: the token that is cancelled when it is replaced.
     pub fn admit(&self, presented: &str) -> Option<CancellationToken> {
         let current = self.current();
+        let current = current.as_ref()?;
         current
             .secret
             .matches(presented)
@@ -279,17 +272,20 @@ impl Pairing {
     }
 
     /// A new bearer: every saved one stops working, every event stream admitted with the earlier one ends, and the
-    /// codes that wait are dropped with their bootstrap files.
+    /// codes that wait are dropped with their bootstrap files. Before any pairing there is no bearer to replace.
     pub fn rotate(&self) -> std::io::Result<()> {
         let secret = Secret::random()?;
         // One lock around the file, the memory and the end of the streams: two rotations at once cannot leave the file
         // and the memory on different tokens, and no stream is admitted with the earlier token once this returns.
         let mut current = self.bearer.write().unwrap_or_else(PoisonError::into_inner);
-        if let Lifetime::Folder(file) = &self.lifetime {
-            write_token(file, &secret)?;
+        if current.is_some() {
+            if let Lifetime::Folder(file) = &self.lifetime {
+                write_token(file, &secret)?;
+            }
+            if let Some(earlier) = current.replace(Bearer::new(secret)) {
+                earlier.replaced.cancel();
+            }
         }
-        let earlier = std::mem::replace(&mut *current, Bearer::new(secret));
-        earlier.replaced.cancel();
         drop(current);
         for dropped in self.pending().drain(..) {
             if let Some(file) = dropped.bootstrap {
@@ -310,8 +306,21 @@ impl Pairing {
         matches!(self.lifetime, Lifetime::Folder(_))
     }
 
-    fn current(&self) -> std::sync::RwLockReadGuard<'_, Bearer> {
+    fn current(&self) -> std::sync::RwLockReadGuard<'_, Option<Bearer>> {
         self.bearer.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The bearer, made and written under the same lock as a rotation when no pairing made it yet.
+    fn make_bearer(&self) -> std::io::Result<()> {
+        let mut current = self.bearer.write().unwrap_or_else(PoisonError::into_inner);
+        if current.is_none() {
+            let secret = Secret::random()?;
+            if let Lifetime::Folder(file) = &self.lifetime {
+                write_token(file, &secret)?;
+            }
+            *current = Some(Bearer::new(secret));
+        }
+        Ok(())
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, Vec<Pending>> {
@@ -477,12 +486,10 @@ impl Handler for SessionRoute {
     }
 }
 
-/// The bearer on a route of the web app: `Authorization: Bearer <bearer>`. A request with another bearer gets `401`;
-/// one with none is served until the requirement is [`Requirement::Required`]. An event stream admitted with the
-/// bearer ends when the bearer is replaced; one admitted without a bearer is not bound to any.
+/// The bearer on a route of the web app: `Authorization: Bearer <bearer>`. A request without it, or with another one,
+/// gets `401`. An event stream admitted with the bearer ends when the bearer is replaced.
 pub struct BearerGuard {
     pub pairing: Arc<Pairing>,
-    pub requirement: Requirement,
     pub inner: Arc<dyn Handler>,
 }
 
@@ -504,7 +511,6 @@ impl Handler for BearerGuard {
             })
             .collect();
         let replaced = match presented.as_slice() {
-            [] if self.requirement == Requirement::Optional => return self.inner.handle(request),
             [Some(bearer)] => self.pairing.admit(bearer),
             _ => None,
         };
@@ -834,13 +840,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_folders_bearer_is_in_a_private_file_and_a_damaged_one_is_replaced() {
+    fn the_folders_bearer_is_in_a_private_file_and_a_damaged_one_is_replaced_at_the_first_pairing()
+    {
         use std::os::unix::fs::PermissionsExt;
 
         let folder = tempfile::tempdir().expect("a folder");
         std::fs::write(folder.path().join(TOKEN_FILE), "not a bearer\n").expect("a damaged file");
 
         let fixture = Fixture::in_folder(folder, false);
+        assert!(!fixture.pairing.paired(), "a damaged file gave a bearer");
+        fixture.issue(false);
 
         let file = fixture.folder.path().join(TOKEN_FILE);
         let mode = std::fs::metadata(&file)
@@ -883,17 +892,12 @@ mod tests {
         }
     }
 
-    async fn guarded(
-        requirement: super::Requirement,
-        pairing: &Arc<Pairing>,
-        bearer: Option<&str>,
-    ) -> (u16, String) {
+    async fn guarded(pairing: &Arc<Pairing>, bearer: Option<&str>) -> (u16, String) {
         use acid_cat_core::remote::Handler;
         use http_body_util::BodyExt;
 
         let guard = super::BearerGuard {
             pairing: Arc::clone(pairing),
-            requirement,
             inner: Arc::new(Answers),
         };
         let mut request = http::Request::builder().uri("/web/capabilities/project.list");
@@ -918,36 +922,44 @@ mod tests {
         (status, String::from_utf8_lossy(&body).into_owned())
     }
 
-    /// The cutover (QUA-58) sets the requirement to `Required`: a request without the bearer then gets the `401` that
-    /// the page acts on, as one with a stale bearer already does.
     #[tokio::test]
-    async fn once_the_bearer_is_required_a_request_without_it_gets_401_and_the_bearer_never_reaches_the_route()
+    async fn a_request_without_the_bearer_or_with_another_gets_401_and_the_bearer_never_reaches_the_route()
      {
-        use super::Requirement::{Optional, Required};
-
         let fixture = Fixture::new(false);
+        let unpaired = guarded(&fixture.pairing, Some(&"A".repeat(43))).await;
         let bearer = fixture
             .pairing
             .redeem(&code_of(&fixture.issue(false).link))
             .expect("the bearer");
 
-        let missing = guarded(Required, &fixture.pairing, None).await;
-        let stale = guarded(Required, &fixture.pairing, Some(&"A".repeat(43))).await;
-        let current = guarded(Required, &fixture.pairing, Some(&bearer)).await;
-        let missing_today = guarded(Optional, &fixture.pairing, None).await;
-        let stale_today = guarded(Optional, &fixture.pairing, Some(&"A".repeat(43))).await;
+        let missing = guarded(&fixture.pairing, None).await;
+        let stale = guarded(&fixture.pairing, Some(&"A".repeat(43))).await;
+        let current = guarded(&fixture.pairing, Some(&bearer)).await;
 
+        assert_eq!(unpaired.0, 401);
         assert_eq!(missing.0, 401);
         assert!(missing.1.contains("quadratique ui --open"), "{}", missing.1);
         assert_eq!(stale.0, 401);
         assert_eq!(current, (200, "ok".to_owned()));
-        assert_eq!(missing_today, (200, "ok".to_owned()));
-        assert_eq!(stale_today.0, 401);
-        assert_eq!(
-            super::REQUIRED,
-            Optional,
-            "QUA-58 requires the bearer, not this step"
-        );
+    }
+
+    #[test]
+    fn no_bearer_exists_and_no_token_file_is_written_before_the_first_pairing() {
+        let fixture = Fixture::new(false);
+        let file = fixture.folder.path().join(TOKEN_FILE);
+
+        let before = (fixture.pairing.paired(), file.exists());
+        fixture
+            .pairing
+            .rotate()
+            .expect("a sign-out with nothing to replace");
+        let after_sign_out = (fixture.pairing.paired(), file.exists());
+        fixture.issue(false);
+
+        assert_eq!(before, (false, false));
+        assert_eq!(after_sign_out, (false, false));
+        assert!(fixture.pairing.paired());
+        assert!(file.exists(), "the first pairing wrote no token file");
     }
 
     /// Two sign-outs at once: each makes a token, writes the file and sets memory. The file and the memory must end on
@@ -955,6 +967,7 @@ mod tests {
     #[test]
     fn rotations_at_once_leave_the_file_and_the_memory_on_the_same_token() {
         let fixture = Fixture::new(false);
+        fixture.issue(false);
         let file = fixture.folder.path().join(TOKEN_FILE);
 
         for round in 0..300 {

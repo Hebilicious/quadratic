@@ -22,17 +22,17 @@ pub fn all() -> Vec<CliCommand<Context>> {
     vec![
         command(
             "serve",
-            "Run the server in the foreground, until SIGINT or SIGTERM. Without --port, on the port this home kept from its last start when that port is free, otherwise on one the system chooses, which it keeps (server strict on: a port this home never served, kept nowhere). --port <port>: on that loopback port, 0 letting the system choose; it reads and keeps no port. Other commands start it in the background when it is not running. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
+            "Run the server in the foreground, until SIGINT or SIGTERM. Commands and agents reach it on the socket in its data folder; other commands start it in the background when it is not running. Its web app listens on TCP once a browser was let in (quadratique ui): without --port, on the port this home kept when that port is free, otherwise on one the system chooses, which it keeps (server strict on: a port this home never served, kept nowhere). --port <port>: the web app's loopback port, 0 letting the system choose; it reads and keeps no port. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
             |args, io| serve(args, io).boxed(),
         ),
         command(
             "server",
-            "server status: whether the server of this home runs, and where. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; from the next start of the server, each start takes an address it never served and a new token, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui --open lets the browser in again. server strict off: back to the default from the next start, which takes a new address and a new token, so each browser is let in once more with quadratique ui --open; after that the server keeps both across restarts. Neither starts a server. server sign-out: a new token for the web app, which signs every browser out; quadratique ui --open lets it in again.",
+            "server status: whether the server of this home runs, and the address of its web app (web) while that listens. server stop: stop it. server strict on: for a machine whose other accounts you do not trust; from the next start of the server, each start takes an address it never served and a new token, so open tabs and bookmarks of the web app stop working at each restart and quadratique ui --open lets the browser in again. server strict off: back to the default from the next start, which takes a new address and a new token, so each browser is let in once more with quadratique ui --open; after that the server keeps both across restarts. Neither starts a server. server sign-out: a new token for the web app, which signs every browser out; quadratique ui --open lets it in again.",
             |args, io| server_command(args, io).boxed(),
         ),
         command(
             "ui",
-            "Make sure the server runs, and print the address of the web app (url), a one-time link that lets a browser in (link, valid 60 seconds and once), and addressKept: whether the server keeps that address across restarts (false under server strict on). ui --open: instead of printing the link, hand the opener (xdg-open, or open on macOS) a file only this account can read, which sends the browser to the link; opened: true means only that the opener ran and exited without an error, not that a browser read the file (a sandboxed browser may not reach the data folder: then run quadratique ui and open its link). A browser that was let in keeps its token, and stays in across restarts until server sign-out (in strict mode, until the next restart).",
+            "Make sure the server runs and its web app listens, and print the address of the web app (url), a one-time link that lets a browser in (link, valid 60 seconds and once), and addressKept: whether the server keeps that address across restarts (false under server strict on). ui --open: instead of printing the link, hand the opener (xdg-open, or open on macOS) a file only this account can read, which sends the browser to the link; opened: true means only that the opener ran and exited without an error, not that a browser read the file (a sandboxed browser may not reach the data folder: then run quadratique ui and open its link). A browser that was let in keeps its token, and stays in across restarts until server sign-out (in strict mode, until the next restart).",
             |args, io| ui(args, io).boxed(),
         ),
         command("init", crate::init::USAGE, |args, io| {
@@ -251,7 +251,6 @@ fn located(home: &Home, mut value: Value) -> Value {
     if value.get("addressKept").is_none() {
         value["addressKept"] = json!(!server::strict(home.prepared()));
     }
-    value["runtime"] = json!(home.prepared().runtime());
     value["log"] = json!(home.log());
     value
 }
@@ -268,6 +267,16 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
         Observed::OtherDatabase(identity) => json!({
             "otherDatabase": identity.database,
             "pid": identity.pid,
+            "database": database,
+        }),
+        Observed::Older(identity) => json!({
+            "running": true,
+            "older": true,
+            "sameInterface": false,
+            "control": identity.control,
+            "pid": identity.pid,
+            "generation": identity.generation,
+            "reason": "a server of an earlier release holds this home, and this command line cannot use it: run `quadratique server stop`, which stops it; the next command starts this build's server",
             "database": database,
         }),
         Observed::Newer(identity) => json!({
@@ -349,7 +358,6 @@ fn answered_over_socket(home: &Home, identity: &server::Identity) -> Value {
         "running": true,
         "sameInterface": same,
         "pid": identity.pid,
-        "url": identity.url,
         "database": identity.database,
         "generation": identity.generation,
         "control": identity.control,
@@ -361,12 +369,8 @@ fn answered_over_socket(home: &Home, identity: &server::Identity) -> Value {
     if let Some(kept) = kept_by(home, identity) {
         value["addressKept"] = json!(kept);
     }
-    if let Some(origin) = identity
-        .url
-        .as_deref()
-        .and_then(|url| url.strip_suffix(server::BASE))
-    {
-        value["web"] = json!(format!("{origin}/"));
+    if let Some(web) = &identity.web {
+        value["web"] = json!(web);
     }
     value
 }
@@ -530,20 +534,12 @@ async fn address_kept(home: &Home) -> bool {
     !server::strict(home.prepared())
 }
 
-/// What the running server said at its start, checked against the home as it is now; nothing from a server that does
-/// not say, or names no address.
+/// What the running server said when its web app began to listen, checked against the home as it is now; nothing
+/// from a server whose web app does not listen.
 #[cfg(unix)]
 fn kept_by(home: &Home, identity: &server::Identity) -> Option<bool> {
     let said = identity.address_kept?;
-    let port = identity
-        .url
-        .as_deref()?
-        .strip_prefix("http://")?
-        .split('/')
-        .next()?
-        .parse::<std::net::SocketAddr>()
-        .ok()?
-        .port();
+    let port = identity.web_address()?.port();
     Some(server::address_kept(home.prepared(), said, port))
 }
 
@@ -596,7 +592,11 @@ async fn mcp_command(args: Vec<String>, io: &mut CliIo) -> i32 {
         Ok(home) => home,
         Err(error) => return report(io, home_refusal_kind(&error), error.to_string()),
     };
-    if let Err(error @ background::LifeError::Unreachable { .. }) = background::ensure(&home).await
+    // AcidCat shows an agent only that a tool failed: what the agent cannot fix by calling again stops the MCP server
+    // at its start, with the reason, which the harness shows.
+    if let Err(
+        error @ (background::LifeError::Unreachable { .. } | background::LifeError::Older { .. }),
+    ) = background::ensure(&home).await
     {
         return report(io, Kind::Unavailable, error.to_string());
     }

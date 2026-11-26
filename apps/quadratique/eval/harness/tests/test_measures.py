@@ -460,7 +460,7 @@ class SetupStepsRow(unittest.TestCase):
             (repo / ".tracker.toml").write_text("key = \"TAL\"\n")
             committed = tally.commit_all(repo, env, "Set up the issue tracker")
             sb = SimpleNamespace(env=lambda: env, log=[{"cmd": ["quadratique", "init", "--key", "TAL", "--name", "tally"]}],
-                                 home=home, root=root)
+                                 home=home, root=root, qhome=root / "qhome")
             p = SimpleNamespace(sb=sb, repo=repo, base=base, config_before=config_before, committed_by_maintainer=committed)
 
             setup = scripted.measure_setup(p)

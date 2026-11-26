@@ -1119,13 +1119,12 @@ fn a_server_started_with_serve_is_stopped_and_the_person_reads_how_to_restart_it
     let releases = Releases::start();
     let installed = Installed::file();
     releases.publish(LATEST, assets(LATEST, &new_binary(LATEST)));
-    let mut watch = Watch::of(&installed.home);
-    let serve = installed
+    let mut serve = installed
         .home
         .quadratique_at(&installed.binary, installed.home.path())
         .args(["serve"])
         .spawn();
-    watch.await_steps(&[Step::Published("server.json")]);
+    installed.home.await_served_by(serve.id());
     let generation = generation_of(&installed, &releases);
 
     let answer = installed.upgrade(&releases, &[]).ok();
@@ -1175,11 +1174,10 @@ impl FakeServer {
             "interface": quadratique_server::app::interface(),
             "schema": 1,
             "generation": GENERATION,
-            "control": 1,
-            "controls": [1],
+            "control": 2,
+            "controls": [1, 2],
             "executable": { "path": installed.binary, "device": meta.dev(), "inode": meta.ino() },
             "started": "on-demand",
-            "url": "http://127.0.0.1:9/cli",
         })
         .to_string();
         let asked = Arc::new(Mutex::new(Vec::new()));
