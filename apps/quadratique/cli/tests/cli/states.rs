@@ -358,9 +358,14 @@ fn row_a_held_lock_without_a_socket_is_starting_and_each_command_waits_for_ready
     );
     let answered = ui.finish().ok();
     assert_eq!(answered["url"], "http://127.0.0.1:9/", "{answered}");
+    // The identity, the pairing, and the identity again for whether the address is kept.
     assert_eq!(
         fake.requests(),
-        ["GET /server HTTP/1.1", "POST /server/pair HTTP/1.1"]
+        [
+            "GET /server HTTP/1.1",
+            "POST /server/pair HTTP/1.1",
+            "GET /server HTTP/1.1"
+        ]
     );
     nothing_started(&home);
     std::fs::remove_file(home.path().join("server.sock")).expect("the fake socket goes");
