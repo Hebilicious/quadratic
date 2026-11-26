@@ -1359,6 +1359,7 @@ mod tests {
 
     /// No runtime file names the process any more: the recovery says how to find the process that holds the home's
     /// lock, on Linux and on macOS.
+    #[cfg(unix)]
     #[test]
     fn the_recovery_of_a_server_that_does_not_answer_names_how_to_find_its_process() {
         use super::{Attempt, Hang};
