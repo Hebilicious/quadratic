@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""A fake `cargo` for the release workflow's steps, logging every call to $FAKE_GH/calls.
+
+- `cargo metadata` describes the two crates from $FAKE_GH/state.json ("workspace": their versions and the command
+  line's requirement on the server).
+- `cargo package` writes target/package/<crate>-<version>.crate for the named packages (all with --workspace). Its
+  bytes are "<crate> <version>", plus the text that "package_differs" gives the crate.
+- `cargo publish` packages the same way (plus "publish_differs") and uploads in dependency order to "crates", as the
+  real one does: it refuses a version that the index already lists, fails an upload named by "fail_publish_of" once,
+  leaves a crate named by "unlisted" out of the index after its upload, and stops when a crate it uploaded is not
+  listed while another waits on it. The index records each upload's SHA-256 under "cksums"."""
+import hashlib, json, os, sys
+
+root = os.environ["FAKE_GH"]
+state_file = os.path.join(root, "state.json")
+state = json.load(open(state_file))
+args = sys.argv[1:]
+open(os.path.join(root, "calls"), "a").write("cargo " + " ".join(args) + "\n")
+workspace = state["workspace"]
+ORDER = ("quadratique-server", "quadratique")
+
+
+def save():
+    json.dump(state, open(state_file, "w"))
+
+
+def named():
+    names = [args[i + 1] for i, a in enumerate(args) if a in ("-p", "--package")]
+    names += [a.split("=", 1)[1] for a in args if a.startswith("--package=")]
+    return [crate for crate in ORDER if crate in names or "--workspace" in args]
+
+
+def package(crate, extra=""):
+    data = (f"{crate} {workspace[crate]}" + state.get("package_differs", {}).get(crate, "") + extra).encode()
+    os.makedirs("target/package", exist_ok=True)
+    open(f"target/package/{crate}-{workspace[crate]}.crate", "wb").write(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+if args[0] == "metadata":
+    print(json.dumps({"packages": [
+        {"name": "quadratique-server", "version": workspace["quadratique-server"], "dependencies": []},
+        {"name": "quadratique", "version": workspace["quadratique"],
+         "dependencies": [{"name": "quadratique-server", "req": workspace["requires"]}]},
+    ]}))
+    sys.exit(0)
+
+if args[0] == "package":
+    for crate in named():
+        package(crate)
+    sys.exit(0)
+
+assert args[0] == "publish", args
+if not os.environ.get("CARGO_REGISTRY_TOKEN"):
+    sys.exit("error: no token found, please run `cargo login`")
+plan = named()
+for crate in plan:
+    if workspace[crate] in state["crates"].get(crate, []):
+        sys.exit(f"error: crate {crate}@{workspace[crate]} already exists on crates.io index")
+for position, crate in enumerate(plan):
+    version = workspace[crate]
+    print(f"   Uploading {crate} v{version}", file=sys.stderr)
+    if state.get("fail_publish_of") == crate:
+        state.pop("fail_publish_of")
+        save()
+        sys.exit(f"error: failed to publish {crate} v{version} to registry at https://crates.io: connection reset")
+    checksum = package(crate, state.get("publish_differs", {}).get(crate, ""))
+    if crate == state.get("unlisted"):
+        state.setdefault("uploaded", {})[crate] = checksum
+        save()
+        if position + 1 < len(plan):
+            sys.exit(f"error: unable to publish {' and '.join(plan[position + 1:])} due to a timeout while waiting for published dependencies to be available.")
+        print(f"warning: timed out waiting for {crate} v{version} to be available in registry `crates-io`", file=sys.stderr)
+        continue
+    state["crates"].setdefault(crate, []).append(version)
+    state.setdefault("cksums", {})[f"{crate}@{version}"] = checksum
+    save()
+    print(f"   Published {crate} v{version} at registry `crates-io`", file=sys.stderr)
