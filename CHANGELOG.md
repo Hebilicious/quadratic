@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0](https://github.com/Hebilicious/quadratique/compare/v0.3.0...v0.4.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* `install.sh` only copies the binary to `$XDG_BIN_HOME/quadratique` (or `~/.local/bin/quadratique`); it no longer writes, enables or restarts `quadratique.service`, and the release archive has no `uninstall.sh`. A server of the earlier build keeps running it until `quadratique server stop` (`install.sh` and `quadratique upgrade` after mise say so), and the next command starts the new build. `quadratique upgrade` no longer runs `systemctl`: a unit that an earlier install wrote keeps working, stays inactive after a clean stop until the next login, and can be kept, stopped or removed as the README's "A unit that an earlier install wrote" says; "Keep the server up after a reboot" gives a unit and a LaunchAgent that run `serve --take-over`.
+* every copy of quadratique on a machine must be upgraded together. A command line of release 0.2 or 0.3 against this release's server says "the server of this home speaks control version 2, which this command line does not know. Nothing was started. Upgrade this command line." (its MCP server answers each tool call only "The capability failed."), and this release's command line against a 0.2 or 0.3 server says that a server of an earlier release holds the home and to run `quadratique server stop`, which stops it. Scripts that called `/cli` over TCP call the socket: `curl --unix-socket <data folder>/server.sock http://quadratique.invalid/cli/...`. The web app requires its token: run `quadratique ui --open` once per browser. No server writes `server.json`, and `server status` has no `url` or `runtime` (`web` while the web app listens). The web app's TCP port opens at the server's start only when the data folder holds a web token (after a first `quadratique ui`, or in a data folder that a 0.3 server ran), and otherwise at the first `quadratique ui`; `quadratique server strict on` keeps it closed until `ui`.
+
+### Features
+
+* every command and quadratique mcp reach the server over its Unix socket ([#51](https://github.com/Hebilicious/quadratique/issues/51)) ([14d6ab3](https://github.com/Hebilicious/quadratique/commit/14d6ab351da3693fce37e71bfdfc9c32d1a85b68))
+* installing is putting the binary on the PATH, and the README says how to keep the server up ([#59](https://github.com/Hebilicious/quadratique/issues/59)) ([1f13ddc](https://github.com/Hebilicious/quadratique/commit/1f13ddc1f8c525cc0ffbd270de51ccaeb03975fb))
+* the server serves on macOS, and the kernel caller check is deleted ([#57](https://github.com/Hebilicious/quadratique/issues/57)) ([223ddcf](https://github.com/Hebilicious/quadratique/commit/223ddcfd04398f66faa32ce364ebe947f7b08572))
+* the TCP listener serves only the web app, and only with the token ([#56](https://github.com/Hebilicious/quadratique/issues/56)) ([e066002](https://github.com/Hebilicious/quadratique/commit/e06600204ec8ba136e5fed4cdc52521edf5f92aa))
+
+
+### Bug Fixes
+
+* a sign-out ends the event streams of the earlier web token ([#52](https://github.com/Hebilicious/quadratique/issues/52)) ([f0007b0](https://github.com/Hebilicious/quadratique/commit/f0007b01a96ca0be5627f29bc0a2174c727bcc12))
+* a stop that shuts the socket down no longer pins the socket's accept loop to its thread ([#54](https://github.com/Hebilicious/quadratique/issues/54)) ([8a66ba1](https://github.com/Hebilicious/quadratique/commit/8a66ba1d655f1701ee16f2f05ebb8029627f6d9b))
+* in a sandbox that hides who owns the folders above the data folder, a command says so and names its MCP tool ([#55](https://github.com/Hebilicious/quadratique/issues/55)) ([75d430e](https://github.com/Hebilicious/quadratique/commit/75d430ef7f91d0204703e895c556328dfb8b7f32))
+
 ## [0.3.0](https://github.com/Hebilicious/quadratique/compare/v0.2.0...v0.3.0) (2026-11-26)
 
 
