@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::support::{Home, Repository, Run, outside};
+use crate::support::{Home, Repository, Run, await_exit, outside};
 
 const UNAVAILABLE: i32 = 4;
 /// What a server of releases 0.1 to 0.3 answered on TCP to a process of another account.
@@ -313,6 +313,14 @@ impl ReadOnly {
     }
 }
 
+impl ReadOnly {
+    /// The home alone becomes read-only: the files in it keep their modes, as an earlier server left them.
+    fn folder(home: &Path) -> ReadOnly {
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o500)).expect("mode 0500");
+        ReadOnly(home.to_path_buf())
+    }
+}
+
 impl Drop for ReadOnly {
     fn drop(&mut self) {
         let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
@@ -332,6 +340,47 @@ fn entries(home: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// The lock files and the log of an earlier server stay writable in a home of mode 0500, but its server could not
+/// bind its socket there: the command says that it cannot write the home and starts no server.
+#[test]
+fn a_caller_that_cannot_write_a_home_with_an_earlier_servers_files_starts_nothing_and_says_why() {
+    let home = Home::new();
+    let elsewhere = outside();
+    let run = |args: &[&str]| home.quadratique(elsewhere.path()).args(args).run();
+    run(&["project", "list"]).ok();
+    let stopped = run(&["server", "stop"]).ok();
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    await_exit(stopped["pid"].as_u64().expect("a pid") as u32);
+    let before = entries(home.path());
+    let log = std::fs::read(home.path().join("server.log")).expect("the earlier server's log");
+    let _read_only = ReadOnly::folder(home.path());
+
+    let listed = run(&["issue", "list"]);
+    let served = run(&["serve"]);
+    let taken_over = run(&["serve", "--take-over"]);
+
+    let cannot_write = format!("cannot write {}", home.path().display());
+    for refused in [&listed, &served, &taken_over] {
+        assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+        let message = message_of(refused);
+        assert!(
+            message.contains("Cannot reach the Quadratique server from here")
+                && message.contains(&cannot_write)
+                && message.contains("Nothing was started."),
+            "{message}"
+        );
+    }
+    let listed = message_of(&listed);
+    assert!(listed.contains("Call the Quadratique MCP tool"), "{listed}");
+    assert_eq!(entries(home.path()), before);
+    assert_eq!(
+        std::fs::read(home.path().join("server.log")).expect("the log"),
+        log,
+        "a server was spawned"
+    );
+    assert!(home.servers().is_empty());
 }
 
 /// A read-only home held by a server from before the socket that this command line cannot prove: status says what

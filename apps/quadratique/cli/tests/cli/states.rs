@@ -456,6 +456,46 @@ fn row_a_stalled_socket_is_never_replaced_and_its_message_says_how_to_recover() 
     assert!(home.servers().is_empty());
 }
 
+/// The lock is held, no start holds `start.lock`, and the socket has mode 0666: only a start sets its mode, so every
+/// command says so at once, as `server status` does, and none waits for its deadline.
+#[test]
+fn row_an_untrusted_socket_with_no_start_under_way_is_named_with_its_mode_by_every_command_at_once()
+{
+    let home = Home::new();
+    let _held = hold_the_home(&home);
+    let socket = home.path().join("server.sock");
+    let _listener = UnixListener::bind(&socket).expect("a socket");
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).expect("mode 0666");
+    let mode = format!("{} has mode 666, not 600", socket.display());
+
+    let status = status(&home);
+    let ensured = run(&home, &["project", "list"]);
+    let stopped = run(&home, &["server", "stop"]);
+    let taken_over = run(&home, &["serve", "--take-over"]);
+
+    assert_eq!(
+        (&status["untrusted"], &status["reason"]),
+        (&json!(true), &json!(mode)),
+        "{status}"
+    );
+    assert!(status.get("starting").is_none(), "{status}");
+    for (refused, outcome) in [
+        (&ensured, "Nothing was started."),
+        (&stopped, "Nothing was stopped."),
+        (&taken_over, "Nothing was started."),
+    ] {
+        assert_eq!(refused.code, UNAVAILABLE, "{refused:?}");
+        let message = message(refused);
+        assert!(
+            message.contains(&mode)
+                && message.contains(outcome)
+                && message.contains(&format!("chmod 600 {}", socket.display())),
+            "{message}"
+        );
+    }
+    nothing_started(&home);
+}
+
 #[test]
 fn row_a_malformed_identity_is_never_replaced_nor_stopped() {
     let home = Home::new();

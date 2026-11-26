@@ -307,6 +307,11 @@ async fn status(home: &Home) -> Result<Value, background::LifeError> {
             "database": database,
         }),
         Observed::Unreachable(reason) => unreachable(home, reason),
+        Observed::Untrusted(reason) => json!({
+            "untrusted": true,
+            "reason": reason,
+            "database": database,
+        }),
         Observed::Starting { reason } => {
             let mut value = json!({ "running": false, "starting": true, "database": database });
             if let Some(reason) = reason {

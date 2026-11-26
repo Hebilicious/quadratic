@@ -154,9 +154,11 @@ for stop. `PROBE_LIMIT` (5 s) bounds one identity request.
 | Observation | `status` | ensure (every command) | `server stop` | `serve --take-over` |
 | --- | --- | --- | --- | --- |
 | No socket file, `server.lock` free | `running: false` | take `start.lock`, **observe again**, spawn, wait for ready | `NotRunning` | take `start.lock`, observe again, serve |
+| Same, and this process cannot write the data folder | `running: false` | `Unreachable` (MCP advice): never spawn | `NotRunning` | `Unreachable`: never serve |
 | Stale socket file (`ECONNREFUSED`), lock free | `running: false` | same as above; the new server replaces the file | `NotRunning` | same as above |
-| Socket refuses or is missing, lock held, no `server.json` (a server that holds the lock and has not bound yet, or one that is stopping) | `starting: true` | wait within the one deadline for ready or for the lock to be freed. Freed: back to row 1 under `start.lock`. Deadline: `NotReady` with the log | wait within the deadline; ready: stop it; freed: `NotRunning` | as for stop, then serve |
+| Socket refuses or is missing, or is not yet of mode 0600 while `start.lock` is held; lock held, no `server.json` (a server that holds the lock and has not bound yet or set its socket's mode, or one that is stopping) | `starting: true` | wait within the one deadline for ready or for the lock to be freed. Freed: back to row 1 under `start.lock`. Deadline: `NotReady` with the log | wait within the deadline; ready: stop it; freed: `NotRunning` | as for stop, then serve |
 | Same, and a `server.json` names a TCP address | `legacy: true` and what to stop | `Legacy`: no spawn; the message names `server stop` | the legacy stop (§3), or instructions | the legacy stop, then serve |
+| Lock held, `start.lock` free, and the entry at the socket's name is not a socket of this account with mode 0600 | `untrusted: true` and the reason | `Untrusted`: never spawn, at once; the message names the entry and `chmod 600` | refuse, at once | refuse, at once |
 | Connects, no full answer within `PROBE_LIMIT` | `stalled` | `Stalled`: never spawn | `Stalled`: the person ends it | refuse |
 | Answers a malformed identity | `malformed` | `Malformed`: never spawn | refuse | refuse |
 | Names another database | `otherDatabase` | `OtherDatabase`: never spawn | refuse | refuse |
@@ -181,6 +183,24 @@ still print AcidCat's words, because AcidCat's command line sends their calls an
 reword a failure. A data folder that this process may not enter (`EACCES` from the home policy:
 another account, or a sandbox that hides it) is `Unreachable` for every caller, exit 4, and
 `status` answers `reachable: false`; `serve`, the server itself, keeps its internal failure.
+
+**Final states and states that can change by waiting (QUA-86, QUA-87, 2026-11-26).** A command waits only
+for a state that waiting can change, and answers every other one at once, with what `server status` knows.
+- A server sets its socket to mode 0600 after `bind`, while its start holds `start.lock` (the handoff rule).
+  So a socket not yet trusted is a start under way only while `start.lock` is held. With `start.lock` free
+  and the socket still untrusted, nothing will set its mode: the row is final, and `status`, ensure, stop and
+  take-over all name the entry. The socket is looked at again after `start.lock`, so a start that ended between
+  the two looks is not taken for this row. Before, the row was "starting": a command waited its 30 seconds and
+  said "did not become ready" without the reason.
+- `bind` makes the socket's entry, so a server needs to write the data folder; examining it with `lstat` needs only
+  to search it. A start (ensure on a free home, `serve`, `serve --take-over`) first checks that this process can
+  write and search the folder (`access(W_OK|X_OK)`), and is `Unreachable` when it cannot. Before, a command that
+  found an earlier server's lock files and log still writable spawned a server, which failed at `bind` with
+  `EACCES` (its message said "cannot be examined"; it now says "cannot make its socket").
+- Rows that stay "wait": `server.lock` held with no socket (a server that has not bound, or one that is stopping and
+  will free the lock), `start.lock` held by another starter, and a socket not yet of mode 0600 under `start.lock`.
+  Each ends at the deadline. A server that holds `server.lock` and lost its socket file looks like the first and is
+  final, but no observation tells it from a server that is stopping.
 
 The socket serves the `cli` routes beside the control requests. Each connection is either receiving
 a request, which must arrive whole (head and body) within the limit (5 s, `Waits::socket_request`),

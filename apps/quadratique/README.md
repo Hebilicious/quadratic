@@ -440,7 +440,8 @@ A missing data folder, and any missing folder above it, is made with mode `0700`
 
 The server also listens on the Unix socket `server.sock` in the data folder, with mode `0600`.
 `server status` asks it there first, and reports one state: `running`, `starting` (a server holds
-the folder and does not answer yet), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
+the folder and does not answer yet), `untrusted` (a server holds the folder, no start is under way,
+and `server.sock` is not a socket of your account with mode `0600`: `chmod 600` it, or end that server), `stalled`, `malformed`, `otherDatabase`, `newer` (upgrade this
 command line), `older` (a server of release 0.2 or 0.3: run `quadratique server stop`), `reachable: false` with the reason, or `legacy: true` for a server from before the
 socket (release 0.1), which only TCP reaches. `server stop` and `serve --take-over` ask the server on
 the socket to stop, and never signal it. Every other command, `quadratique mcp`, `init` and
