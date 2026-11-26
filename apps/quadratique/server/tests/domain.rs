@@ -1,5 +1,6 @@
 mod domain {
     mod actor;
+    mod human_word;
     mod lifecycle;
     mod lifecycle_properties;
     mod project;

@@ -32,6 +32,8 @@ mod git;
 mod history;
 #[path = "server/human.rs"]
 mod human;
+#[path = "server/human_word.rs"]
+mod human_word;
 #[path = "server/instructions.rs"]
 mod instructions;
 #[path = "server/links.rs"]

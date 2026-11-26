@@ -37,3 +37,5 @@ Read [`planning.md`](planning.md) before you turn a plan or a PRD into issues.
 ## Blocked
 
 With a human in the session, ask there. Unattended, create the question as an issue for the human that blocks yours, then `quadratique release --issue ABC-12 --reason "..."`.
+
+An issue assigned to the human moves only when what the human said to you in this session about it settles its acceptance without interpretation: `quadratique issue update --issue ABC-12 --revision <revision> --status done --humanWords "<their words, quoted>" --confidence high`. Otherwise ask the human.

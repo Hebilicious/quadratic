@@ -14,6 +14,7 @@ pub struct Tx<'c> {
     now: String,
     created: BTreeSet<String>,
     revised: BTreeSet<String>,
+    reason: Option<String>,
 }
 
 impl<'c> Deref for Tx<'c> {
@@ -31,7 +32,14 @@ impl<'c> Tx<'c> {
             now,
             created: BTreeSet::new(),
             revised: BTreeSet::new(),
+            reason: None,
         }
+    }
+
+    /// Replaces the reason of the call for this write's commit, once the write has read what
+    /// decides it.
+    pub fn set_reason(&mut self, reason: String) {
+        self.reason = Some(reason);
     }
 
     pub fn now(&self) -> &str {
@@ -42,14 +50,15 @@ impl<'c> Tx<'c> {
         execute(self.view.connection, sql, params)
     }
 
-    pub(crate) fn finish(self) -> Result<(), StoreError> {
+    /// Ends the write: the reason it set, if any.
+    pub(crate) fn finish(self) -> Result<Option<String>, StoreError> {
         for id in self.revised.difference(&self.created) {
             self.execute(
                 "UPDATE issues SET revision = revision + 1, updated_at = ? WHERE id = ?",
                 &[self.now.as_str().into(), id.as_str().into()],
             )?;
         }
-        Ok(())
+        Ok(self.reason)
     }
 
     pub fn create_project(&mut self, project: &Project) -> Result<(), StoreError> {

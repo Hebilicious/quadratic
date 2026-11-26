@@ -41,6 +41,10 @@ async fn run(args: Vec<String>) -> i32 {
     options.commands = commands::all();
     let catalog = serde_json::from_str(CATALOG_JSON).unwrap_or_default();
     let words = route::Words::of(&catalog, TARGET);
+    if let Some(message) = words.human_words_on_several(&args) {
+        eprintln!("{message}");
+        return exit::INVALID_INPUT;
+    }
     if words.call_the_server(&args) {
         match remote(words.mcp_tool(&args)).await {
             Ok(client) => options = options.remote(client),
