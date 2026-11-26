@@ -126,7 +126,7 @@ fn message_of(refused: &Run) -> String {
 
 const SEVERAL_ISSUES: &str = "Nothing was started. To act on these issues together, all or none, run this command \
      outside the sandbox, or ask the human to. If separate writes are acceptable, call the Quadratique MCP tool \
-     `issue.close` once for each issue, with the same other inputs.";
+     `issue.finish` once for each issue, with the same other inputs.";
 
 const COMMAND_LINE_ONLY: &str = "Nothing was started. This command works only on the command line: \
      run it outside the sandbox, or ask the human to.";
@@ -144,13 +144,21 @@ fn in_a_sandbox_a_command_names_its_mcp_tool_or_says_it_works_only_on_the_comman
     let home = Home::new();
     let repository = Repository::new();
     let _sandboxed = ReadOnly::make(home.path());
-    let with_a_tool: [(&[&str], &str); 9] = [
+    let with_a_tool: [(&[&str], &str); 11] = [
         (&[], "issue.ready"),
         (&["--json"], "issue.ready"),
         (&["claim", "--issue", "DEM-1"], "issue.claim"),
         (
+            &["finish", "--issue", "DEM-1", "--evidence", "x"],
+            "issue.finish",
+        ),
+        (
             &["close", "--issue", "DEM-1", "--evidence", "x"],
-            "issue.close",
+            "issue.finish",
+        ),
+        (
+            &["issue", "close", "--issue", "DEM-1", "--evidence", "x"],
+            "issue.finish",
         ),
         (&["show", "--issue", "DEM-1"], "issue.get"),
         (&["instructions"], "workspace.instructions"),
@@ -201,7 +209,7 @@ fn in_a_sandbox_a_command_names_its_mcp_tool_or_says_it_works_only_on_the_comman
     }
     for args in [
         &[
-            "close",
+            "finish",
             "--issue",
             "DEM-1",
             "--issue",
@@ -209,6 +217,13 @@ fn in_a_sandbox_a_command_names_its_mcp_tool_or_says_it_works_only_on_the_comman
             "--evidence",
             "x",
         ][..],
+        &[
+            "finish",
+            "--issue=DEM-1",
+            "--issue=DEM-2",
+            "--evidence",
+            "x",
+        ],
         &["close", "--issue=DEM-1", "--issue=DEM-2", "--evidence", "x"],
     ] {
         let refused = home.quadratique(&repository.root).args(args).run();

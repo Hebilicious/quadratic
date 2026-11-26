@@ -496,7 +496,7 @@ def _issues_in(call: dict, tool: str, verbs: tuple[str, ...], mcp_status: tuple[
 REFUSED = {"quadratique": '"Held"', "beads": "already claimed", "lific": "Error:"}
 
 VERBS = {
-    "finish": {"quadratique": ("close",), "beads": ("close",), "lific": ("done",)},
+    "finish": {"quadratique": ("finish", "close"), "beads": ("close",), "lific": ("done",)},
     "take": {"quadratique": ("claim",), "beads": ("--claim",), "lific": ("active",)},
     "give_back": {"quadratique": ("release",), "beads": ("unclaim",), "lific": ("todo", "backlog")},
 }

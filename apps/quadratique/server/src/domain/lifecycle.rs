@@ -12,7 +12,7 @@ pub enum Event {
         worktree: Option<String>,
     },
     Release,
-    Close,
+    Finish,
     Update {
         revision: u64,
         status: Option<Status>,
@@ -78,7 +78,7 @@ pub fn decide(
             worktree,
         } => rules.claim(waits, at, worktree.as_deref()),
         Event::Release => rules.release(),
-        Event::Close => rules.close(),
+        Event::Finish => rules.finish(),
         Event::Update {
             revision,
             status,
@@ -277,7 +277,7 @@ impl Rules<'_> {
         Err(self.held(claim))
     }
 
-    fn close(&self) -> Result<Outcome, Failure> {
+    fn finish(&self) -> Result<Outcome, Failure> {
         let moves = &self.project.workflow.moves;
         if self.issue.category == Category::Canceled {
             return Err(Failure::Resolved {

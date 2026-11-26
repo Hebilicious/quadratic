@@ -87,7 +87,7 @@ fn snapshot(root: &Path) -> Vec<(PathBuf, String)> {
 fn every_earlier_quadratique_skill_is_reported_older_by_a_dry_run_and_replaced_by_init() {
     let home = Home::new();
     let versions = earlier_versions("quadratique");
-    assert_eq!(versions.len(), 4, "{versions:?}");
+    assert_eq!(versions.len(), 5, "{versions:?}");
     let started = Repository::new();
     home.quadratique(&started.root)
         .args(["project", "list"])

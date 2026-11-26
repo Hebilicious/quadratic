@@ -57,7 +57,7 @@ else about Quadratique:
 
 > Read its `AGENTS.md` and follow it. Do one task from start to finish, then stop.
 
-The maintainer then reviews each branch, merges it, calls `quadratique close` (the issue becomes
+The maintainer then reviews each branch, merges it, calls `quadratique finish` (the issue becomes
 `merged`), moves it to `done` when the checks on `main` pass, answers the issues assigned to the
 human, and starts the next wave on what unblocked.
 

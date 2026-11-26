@@ -12,7 +12,7 @@ mod upgrade;
 use std::sync::Arc;
 
 use acid_cat_core::Kind;
-use acid_cat_core::cli::{CliOptions, CliOutput, OutputForm, run_cli_process};
+use acid_cat_core::cli::{CliOptions, CliOutput, OutputForm, exit, run_cli_process};
 use acid_cat_core::http::HttpClient;
 use quadratique_server::app::{CATALOG_JSON, Context, application};
 use quadratique_server::domain::Binding;
@@ -23,7 +23,7 @@ fn main() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("quadratique: no async runtime: {error}");
-            std::process::exit(acid_cat_core::cli::exit::INTERNAL);
+            std::process::exit(exit::INTERNAL);
         }
     };
     let code = runtime.block_on(run(std::env::args().skip(1).collect()));
@@ -47,7 +47,14 @@ async fn run(args: Vec<String>) -> i32 {
             Err(code) => return code,
         }
     }
-    run_cli_process(app, Arc::new(Context::remote()), options, args).await
+    let renamed = words.renamed(&args);
+    let code = run_cli_process(app, Arc::new(Context::remote()), options, args).await;
+    // After an answer or a refusal, which both go to standard output; any other failure keeps standard error as its
+    // one JSON line.
+    if renamed && matches!(code, exit::VALUE | exit::FAILURE) {
+        eprintln!("{}", route::RENAMED_POINTER);
+    }
+    code
 }
 
 pub(crate) async fn remote(mcp_tool: route::McpTool) -> Result<HttpClient, i32> {

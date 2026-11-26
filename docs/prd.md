@@ -146,7 +146,7 @@ Default workflow for a code project:
 | `issue.claim` | no | Atomic; fails if held; records agent, branch, worktree. An MCP session that runs outside the worktree names it (`worktree`) and then acts from it. Planned, not built: a remote agent gives its branch, has no worktree, and its token is the holder |
 | `issue.release` | no | Give a claim back |
 | `issue.link` | no | Add or remove a relation |
-| `issue.close` | no | Close with evidence (what was checked) |
+| `issue.finish` | no | Finish with evidence (what was checked); named `issue.close` before 0.2 |
 | `findings.import` | no | Record a tool's run: each finding becomes an issue; a complete run finishes the issues whose finding is gone |
 | `issue.advance` | no | On the machine that runs the server: move to a later status every issue that landed up to a commit of the default branch and waits after the merge (for a deploy script) |
 | `history.query` | yes | Changes to an issue or the board, as of a time or commit, with authors |

@@ -107,7 +107,7 @@ def set_priority(sb, repo, issue, priority: int):
 
 
 def finish(sb, cwd, issue, env):
-    q(sb, cwd, "close", "--issue", issue, "--evidence", "tests pass", env=env)
+    q(sb, cwd, "finish", "--issue", issue, "--evidence", "tests pass", env=env)
 
 
 def history_answers(sb: Sandbox, repo: Path, x: str, marks: dict) -> dict:
@@ -117,7 +117,7 @@ def history_answers(sb: Sandbox, repo: Path, x: str, marks: dict) -> dict:
     priority = [c for c in priority if c["operation"] != "issue.create"]
     at_m1 = qj(sb, repo, "issue", "list", "--asOf", marks["m1"])["items"]
     x_at_m1 = next(i for i in at_m1 if i["id"] == x)
-    finish_ = [c for c in changes if c["operation"] == "issue.close"]
+    finish_ = [c for c in changes if c["operation"] == "issue.finish"]
     return {
         "first_claim_by": claims[0]["author"]["name"] if claims else MISSING,
         "first_claim_branch": claims[0].get("branch") or NOT_POSSIBLE,

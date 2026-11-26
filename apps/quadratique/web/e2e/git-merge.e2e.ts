@@ -43,7 +43,7 @@ test("a squash merge whose commit says Refs: DEM-1 moves the card to Merged on t
     workspace.quadratique(
       "agent",
       worktree,
-      "close",
+      "finish",
       "--issue",
       "DEM-1",
       "--evidence",
@@ -150,7 +150,7 @@ test("the issue page links the pull request, the landed commit and the addresses
   });
 
   let landed = "";
-  await test.step("an agent claims it on a branch, closes it with a pull request address in the evidence, and it lands with Refs", async () => {
+  await test.step("an agent claims it on a branch, finishes it with a pull request address in the evidence, and it lands with Refs", async () => {
     const worktree = await workspace.worktree("agent-1", "guide-work");
     workspace.quadratique("agent", worktree, "claim", "--issue", "DEM-1");
     await writeFile(join(worktree, "guide.md"), "# The guide\n");
@@ -159,7 +159,7 @@ test("the issue page links the pull request, the landed commit and the addresses
     workspace.quadratique(
       "agent",
       worktree,
-      "close",
+      "finish",
       "--issue",
       "DEM-1",
       "--evidence",

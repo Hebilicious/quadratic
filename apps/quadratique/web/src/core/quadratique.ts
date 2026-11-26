@@ -90,7 +90,7 @@ export interface Quadratique {
     signal: AbortSignal,
   ) => Promise<readonly Relation[]>;
   readonly release: (issue: string, signal: AbortSignal) => Promise<IssueSummary>;
-  readonly close: (
+  readonly finish: (
     request: { readonly issue: string; readonly evidence: string },
     signal: AbortSignal,
   ) => Promise<Issue>;
@@ -303,7 +303,8 @@ export async function openQuadratique(options: {
       decodeRelations(await call("issue.link", request, signal)).relations,
     release: async (issue, signal) =>
       decodeSummary(await call("issue.release", { issue }, signal)).issue,
-    close: async (request, signal) => decodeIssue(await call("issue.close", request, signal)).issue,
+    finish: async (request, signal) =>
+      decodeIssue(await call("issue.finish", request, signal)).issue,
     changes,
     views,
     dispose: async () => {
