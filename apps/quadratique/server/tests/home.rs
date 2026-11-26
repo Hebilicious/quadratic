@@ -204,6 +204,30 @@ fn home_with_socket_path_of(base: &Path, length: usize) -> PathBuf {
     base.join("h".repeat(length - fixed))
 }
 
+/// `lstat` needs only to search the home; `bind` makes an entry in it. In a home of mode 0500 the policy passes and the
+/// bind is what fails, and the refusal says so.
+#[tokio::test]
+async fn a_home_this_account_cannot_write_refuses_the_bind_and_names_it() {
+    let (_folder, home) = safe_folder();
+    let prepared = home::prepare(&Paths::in_home(&home).expect("a home")).expect("a home");
+    set_mode(&home, 0o500);
+
+    let refused = home::bind_socket(&prepared).await;
+
+    set_mode(&home, 0o700);
+    let Err(error @ HomeError::Bind { .. }) = &refused else {
+        panic!("the bind was not refused as a bind: {refused:?}");
+    };
+    assert!(error.denied().is_some(), "{error}");
+    assert!(
+        error.to_string().starts_with(&format!(
+            "the server cannot make its socket {}: Permission denied",
+            prepared.socket().display()
+        )),
+        "{error}"
+    );
+}
+
 #[tokio::test]
 async fn the_socket_path_may_be_as_long_as_the_system_allows_and_not_one_byte_longer() {
     let (_folder, base) = short_folder();

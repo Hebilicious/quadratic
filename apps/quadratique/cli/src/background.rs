@@ -78,6 +78,13 @@ pub enum LifeError {
         reason: String,
         attempt: Attempt,
     },
+    /// A server holds the home, no start is under way, and its socket is not one to trust: only a start sets its mode.
+    Untrusted {
+        socket: PathBuf,
+        reason: String,
+        pid: Option<u32>,
+        attempt: Attempt,
+    },
     ServesOtherDatabase {
         socket: PathBuf,
         database: PathBuf,
@@ -224,6 +231,19 @@ impl std::fmt::Display for LifeError {
                 "what answers on {} is not a Quadratique server that this command line can use: {reason}. {} See what listens there with `quadratique server status`.",
                 socket.display(),
                 attempt.outcome()
+            ),
+            LifeError::Untrusted {
+                socket,
+                reason,
+                pid,
+                attempt,
+            } => write!(
+                formatter,
+                "a Quadratique server holds {} and no start is under way, but its socket is not one this command line trusts: {reason}. A server sets mode 600 on its socket as it starts, so waiting changes nothing. {} Give the socket its mode back with `chmod 600 {}`, or end that server. {}",
+                socket.parent().unwrap_or(Path::new(".")).display(),
+                attempt.outcome(),
+                socket.display(),
+                recovery(*pid, Some(&socket.with_file_name(quadratique_server::server::LOCK_FILE)))
             ),
             LifeError::ServesOtherDatabase {
                 socket,
@@ -482,19 +502,46 @@ impl Home {
     /// writes nothing in the home. `flock` takes a lock on a read-only descriptor, so a process that may not write the
     /// home can still ask, and a missing lock file means that no server ever held the home.
     pub fn held(&self) -> std::io::Result<bool> {
-        let lock = match File::open(self.prepared.lock()) {
-            Ok(lock) => lock,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if !lock.metadata()?.is_file() {
-            return Err(std::io::Error::other("it is not a regular file"));
-        }
-        match lock.try_lock() {
-            Ok(()) => Ok(false),
-            Err(TryLockError::WouldBlock) => Ok(true),
-            Err(TryLockError::Error(error)) => Err(error),
-        }
+        lock_held(&self.prepared.lock())
+    }
+
+    /// Whether a start is under way: every start holds `start.lock` until its server is ready (record 0004, §2). Asks
+    /// as `held` does, so a process that holds `start.lock` itself finds it held.
+    #[cfg(unix)]
+    fn start_held(&self) -> std::io::Result<bool> {
+        lock_held(&self.start_lock())
+    }
+
+    /// A start needs to write the home: the server binds its socket there. `access` with the real ids, which are the
+    /// effective ones for a command; `EACCES` and `EROFS` are what `bind` would meet.
+    #[cfg(unix)]
+    fn writable(&self) -> std::io::Result<()> {
+        use rustix::fs::{Access, AtFlags, CWD, accessat};
+
+        accessat(
+            CWD,
+            self.prepared.folder(),
+            Access::WRITE_OK | Access::EXEC_OK,
+            AtFlags::empty(),
+        )
+        .map_err(std::io::Error::from)
+    }
+}
+
+/// `flock` takes a lock on a read-only descriptor, and a missing lock file is a lock nobody holds.
+fn lock_held(path: &Path) -> std::io::Result<bool> {
+    let lock = match File::open(path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !lock.metadata()?.is_file() {
+        return Err(std::io::Error::other("it is not a regular file"));
+    }
+    match lock.try_lock() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -627,10 +674,12 @@ pub enum Observed {
     /// `EACCES`, `EPERM` or a path error on the socket or the lock.
     Unreachable(String),
     /// The lock is held and the socket does not answer yet, or no longer: a server that has not bound its socket, or
-    /// one that is stopping.
+    /// one that is stopping. `reason` names a socket not yet set to mode 0600 while a start is under way.
     Starting {
         reason: Option<String>,
     },
+    /// The lock is held, no start is under way, and the socket is still not one to trust: waiting changes nothing.
+    Untrusted(String),
     /// The lock is held, no socket answers, and a runtime file of a build before the socket names a TCP address.
     Legacy,
     /// The lock is free, and the socket is absent or refuses.
@@ -711,16 +760,41 @@ fn behind_the_socket(home: &Home, reason: Option<String>, no_socket: bool) -> Ob
     match home.held() {
         Ok(false) => Observed::Free,
         Ok(true) if no_socket && home.legacy_hint() => Observed::Legacy,
-        Ok(true) => Observed::Starting { reason },
-        Err(error) if cannot_write(&error) => match home.unusable(error, Attempt::Start) {
+        Ok(true) => match reason {
+            Some(reason) => untrusted_or_starting(home, reason),
+            None => Observed::Starting { reason: None },
+        },
+        Err(error) => lock_unusable(home, &home.prepared.lock(), error),
+    }
+}
+
+/// A server sets its socket to mode 0600 before its start lets go of `start.lock`, so a socket not yet trusted under a
+/// held lock is a start under way only while `start.lock` is held. The socket is looked at again after `start.lock`:
+/// a start that ended in between has set its mode.
+#[cfg(unix)]
+fn untrusted_or_starting(home: &Home, reason: String) -> Observed {
+    match home.start_held() {
+        Ok(true) => Observed::Starting {
+            reason: Some(reason),
+        },
+        Ok(false) => match home::socket_entry(&home.prepared.socket()) {
+            home::Entry::Untrusted(reason) => Observed::Untrusted(reason),
+            _ => Observed::Starting { reason: None },
+        },
+        Err(error) => lock_unusable(home, &home.start_lock(), error),
+    }
+}
+
+/// A lock that cannot be looked at is a path the command cannot use, as a socket that cannot be reached is.
+#[cfg(unix)]
+fn lock_unusable(home: &Home, lock: &Path, error: std::io::Error) -> Observed {
+    if cannot_write(&error) {
+        return match home.unusable(error, Attempt::Start) {
             LifeError::Unreachable { reason } => Observed::Unreachable(reason),
             other => Observed::Unreachable(other.to_string()),
-        },
-        Err(error) => Observed::Unreachable(format!(
-            "{} cannot be used: {error}",
-            home.prepared.lock().display()
-        )),
+        };
     }
+    Observed::Unreachable(format!("{} cannot be used: {error}", lock.display()))
 }
 
 #[cfg(unix)]
@@ -772,6 +846,12 @@ fn refusal(home: &Home, observed: Observed, attempt: Attempt) -> LifeError {
         Observed::Older(identity) => LifeError::Older {
             pid: identity.pid,
             control: identity.control.unwrap_or_default(),
+            attempt,
+        },
+        Observed::Untrusted(reason) => LifeError::Untrusted {
+            socket,
+            reason,
+            pid: home.pid_hint(),
             attempt,
         },
         Observed::Unreachable(reason) => match attempt {
@@ -831,6 +911,8 @@ async fn ensure_within(home: &Home, limit: Duration) -> Result<Endpoint, LifeErr
                 return Err(legacy::refusal(home, legacy::examine(home), Attempt::Start));
             }
             Observed::Free if start_lock.is_none() => {
+                home.writable()
+                    .map_err(|error| home.unusable(error, Attempt::Start))?;
                 let lock = home
                     .open_lock(&home.start_lock())
                     .map_err(|error| home.unusable(error, Attempt::Start))?;
@@ -931,8 +1013,12 @@ pub async fn reserve_start(home: &Home) -> Result<StartLockHeld, LifeError> {
 #[cfg(unix)]
 pub async fn take_over(home: &Home) -> Result<StartLockHeld, LifeError> {
     let deadline = Deadline::after(START_LIMIT);
+    // Once this process holds `start.lock`, an untrusted socket looks like a start under way: it is refused first.
     let proof = match observe_by(home, deadline).await? {
         Some(Observed::Legacy) => Some(legacy::proof_or_refusal(home, Attempt::Start)?),
+        Some(untrusted @ Observed::Untrusted(_)) => {
+            return Err(refusal(home, untrusted, Attempt::Start));
+        }
         _ => None,
     };
     let start_lock = await_start_lock(home, deadline, Attempt::Start).await?;
@@ -958,12 +1044,18 @@ pub async fn take_over(_home: &Home) -> Result<StartLockHeld, LifeError> {
     Err(LifeError::Unsupported)
 }
 
-/// Tries the lock only while the deadline has not passed.
+/// Tries the lock only while the deadline has not passed. A start is refused first in a home this process cannot
+/// write, where its server could not bind its socket.
 async fn await_start_lock(
     home: &Home,
     deadline: Deadline,
     attempt: Attempt,
 ) -> Result<File, LifeError> {
+    #[cfg(unix)]
+    if attempt == Attempt::Start {
+        home.writable()
+            .map_err(|error| home.unusable(error, attempt))?;
+    }
     let start_lock = home
         .open_lock(&home.start_lock())
         .map_err(|error| home.unusable(error, attempt))?;
@@ -1483,6 +1575,85 @@ mod tests {
         );
         assert!(!home.log().exists(), "a server was spawned");
         assert!(!home.start_lock().exists(), "a start was reserved");
+    }
+
+    /// A socket of this account bound with mode 0666 at the home's socket name, and the home's lock held, as a server
+    /// whose socket someone changed after its start leaves them.
+    #[cfg(unix)]
+    fn held_with_a_socket_of_mode_666(
+        home: &Home,
+    ) -> (std::fs::File, std::os::unix::net::UnixListener) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let server = home
+            .open_lock(&home.prepared.lock())
+            .expect("the home's lock");
+        server.lock().expect("a server holds the home");
+        let socket = home.prepared.socket();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))
+            .expect("mode 0666");
+        (server, listener)
+    }
+
+    /// No start holds `start.lock`, so nothing will set the socket's mode: the start and the stop each say why at once,
+    /// within a limit shorter than any wait, instead of ending at their deadline as "not ready".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_untrusted_socket_with_no_start_under_way_is_refused_at_once_with_its_mode() {
+        use super::stop_within;
+
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+        let (_server, _listener) = held_with_a_socket_of_mode_666(&home);
+        let limit = Duration::from_millis(200);
+
+        let started = tokio::time::timeout(HANG_GUARD, ensure_within(&home, limit)).await;
+        let stopped = tokio::time::timeout(HANG_GUARD, stop_within(&home, limit)).await;
+
+        let Ok(Err(started @ LifeError::Untrusted { .. })) = started else {
+            panic!("the start did not refuse the socket: {started:?}");
+        };
+        let Ok(Err(stopped @ LifeError::Untrusted { .. })) = stopped else {
+            panic!("the stop did not refuse the socket: {stopped:?}");
+        };
+        for (refused, outcome) in [
+            (started.to_string(), "Nothing was started."),
+            (stopped.to_string(), "Nothing was stopped."),
+        ] {
+            assert!(
+                refused.contains("server.sock has mode 666, not 600")
+                    && refused.contains(outcome)
+                    && refused.contains("chmod 600"),
+                "{refused}"
+            );
+        }
+        assert!(!home.log().exists(), "a server was spawned");
+    }
+
+    /// A server sets its socket's mode after `bind`, while its start holds `start.lock`: a socket not yet of mode 0600
+    /// under a start is waited for, to the deadline.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_not_yet_of_mode_600_while_a_start_holds_the_start_lock_is_waited_for() {
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+        let (_server, _listener) = held_with_a_socket_of_mode_666(&home);
+        let other_starter = home.open_lock(&home.start_lock()).expect("the start lock");
+        other_starter
+            .lock()
+            .expect("another starter holds the start lock");
+
+        let started =
+            tokio::time::timeout(HANG_GUARD, ensure_within(&home, Duration::from_millis(200)))
+                .await;
+
+        drop(other_starter);
+        assert!(
+            matches!(started, Ok(Err(LifeError::Hung { .. }))),
+            "the start did not wait for the starting server: {started:?}"
+        );
+        assert!(!home.log().exists(), "a server was spawned");
     }
 
     /// `EACCES`, `EPERM` and path errors on the socket cannot be made for this account's own socket without root; the

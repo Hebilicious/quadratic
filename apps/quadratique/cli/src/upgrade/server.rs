@@ -99,6 +99,7 @@ pub async fn look(home: &Home) -> Result<Seen, String> {
         refused @ (Observed::Newer(_)
         | Observed::Malformed(_)
         | Observed::Stalled
+        | Observed::Untrusted(_)
         | Observed::OtherDatabase(_)) => Seen {
             before: Before::Unknown(background::refused_to_stop(home, refused)),
             schema: None,

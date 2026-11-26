@@ -128,6 +128,12 @@ pub enum HomeError {
         path: PathBuf,
         error: std::io::Error,
     },
+    /// `bind` makes the socket's entry, so it needs to write the home, which examining it does not.
+    #[error("the server cannot make its socket {}: {error}", .path.display())]
+    Bind {
+        path: PathBuf,
+        error: std::io::Error,
+    },
 }
 
 impl HomeError {
@@ -135,7 +141,7 @@ impl HomeError {
     /// folder being unsafe.
     pub fn denied(&self) -> Option<&std::io::Error> {
         match self {
-            HomeError::Io { error, .. }
+            HomeError::Io { error, .. } | HomeError::Bind { error, .. }
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
@@ -793,7 +799,10 @@ mod unix {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(error)),
         }
-        let listener = tokio::net::UnixListener::bind(&path).map_err(io)?;
+        let listener = tokio::net::UnixListener::bind(&path).map_err(|error| HomeError::Bind {
+            path: path.clone(),
+            error,
+        })?;
         let bound = std::fs::symlink_metadata(&path).map_err(io)?;
         if let Some(what) = foreign_entry(bound.file_type(), bound.uid(), me) {
             return Err(entry(what));
