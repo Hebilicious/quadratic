@@ -1316,6 +1316,7 @@ mod tests {
         assert!(!other.join("quadratique").exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_start_lock_that_another_starter_never_releases_ends_at_the_deadline() {
         let directory = private_home();
@@ -1334,6 +1335,22 @@ mod tests {
             matches!(started, Ok(Err(LifeError::NoAnswer { .. }))),
             "the start did not end at its deadline: {started:?}"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn on_windows_no_command_reaches_a_server_and_each_says_which_issue_brings_it() {
+        let directory = private_home();
+        let home = Home::new(Paths::in_home(directory.path()).expect("a home")).expect("a home");
+
+        let started = ensure_within(&home, Duration::from_millis(200)).await;
+        let stopped = super::stop_within(&home, Duration::from_millis(200)).await;
+
+        for refused in [started.err(), stopped.err()] {
+            let refused = refused.expect("a refusal");
+            assert!(matches!(refused, LifeError::Unsupported), "{refused}");
+            assert!(refused.to_string().contains("QUA-61"), "{refused}");
+        }
     }
 
     /// A held home with no socket and no runtime file is the row "starting": the stop waits for it to answer or to

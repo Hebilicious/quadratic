@@ -88,6 +88,9 @@ fn held_port() -> HeldPort {
     }
 }
 
+/// Linux lets two sockets with `SO_REUSEADDR` bind one port while neither listens; macOS does not, so there a held
+/// port is one the server cannot take, and the tests that use one prove less.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_server_takes_the_kept_port_even_while_a_socket_that_does_not_listen_holds_it() {
     let home = Home::new();

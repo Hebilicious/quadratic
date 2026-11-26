@@ -343,6 +343,7 @@ Decision (owner, 2026-11-26): the kept port and the lasting bearer by default; s
 | Windows | `serve` refuses at start with `ServerError::Unsupported`, which names QUA-61. The command line's TCP path (`background/over_tcp.rs`, `Found`, `find`, `ask_to_stop`, `alive`) is deleted: `ensure`, `server status`, `server stop` and `serve --take-over` answer that Windows reaches no server until QUA-61; `upgrade --skills` reads the store file. `Endpoint` carries the socket only. |
 | `rustix`'s `net` feature | Kept on Linux for `stop_listening`, which the TCP listener and the socket both use; `a_dropped_socket_refuses_connections_while_another_copy_of_it_is_open` (since QUA-50) shows it for the socket. |
 | `test-as-nobody` | Runs only the socket's tests (and the command line's), on Linux and macOS. |
+| Found on macOS (CI, 2026-11-26) | `shutdown` does not take a listening socket out of the listening state there. So after `202` to a stop, a new connection to the socket or the TCP port waits in the backlog until the server drops its listeners, within the drain (2 s), instead of being refused at once as on Linux; a child that holds a copy of a listener's descriptor keeps it listening until the child's `exec`. Neither loses a write: the stopper waits for the home's lock. The kept-port tests that hold a port with a socket that does not listen prove less there, because macOS does not let two such sockets share a port. |
 
 ## 5. Remote access (PRD §6, M7)
 

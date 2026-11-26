@@ -507,18 +507,23 @@ async fn a_stop_of_another_generation_gets_409_and_stops_nothing_and_a_stop_of_i
 
     assert_eq!(accepted, StopAnswer::Accepted);
     within("the server's own stop", running.stop_requested()).await;
-    let socket_after = std::os::unix::net::UnixStream::connect(&socket);
-    assert_eq!(
-        socket_after.as_ref().err().map(std::io::Error::kind),
-        Some(std::io::ErrorKind::ConnectionRefused),
-        "{socket_after:?}"
-    );
-    let tcp_after = std::net::TcpStream::connect(web);
-    assert_eq!(
-        tcp_after.as_ref().err().map(std::io::Error::kind),
-        Some(std::io::ErrorKind::ConnectionRefused),
-        "{tcp_after:?}"
-    );
+    // Only Linux takes a listening socket out of the listening state while the server still holds it; elsewhere a
+    // connection made now waits in the backlog until the shutdown below drops the listeners.
+    #[cfg(target_os = "linux")]
+    {
+        let socket_after = std::os::unix::net::UnixStream::connect(&socket);
+        assert_eq!(
+            socket_after.as_ref().err().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionRefused),
+            "{socket_after:?}"
+        );
+        let tcp_after = std::net::TcpStream::connect(web);
+        assert_eq!(
+            tcp_after.as_ref().err().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionRefused),
+            "{tcp_after:?}"
+        );
+    }
     within(
         "the shutdown after the stop",
         running.shutdown_draining(server::DRAIN),
