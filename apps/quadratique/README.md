@@ -286,10 +286,18 @@ Quadratique reads.
 
 ## Who can talk to the server
 
-The server listens on `127.0.0.1`, and on Linux it answers only processes of the account that
-runs it. At each connection it asks the kernel which account owns the caller's socket
+The server listens in two places, each with its own rule.
+
+The commands and `quadratique mcp` use the Unix socket `server.sock` in the data folder. File
+permissions decide who connects there: the socket has mode `0600` in a folder of mode `0700`, so a
+process of another account cannot reach it, while `root` passes those permissions and can call the
+server like you. The server asks nothing more of a process on the socket.
+
+The TCP listener on `127.0.0.1` serves the web app, and until the next release (QUA-58) the routes
+of the command line too, which no command uses. On Linux it answers only processes of the account
+that runs it. At each connection it asks the kernel which account owns the caller's socket
 (`NETLINK_SOCK_DIAG`). A process of any other account, `root` included, gets `403` "This server
-answers only processes of its own account." A server that cannot ask the kernel who is
+answers only processes of its own account." That `403` is the TCP listener's rule only. A server that cannot ask the kernel who is
 connecting, in a sandbox that forbids netlink or on a kernel without its `inet_diag` module, does
 not start and says why. So does a server that runs in a user namespace where its account is not
 mapped, where the kernel would show every unmapped caller as that same account. If a lookup
@@ -390,9 +398,11 @@ its supervisor, or `ps -p <pid> -o args` first). For `405`, it adds that the ser
 
 The socket serves the command line's routes under `/cli`, as the commands call them (for example
 `curl --unix-socket "$QUADRATIQUE_HOME/server.sock" http://quadratique.invalid/cli/capabilities`),
-and two control requests, with any `Host` (use `quadratique.invalid`). A connection that sends only
-control requests must send each one whole within 5 seconds; one that calls `/cli` has no such limit,
-because a call may wait and `watch` keeps its stream open. Each server start has a
+and two control requests, with any `Host` (use `quadratique.invalid`). A client must send each
+request whole, head and body, within 5 seconds of opening the connection or of the end of the
+previous answer, or the server closes the connection. An answer has no limit once its request has
+arrived, because a call may wait and `watch` keeps its stream open. The TCP listener has no such
+limit. Each server start has a
 **generation**, 32 hexadecimal digits that are new at each start. The protocol has a version,
 `control`, apart from the interface of the commands. A server keeps answering every control version
 it ever served, and lists them in `controls`. Two fields keep their meaning in every version:
@@ -442,7 +452,10 @@ The reason is the one the command met, for example "connecting to
 /home/you/.local/share/quadratique: Permission denied; a sandbox may be blocking it" (a sandbox
 that hides the folder, or another account whose home folder is closed to it) or "this process
 cannot write /home/you/.local/share/quadratique: Read-only file system; a sandbox may be blocking
-it". A command that calls the server, and `quadratique mcp`, exit with status 4 for each of them. This is the answer of a command whose capability is also
+it". Every command that would reach the server, `quadratique mcp` included, exits with status 4
+(`unavailable`) for each of them, and `quadratique server status` answers `"reachable": false` with
+the reason. `quadratique serve` is the server itself, not a caller: a data folder it cannot use is
+a failure of its start, with status 5. This is the answer of a command whose capability is also
 an MCP tool, and `<tool>` names that tool. Every other command that needs the server ends with
 "Nothing was started. This command works only on the command line: run it outside the sandbox,
 or ask the human to." Input the command line cannot match to a command (a typo after a group

@@ -168,16 +168,24 @@ for stop. `PROBE_LIMIT` (5 s) bounds one identity request.
 **As built in QUA-53 (2026-11-26).** Every command, `quadratique mcp`, `init` and `upgrade --skills`
 build their client in one place (`caller::client`) from the endpoint that `ensure` or `observe`
 gives: on Unix the home's socket, with acid-cat-core 0.9.0's `HttpClient::unix_socket` and the base
-`http://quadratique.invalid/cli`. That client dials only the socket, never TCP, and turns every dial
-error into one call failure, "The server at http://quadratique.invalid/cli does not answer."; it
-streams `watch` through the same connection. So the rows above stay Quadratique's: a command calls
-only after `observe` found the row "answers, same database, same interface", and that call failure
-is left only for a server that stops between the observation and the call. A data folder that this
-process may not enter (`EACCES` from the home policy: another account, or a sandbox that hides it)
-is `Unreachable` too, with the same advice and exit status as a socket it may not connect to. The
-socket serves the `cli` routes beside the control requests; a connection is held to the control
-requests' 5-second limit until it carries a `cli` request. Windows still finds its server over TCP
-(QUA-61).
+`http://quadratique.invalid/cli`. That client dials only the socket, never TCP, and streams `watch`
+through the same connection. It reports every failure to connect or to get an answer as one call
+failure, "The server at http://quadratique.invalid/cli does not answer.", with no typed error. So the
+rows above stay Quadratique's: a command calls only after `observe` found the row "answers, same
+database, same interface", and that failure is left for a server that stops between the observation
+and the call. `init`, `upgrade --skills` and `quadratique mcp` send their calls themselves and say it
+in Quadratique's words: the server stopped after it was found on `<home>/server.sock`, and what to
+do; they recognise the failure by the client's own words for its base URL. The generated commands
+still print AcidCat's words, because AcidCat's command line sends their calls and offers no hook to
+reword a failure. A data folder that this process may not enter (`EACCES` from the home policy:
+another account, or a sandbox that hides it) is `Unreachable` for every caller, exit 4, and
+`status` answers `reachable: false`; `serve`, the server itself, keeps its internal failure.
+
+The socket serves the `cli` routes beside the control requests. Each connection is either receiving
+a request, which must arrive whole (head and body) within the limit (5 s, `Waits::socket_request`),
+or answering one, which has no limit; the end of an answer starts the deadline of the next request.
+File permissions alone admit a caller on the socket: `root` passes them. Windows still finds its
+server over TCP (QUA-61).
 
 **A hung server** (stalled, or one that holds the lock past the deadline) gets a bounded outcome,
 never a signal. The message names the home, the log, and the unverified pid from the last identity
