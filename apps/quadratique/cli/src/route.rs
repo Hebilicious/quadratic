@@ -14,6 +14,12 @@ const RENAMED: [(&str, &str); 2] = [
     ("issues.close", "issues.finish"),
 ];
 
+/// The capabilities over several issues, which take no human's words: those settle one issue.
+const SEVERAL: [&str; 2] = ["issues.finish", "issues.close"];
+
+/// The inputs of the human's words, which only the one-issue capabilities take.
+const HUMAN_WORD_FLAGS: [&str; 2] = ["humanWords", "confidence"];
+
 /// What a command called by an old name adds on standard error, after its answer.
 pub const RENAMED_POINTER: &str =
     "quadratique: `close` is now `finish`; `close` goes away in the release after 0.2.";
@@ -103,6 +109,28 @@ impl Words {
             .ok()
             .flatten()
             .is_some_and(|id| RENAMED.iter().any(|(old, _)| *old == id))
+    }
+
+    /// The usage error of a command over several issues that is given the human's words: the
+    /// generated command line would only call the flag unknown, so this one also names the
+    /// command that takes it. One line, as the command line writes a usage error.
+    pub fn human_words_on_several(&self, args: &[String]) -> Option<String> {
+        let words = command_words(args);
+        if words.iter().any(|word| HELP_FLAGS.contains(word)) {
+            return None;
+        }
+        let called = self.capability(args).ok().flatten()?;
+        if !SEVERAL.contains(&called.as_str()) {
+            return None;
+        }
+        let flag = words.iter().find_map(|word| {
+            let name = word.strip_prefix("--")?;
+            let name = name.split_once('=').map_or(name, |(name, _)| name);
+            HUMAN_WORD_FLAGS.contains(&name).then_some(name)
+        })?;
+        Some(format!(
+            "Unknown flag --{flag}. The human's words settle one issue: give them to `quadratique issue finish`."
+        ))
     }
 
     /// The capability that the command calls; `Err` for a command that calls none.

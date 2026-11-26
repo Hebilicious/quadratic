@@ -189,6 +189,8 @@ async fn move_issue<R: Send + 'static>(
                             note_freed(tx, &id, &caller, former, &change.status, reason)?;
                         }
                         if let Some(word) = word {
+                            let freed = matches!(change.claim, ClaimAfter::Freed(_));
+                            let reason = reason.filter(|_| !freed);
                             word.record_moved(tx, &id, &caller, &change.status, reason)?;
                         }
                         let in_bound_repository = project.repository.is_some()

@@ -655,7 +655,7 @@
         },
         "leftForHuman": {
           "const": true,
-          "description": "The human's words came with `confidence` below `high`: nothing moved.",
+          "description": "The human's words came with `confidence` below `high`: the call applied none of its fields, its `notes` included; only a note of the words was added.",
           "type": "boolean"
         }
       },
@@ -786,7 +786,7 @@
         },
         "leftForHuman": {
           "const": true,
-          "description": "The human's words came with `confidence` below `high`: nothing moved.",
+          "description": "The human's words came with `confidence` below `high`: the call applied none of its fields, its `notes` included; only a note of the words was added.",
           "type": "boolean"
         }
       },
@@ -1884,6 +1884,7 @@
         "additionalProperties": false,
         "properties": {
           "confidence": {
+            "description": "`high` only when the words settle the issue's acceptance without interpretation; otherwise ask the human.",
             "enum": [
               "high",
               "medium",
@@ -1901,7 +1902,7 @@
             "description": "What the human said to you in this session about this issue, quoted. Needs `confidence`.",
             "maxLength": 400,
             "minLength": 1,
-            "pattern": "\\S",
+            "pattern": "[^\\s\\u200B-\\u200D\\u2060\\uFEFF]",
             "type": "string"
           },
           "issue": {
@@ -2080,6 +2081,7 @@
         "additionalProperties": false,
         "properties": {
           "confidence": {
+            "description": "`high` only when the words settle the issue's acceptance without interpretation; otherwise ask the human.",
             "enum": [
               "high",
               "medium",
@@ -2097,7 +2099,7 @@
             "description": "What the human said to you in this session about this issue, quoted. Needs `confidence`.",
             "maxLength": 400,
             "minLength": 1,
-            "pattern": "\\S",
+            "pattern": "[^\\s\\u200B-\\u200D\\u2060\\uFEFF]",
             "type": "string"
           },
           "issue": {
@@ -2436,6 +2438,7 @@
         "additionalProperties": false,
         "properties": {
           "confidence": {
+            "description": "`high` only when the words settle the issue's acceptance without interpretation; otherwise ask the human.",
             "enum": [
               "high",
               "medium",
@@ -2447,7 +2450,7 @@
             "description": "What the human said to you in this session about this issue, quoted. Needs `confidence`.",
             "maxLength": 400,
             "minLength": 1,
-            "pattern": "\\S",
+            "pattern": "[^\\s\\u200B-\\u200D\\u2060\\uFEFF]",
             "type": "string"
           },
           "issue": {
@@ -2521,6 +2524,7 @@
             "type": "array"
           },
           "confidence": {
+            "description": "`high` only when the words settle the issue's acceptance without interpretation; otherwise ask the human.",
             "enum": [
               "high",
               "medium",
@@ -2540,7 +2544,7 @@
             "description": "What the human said to you in this session about this issue, quoted. Needs `confidence`.",
             "maxLength": 400,
             "minLength": 1,
-            "pattern": "\\S",
+            "pattern": "[^\\s\\u200B-\\u200D\\u2060\\uFEFF]",
             "type": "string"
           },
           "issue": {

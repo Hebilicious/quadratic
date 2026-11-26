@@ -95,6 +95,7 @@ async fn rule_4_with_medium_or_low_confidence_nothing_moves_and_a_note_leaves_th
                     "revision": revision(&board, &issue).await,
                     "status": "done",
                     "title": "Renamed by the agent",
+                    "notes": "The agent's own note.",
                     "humanWords": WORDS,
                     "confidence": confidence,
                 }),
@@ -105,6 +106,11 @@ async fn rule_4_with_medium_or_low_confidence_nothing_moves_and_a_note_leaves_th
         assert_eq!(left["issue"]["status"], "todo", "{left}");
         assert_eq!(left["issue"]["title"], "Choose the license", "{left}");
         let shown = board.get(&issue).await;
+        assert_eq!(
+            shown["notes"].as_array().map(Vec::len),
+            Some(index + 1),
+            "{shown}"
+        );
         let note = &shown["notes"][index];
         assert_eq!(note["author"], lead.name(), "{note}");
         let text = note["text"].as_str().expect("a note's text");
@@ -623,4 +629,163 @@ async fn rule_4_the_words_stay_inside_their_quotation_in_the_note_and_the_reason
         reason.starts_with("The human's words, high confidence: \"x\\n"),
         "{reason}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rule_4_at_medium_or_low_a_parent_refusal_keeps_its_place() {
+    let board = start().await;
+    let issue = decision(&board).await;
+    let child = board
+        .issue_with(json!({ "title": "A part", "acceptance": "It is done.", "parent": issue }))
+        .await;
+    let lead = board.agent("lead");
+
+    for confidence in ["medium", "low"] {
+        for (parent, tag) in [(child.as_str(), "Cycle"), ("DEM-9999", "NotFound")] {
+            let refused = board
+                .failure(
+                    &lead,
+                    "issue.update",
+                    json!({
+                        "issue": issue,
+                        "revision": revision(&board, &issue).await,
+                        "status": "done",
+                        "parent": parent,
+                        "humanWords": WORDS,
+                        "confidence": confidence,
+                    }),
+                )
+                .await;
+            assert_eq!(refused["_tag"], tag, "{parent} at {confidence}: {refused}");
+        }
+    }
+    let shown = board.get(&issue).await;
+    assert_eq!(shown["status"], "todo", "{shown}");
+    assert!(
+        shown
+            .get("notes")
+            .is_none_or(|notes| notes.as_array().is_some_and(Vec::is_empty)),
+        "{shown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rule_4_words_of_only_invisible_characters_are_refused() {
+    let board = start().await;
+    let issue = decision(&board).await;
+
+    for invisible in ["\u{200B}\u{200B}", " \u{200C}\u{200D} ", "\u{2060}\u{FEFF}"] {
+        let refused = board
+            .client(&board.agent("lead"))
+            .invoke(
+                "issue.update",
+                &json!({
+                    "issue": issue,
+                    "revision": revision(&board, &issue).await,
+                    "status": "done",
+                    "humanWords": invisible,
+                    "confidence": "high",
+                }),
+            )
+            .await;
+        assert!(
+            refused_as_invalid_input(&refused),
+            "{invisible:?}: {refused:?}"
+        );
+    }
+    assert_eq!(board.get(&issue).await["status"], "todo");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rule_4_on_the_cut_path_the_note_holds_the_whole_words() {
+    let board = start().await;
+    let issue = decision(&board).await;
+    let words = format!("yes{}", "\"".repeat(397));
+
+    board
+        .ok(
+            &board.agent("lead"),
+            "issue.update",
+            json!({
+                "issue": issue,
+                "revision": revision(&board, &issue).await,
+                "status": "done",
+                "humanWords": words,
+                "confidence": "high",
+            }),
+        )
+        .await;
+
+    let quoted = serde_json::to_string(&words).expect("a JSON string");
+    let shown = board.get(&issue).await;
+    let text = shown["notes"][0]["text"].as_str().expect("a note");
+    assert!(text.contains(&quoted), "{text}");
+    let reason = last_change(&board, &issue).await["reason"]
+        .as_str()
+        .expect("a reason")
+        .to_owned();
+    assert!(reason.chars().count() <= 500, "{}", reason.chars().count());
+    assert!(
+        reason.ends_with(" (cut: the note quotes them whole)"),
+        "{reason}"
+    );
+    assert!(
+        reason.starts_with("The human's words, high confidence: \"yes\\\""),
+        "{reason}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rule_4_a_release_in_review_on_the_humans_words_gives_its_reason_once() {
+    let board = start().await;
+    board.project("DEM").await;
+    let holder = board.agent("audit");
+    let issue = board.issue("Audit the parser").await;
+    board
+        .ok(&holder, "issue.claim", json!({ "issue": issue }))
+        .await;
+    board
+        .ok(
+            &holder,
+            "issue.finish",
+            json!({ "issue": issue, "evidence": "read every branch" }),
+        )
+        .await;
+    board
+        .ok(
+            &board.human(),
+            "issue.update",
+            json!({
+                "issue": issue,
+                "revision": revision(&board, &issue).await,
+                "assignee": { "kind": "human" },
+            }),
+        )
+        .await;
+
+    board
+        .ok(
+            &board.agent("lead"),
+            "issue.release",
+            json!({
+                "issue": issue,
+                "reason": "the audit ended",
+                "humanWords": WORDS,
+                "confidence": "high",
+            }),
+        )
+        .await;
+
+    let shown = board.get(&issue).await;
+    let notes = shown["notes"].as_array().expect("notes");
+    assert_eq!(notes.len(), 2, "{shown}");
+    let with_reason = notes
+        .iter()
+        .filter(|note| {
+            note["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("the audit ended"))
+        })
+        .count();
+    assert_eq!(with_reason, 1, "{shown}");
 }

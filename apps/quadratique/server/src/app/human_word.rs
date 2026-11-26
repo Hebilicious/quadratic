@@ -91,7 +91,8 @@ impl HumanWord {
         self.record(tx, id, caller, text, reason)
     }
 
-    /// The call's own reason goes into the note, since the history's reason gives the words.
+    /// The call's own reason goes into the note, since the history's reason gives the words; a
+    /// release that frees another agent's claim gives it in its own note instead.
     fn record(
         &self,
         tx: &mut Tx<'_>,

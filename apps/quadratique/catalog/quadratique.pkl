@@ -112,12 +112,13 @@ local function committedThen(check: String): String = " One database commit per 
 local committed = committedThen("read the issue")
 
 local humanWordsSchema = (string(400, "What the human said to you in this session about this issue, quoted. Needs `confidence`.")) {
-  pattern = #"\S"#
+  pattern = #"[^\s\u200B-\u200D\u2060\uFEFF]"#
 }
 
 local confidenceSchema = new Dynamic {
   type = "string"
   enum { "high"; "medium"; "low" }
+  description = "`high` only when the words settle the issue's acceptance without interpretation; otherwise ask the human."
 }
 
 local onHumanWords = " Where `HumanOnly` would refuse an agent, `humanWords` and `confidence` (how sure the agent is that the words decide it) pass it at `high`, and a note quotes the words; at `medium` or `low`, a call that would change the issue changes nothing but that note, and the answer has `leftForHuman`: a success, not to retry at `high`. Every other refusal keeps its place; elsewhere the two are ignored."
@@ -194,7 +195,7 @@ local function bodyField(text: String?): Dynamic = string(20000, text)
 local leftForHumanSchema = new Dynamic {
   type = "boolean"
   ["const"] = true
-  description = "The human's words came with `confidence` below `high`: nothing moved."
+  description = "The human's words came with `confidence` below `high`: the call applied none of its fields, its `notes` included; only a note of the words was added."
 }
 
 local function criteria(text: String): Dynamic = (bodyField(text)) {

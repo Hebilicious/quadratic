@@ -206,3 +206,41 @@ fn rule_4_the_old_name_issue_close_takes_the_humans_words_as_issue_finish_does()
         );
     }
 }
+
+#[test]
+fn rule_4_the_commands_over_several_issues_name_the_command_that_takes_the_words() {
+    let home = Home::new();
+    let repository = Repository::new();
+    home.quadratique(&repository.root)
+        .args(["project", "create", "--key", "DEM", "--name", "Demo"])
+        .run()
+        .ok();
+    for command in [
+        &["finish"][..],
+        &["close"][..],
+        &["issues", "finish"][..],
+        &["issues", "close"][..],
+    ] {
+        for flags in [
+            &["--humanWords", WORDS, "--confidence", "high"][..],
+            &["--confidence", "high"][..],
+        ] {
+            let mut args: Vec<&str> = command.to_vec();
+            args.extend(["--issue", "DEM-1", "--evidence", "read it"]);
+            args.extend(flags);
+            let refused = home
+                .quadratique(&repository.root)
+                .env("CLAUDECODE", "1")
+                .args(&args)
+                .run();
+            assert_eq!(refused.code, 3, "{args:?}: {refused:?}");
+            assert_eq!(refused.stdout, "", "{args:?}: {refused:?}");
+            let said = refused.stderr.trim_end();
+            assert_eq!(said.lines().count(), 1, "{args:?}: {refused:?}");
+            assert!(
+                said.contains("quadratique issue finish"),
+                "{args:?}: {said}"
+            );
+        }
+    }
+}

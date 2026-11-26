@@ -576,34 +576,32 @@ async fn update_issue(
             let word = word.filter(|_| uses_human_word(&issue, &caller));
             let confidence = HumanWord::confidence(word.as_ref());
             let outcome = decide_on_word(&event, &issue, &caller, &project, confidence)?;
+            let parent = input.given_or_cleared("parent", &input.parent);
+            if let Some(Some(parent)) = &parent {
+                require_issue(tx, parent)?;
+                Board::load(tx)?.check(&RelationChange::Parent {
+                    child: record.id.clone(),
+                    parent: parent.clone(),
+                })?;
+            }
+            let assignee = assignee
+                .map(|assignee| assignee.as_ref().map(model::assignee_text).transpose())
+                .transpose()?;
             if outcome == Outcome::LeftForHuman {
                 if let Some(word) = &word {
                     word.record_left(tx, &record.id, &caller, input.reason.as_deref())?;
                 }
                 return Ok((true, record.id));
             }
-            match input.given_or_cleared("parent", &input.parent) {
-                Some(Some(parent)) => {
-                    require_issue(tx, &parent)?;
-                    Board::load(tx)?.check(&RelationChange::Parent {
-                        child: record.id.clone(),
-                        parent: parent.clone(),
-                    })?;
-                    tx.set_parent(&record.id, Some(&parent))?;
-                }
-                Some(None) => {
-                    tx.set_parent(&record.id, None)?;
-                }
-                None => {}
+            if let Some(parent) = parent {
+                tx.set_parent(&record.id, parent.as_deref())?;
             }
             tx.update_fields(
                 &record.id,
                 &IssueFields {
                     title: input.title.clone(),
                     priority: input.priority,
-                    assignee: assignee
-                        .map(|assignee| assignee.as_ref().map(model::assignee_text).transpose())
-                        .transpose()?,
+                    assignee,
                     milestone: input.given_or_cleared("milestone", &input.milestone),
                     due: input.given_or_cleared("due", &input.due),
                     description: input.given_or_cleared("description", &input.description),

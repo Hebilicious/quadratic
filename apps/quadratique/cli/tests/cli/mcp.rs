@@ -238,6 +238,10 @@ fn rule_4_an_agent_over_mcp_gives_the_humans_words_on_every_move_that_human_only
             .as_str()
             .unwrap_or_default();
         assert!(said.contains("said to you in this session"), "{tool}");
+        let confidence = properties["confidence"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(confidence.contains("without interpretation"), "{tool}");
         assert_eq!(
             properties["confidence"]["enum"],
             json!(["high", "medium", "low"]),

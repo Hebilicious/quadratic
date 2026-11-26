@@ -112,29 +112,37 @@ still alive: a claim records no liveness.
    evaluate a degree of confidence first". The one-issue calls that `HumanOnly` guards
    (`issue.update` with `status` or a new assignee, `issue.release`, `issue.finish` and its
    name before 0.2, `issue.close`) take `humanWords`, what the human said to this agent in
-   this session about this issue, quoted as given (1 to 400 characters, not only spaces), and `confidence`, how sure the agent is
+   this session about this issue, quoted as given (1 to 400 characters, with at least one
+   character that is neither a space nor invisible), and `confidence`, how sure the agent is
    that those words decide the issue: `high`, `medium` or `low`. `issues.finish` (and
    `issues.close`) takes neither: the human's words settle one issue, and one quote must not
    finish a batch. The short command `finish` is `issues.finish`, even with one `--issue`, so
-   the words go on `quadratique issue finish`.
+   the words go on `quadratique issue finish`; those commands refuse `--humanWords` and
+   `--confidence` with a usage error that names it. The invisible characters counted are the
+   five format characters that show nothing and that `\s` does not match: U+200B, U+200C,
+   U+200D (zero-width space, non-joiner, joiner), U+2060 (word joiner) and U+FEFF (zero-width
+   no-break space). The list is short on purpose; it is not all of Unicode.
 
    The two inputs have an effect only where `HumanOnly` applies: an agent's call on an issue
    assigned to the human. Elsewhere, and in the human's own calls, they are ignored, and the
    call is decided as without them. Where they apply, the call is decided as if the
    confidence were `high`, with `HumanOnly` passed:
    - Any refusal is the answer, in its place in the order of rule 2 (`Stale`,
-     `UnknownStatus`, `Resolved`, `Held`, `NotClaimed`, `BaseNotMerged`), whatever the
+     `UnknownStatus`, `Resolved`, `Held`, `NotClaimed`, `BaseNotMerged`, and the `parent`
+     checks of `issue.update`: `NotFound`, `Cycle`), whatever the
      confidence. A call that would change nothing changes nothing.
    - `high`: the change is made. The issue gains a note by the agent that names it, quotes
      the words and states the confidence, with the call's `reason` when it has one.
-   - `medium` or `low`, where the change would be made: the call changes nothing but a note,
-     by the agent, that quotes the words and states the confidence, with the call's
-     `reason`. The answer has `leftForHuman`. It is a success, not a refusal: the agent does
+   - `medium` or `low`, where the change would be made, and after every check that can refuse
+     the call (a `parent` that is unknown or makes a cycle included): the call applies none of
+     its fields, its own `notes` included, and adds only a note, by the agent, that quotes
+     the words and states the confidence, with the call's `reason`. The answer has `leftForHuman`. It is a success, not a refusal: the agent does
      not repeat it with `high`; the issue waits for the human.
 
    Where the words were used (a change at `high`, or `leftForHuman`), the history's reason
    of the change is `The human's words, <confidence> confidence: <words>`, in place of the
-   call's `reason`, which the note keeps. The words are quoted as a JSON string, in the
+   call's `reason`, which the note keeps. A release that frees another agent's claim in review
+   writes the reason once, in the note of rule 3. The words are quoted as a JSON string, in the
    reason and in the note, so that no quote, backslash, newline or control character inside
    them ends the quotation. When the quoted words would make the reason longer than its 500
    characters, the reason quotes their first characters and says that the note quotes them
