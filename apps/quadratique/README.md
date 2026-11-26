@@ -442,7 +442,7 @@ The reason is the one the command met, for example "connecting to
 /home/you/.local/share/quadratique: Permission denied; a sandbox may be blocking it" (a sandbox
 that hides the folder, or another account whose home folder is closed to it) or "this process
 cannot write /home/you/.local/share/quadratique: Read-only file system; a sandbox may be blocking
-it". Each exits with status 4. This is the answer of a command whose capability is also
+it". A command that calls the server, and `quadratique mcp`, exit with status 4 for each of them. This is the answer of a command whose capability is also
 an MCP tool, and `<tool>` names that tool. Every other command that needs the server ends with
 "Nothing was started. This command works only on the command line: run it outside the sandbox,
 or ask the human to." Input the command line cannot match to a command (a typo after a group
