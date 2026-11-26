@@ -26,7 +26,7 @@ The browser tests (`quadratique-web:e2e`) also need the Chromium that Playwright
 pnpm --filter quadratique-web exec playwright install chromium-headless-shell
 ```
 
-The tests also call `jq`, `curl`, `flock`, `systemctl --user` and `unshare --user`, so they need
+The tests also call `jq`, `curl`, `flock` and `unshare --user`, so they need
 those commands and unprivileged user namespaces. A test of a sandbox's user namespace also maps
 your account in one (`unshare --user --map-user`); where that is refused, it says it is skipped,
 unless `QUADRATIQUE_TEST_USER_NAMESPACES=required`, as CI sets it.
@@ -40,41 +40,28 @@ pnpm --filter quadratique-web exec playwright install-deps chromium-headless-she
 
 ## Install
 
-On Linux with systemd, from the root of the repository:
+From the root of the repository:
 
 ```sh
 moon run quadratique-install:install
 ```
 
-This does four things:
+This builds the release binary with the web app inside it, and copies it to
+`$XDG_BIN_HOME/quadratique`, or `~/.local/bin/quadratique` when `XDG_BIN_HOME` is not set. That is
+the whole install: it starts nothing and writes nothing else. The first `quadratique` command starts
+the server in the background, and every later command uses it. Once it is done, the checkout is not
+needed: you can delete it.
 
-1. Builds the release binary with the web app inside it.
-2. Installs the binary as `$XDG_BIN_HOME/quadratique`, or `~/.local/bin/quadratique` when
-   `XDG_BIN_HOME` is not set.
-3. Writes the systemd user unit `~/.config/systemd/user/quadratique.service`, then enables and
-   restarts it. The server then starts with your session. When it crashes or fails to start,
-   systemd starts it again after 2 seconds, as often as needed: the unit has no start limit.
-   A server that exits with status 5, as it does when its store cannot open, is not restarted:
-   `systemctl --user status quadratique.service` shows why it stopped.
-   A stop may take up to 70 seconds while the server closes its store; then systemd ends the
-   process (`TimeoutStopSec=70`). Every write the server answered is kept.
-4. Waits until the unit's main process is the new binary's server and answers. If it is not
-   within 60 seconds, or the restart fails, the install fails and prints
-   `systemctl --user status quadratique.service`.
+A copy replaces the file whole. A server that runs the earlier copy keeps running it until it stops,
+and `install.sh` says so when it finds one. The next command says that a server of another build
+(of release 0.2 or 0.3: of an earlier release) holds the data folder, and to run
+`quadratique server stop`; after it, the next command starts the new build.
 
-Once it is done, the checkout is not needed: you can delete it.
-
-The install refuses to run when `XDG_CONFIG_HOME` is set to anything but `~/.config`. The
-systemd user manager looks for units there only when its own environment sets that
-variable, so a unit written elsewhere might never start. Run the install with
-`XDG_CONFIG_HOME` unset. The install also refuses a binary or data folder whose path has
-`"`, `\`, `%`, `$` or a control character, which a unit would read differently.
-
-Check that the server runs, and open the web app:
+Open the web app:
 
 ```sh
-quadratique server status
 quadratique ui --open
+quadratique server status
 ```
 
 The web app is at `http://127.0.0.1:<port>/`. Its TCP listener opens at the start of the server
@@ -110,6 +97,111 @@ address the server listens on now: the server kept that port at its start (not w
 and not when `server.port` could not be written; the log says why), strict is off now, and
 `server.port` still names that port. With no server running, `addressKept` says what the next start
 does.
+
+### Keep the server up after a reboot
+
+Quadratique does not install a service: any command starts the server when it is not running, and
+it keeps running until you stop it or the machine stops. To have it running before the first
+command after a reboot, so that an open tab or a bookmark of the web app works at once, let your
+system start `quadratique serve --take-over`. It runs the server in the foreground, as the main
+process of the job, and first stops a server that a command started before it.
+
+**Linux, at login:** a systemd user unit, `~/.config/systemd/user/quadratique.service`:
+
+```ini
+[Unit]
+Description=Quadratique server
+
+[Service]
+ExecStart=%h/.local/bin/quadratique serve --take-over
+Restart=on-failure
+RestartPreventExitStatus=5
+
+[Install]
+WantedBy=default.target
+```
+
+Use the path of your binary in `ExecStart` (`%h` is your home folder). A user manager does not read
+your shell's profile: if your shell sets `QUADRATIQUE_HOME` or `XDG_DATA_HOME`, add each as an
+`Environment=` line in `[Service]`, for example `Environment=XDG_DATA_HOME=%h/data`. Then:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now quadratique.service
+```
+
+`Restart=on-failure` starts the server again after a crash. Status 5 is a data folder or a store that
+the server refuses: starting it again cannot fix that, so `RestartPreventExitStatus=5` stops there,
+and `systemctl --user status quadratique.service` shows why. To have it start at boot rather than at
+login, run `loginctl enable-linger` once.
+
+**macOS:** a LaunchAgent, `~/Library/LaunchAgents/quadratique.serve.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>quadratique.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.local/bin/quadratique</string>
+    <string>serve</string>
+    <string>--take-over</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+</dict>
+</plist>
+```
+
+Use the absolute path of your binary. launchd does not read your shell's profile either: for
+`QUADRATIQUE_HOME` or `XDG_DATA_HOME`, add an `EnvironmentVariables` dictionary with them. Load it
+with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/quadratique.serve.plist`, and unload
+it with `launchctl bootout gui/$(id -u)/quadratique.serve`. `RunAtLoad` starts it at login, and
+`KeepAlive` with `SuccessfulExit` false starts it again only after a failure; a server that refuses
+its data folder (status 5) is started again every 10 seconds until you fix the cause or unload it.
+
+With both, a clean `quadratique server stop` leaves the server stopped until the next command or the
+next login: the job counts an exit with status 0 as done. So "Backups" holds as it is. `quadratique
+upgrade` stops a server that runs the binary it replaces; the next command then starts the new build,
+or restart the job: `systemctl --user restart quadratique.service`, or
+`launchctl kickstart -k gui/$(id -u)/quadratique.serve`.
+
+### A unit that an earlier install wrote
+
+Releases 0.1 to 0.3 wrote a systemd user unit, `~/.config/systemd/user/quadratique.service`, that
+runs `"<binary>" serve --take-over`. It keeps working with the new binary, so nothing breaks, and
+you may keep it: it is the unit of "Keep the server up after a reboot".
+
+1. See whether it runs the server: `systemctl --user status quadratique.service` names its main
+   process, the server's `pid` in `quadratique server status`. `systemctl --user cat
+   quadratique.service` shows the binary in `ExecStart` and, when it was set,
+   `Environment=XDG_DATA_HOME=…`; the store is in `<data home>/quadratique`.
+2. To stop it and keep it: `systemctl --user stop quadratique.service`. It starts again at your next
+   login.
+3. To remove it, stop and disable it: `systemctl --user disable --now quadratique.service`, then
+   remove its file and tell systemd: `rm ~/.config/systemd/user/quadratique.service`, then
+   `systemctl --user daemon-reload`.
+
+The store stays where it was, and the next command starts a server on it. If you installed with mise
+and also ran an earlier `install.sh`, the unit runs the copy in `~/.local/bin`: the same steps
+remove it, and after them the mise copy is the only one (remove `~/.local/bin/quadratique` too if it
+is still there and not the one you want on your PATH).
+
+From this release on, when the unit's server stops cleanly (`quadratique server stop`, or an
+upgrade), the unit stays inactive but enabled: its `Restart=on-failure` does not restart a server
+that exits with status 0. It starts again at your next login, and any command starts a server
+meanwhile. That is harmless.
+
+If you skipped releases and a server of release 0.1 still runs, or your kernel has no pidfds, the
+command line cannot stop that server itself: "A server of release 0.1" says how to stop it by hand.
 
 ### Let a browser in
 
@@ -167,8 +259,7 @@ forwarded socket can call every command as you, with no token.
 Each [GitHub release](https://github.com/Hebilicious/quadratique/releases) has a prebuilt binary,
 with the web app inside it, for Linux on x86-64 and on arm64. It needs glibc 2.34 or newer and
 `libgcc_s.so.1` (Ubuntu 22.04, Debian 12, RHEL 9, Fedora 35 or later have both), and no other
-tool: no Rust, Node.js or proto. The service that `install.sh` sets up needs a running systemd
-user manager (`systemctl --user status` answers), as for an install from source.
+tool: no Rust, Node.js or proto.
 
 Each platform has one archive, named for the version and the target, and its SHA-256 file:
 
@@ -178,10 +269,9 @@ Each platform has one archive, named for the version and the target, and its SHA
 | Linux arm64 | `quadratique-<version>-aarch64-unknown-linux-gnu.tar.gz` |
 
 The archive has one folder, `quadratique-<version>-<target>/`, with the binary in `bin/quadratique`,
-the scripts `install.sh` and `uninstall.sh`, this file and the license. `install.sh` is the script
-that `moon run quadratique-install:install` runs, and does the steps 2 to 4 of "Install" with the
-binary you give it. Download, check and install a release (here 0.1.0 for x86-64; use `aarch64`
-for arm64):
+the script `install.sh`, this file and the license. `install.sh` copies the binary you give it to
+`$XDG_BIN_HOME/quadratique`, or `~/.local/bin/quadratique`, as "Install" does. Download, check and
+install a release (here 0.1.0 for x86-64; use `aarch64` for arm64):
 
 ```sh
 version=0.1.0
@@ -193,29 +283,19 @@ tar -xzf "$archive.tar.gz"
 sh "$archive/install.sh" "$archive/bin/quadratique"
 ```
 
-To upgrade, run `quadratique upgrade` (see "Upgrade"). To uninstall, run `sh "$archive/uninstall.sh"`
-from any release: it removes the binary and the unit that the unit names.
+To upgrade, run `quadratique upgrade` (see "Upgrade"). To uninstall, see "Uninstall".
 
 ### With mise
 
 [mise](https://mise.jdx.dev) installs the binary from the GitHub releases. It picks the archive
 for your platform from its name, checks it against the SHA-256 file, and unpacks the archive's
-folder. It puts that folder's `bin/` on your `PATH`, so `quadratique` is the only command it adds;
-`install.sh` and `uninstall.sh` stay in the folder:
+folder. It puts that folder's `bin/` on your `PATH`, so `quadratique` is the only command it adds:
 
 ```sh
 mise use -g github:Hebilicious/quadratique
 ```
 
-This installs only the binary. To run the server as a systemd user service, also run the
-`install.sh` of that release with the binary that mise installed:
-
-```sh
-sh "$(mise where github:Hebilicious/quadratique)/install.sh" "$(mise which quadratique)"
-```
-
-The install copies the binary to `~/.local/bin/quadratique`, so the service keeps the version you
-installed until you run `install.sh` again after `mise upgrade`. `quadratique upgrade` prints that
+That is the whole install. `quadratique upgrade` prints the
 mise command instead of replacing the binary. By default mise does not install a
 release published less than 24 hours ago (its setting `minimum_release_age`); name the version to
 install it earlier (`mise use -g github:Hebilicious/quadratique@0.1.0`).
@@ -231,8 +311,7 @@ cargo install quadratique
 
 This builds from source, so it needs Rust, a C compiler and the zlib development files (the store
 engine is compiled from C; on Debian or Ubuntu: `sudo apt install build-essential zlib1g-dev`).
-Then run the `install.sh` of the release of the same version, with `~/.cargo/bin/quadratique`, to
-set up the service.
+That is the whole install.
 
 ## Set up a repository
 
@@ -413,7 +492,7 @@ Without the proof (another binary, a binary that was replaced since it started, 
 `/proc` of another namespace, another system) they signal nothing, and the message says what to run:
 
 ```text
-Stop it yourself, then run the command again: if `quadratique.service` runs it (`systemctl --user status quadratique.service` names its main PID), run `systemctl --user stop quadratique.service`; if it runs in a terminal, press Ctrl-C there; otherwise check pid <pid>, which nothing has verified, with `ps -p <pid> -o args`, and only if it shows this data folder's Quadratique server, end it with `kill <pid>`.
+Stop it yourself, then run the command again: if the user unit `quadratique.service` of an earlier install runs it, stop that unit, as the README section "A unit that an earlier install wrote" says; if it runs in a terminal, press Ctrl-C there; otherwise check pid <pid>, which nothing has verified, with `ps -p <pid> -o args`, and only if it shows this data folder's Quadratique server, end it with `kill <pid>`.
 ```
 
 The process commands appear only for a valid pid other than the command's own; `kill 0` would
@@ -477,9 +556,9 @@ stop holds `start.lock` in the data folder, so no command starts a server betwee
 start that follows it. A command never replaces a server that stalls, answers something malformed,
 serves another database or speaks a newer control version: each has its own message.
 
-If a user service runs the server, a refusal stops it: the unit does not restart a server that
-exits with status 5 (`RestartPreventExitStatus`). Fix the cause, then
-`systemctl --user restart quadratique.service`. `quadratique upgrade` checks the folder before it
+If a unit runs the server with `RestartPreventExitStatus=5` (see "Keep the server up after a
+reboot"), a refusal stops it, and the unit does not restart it. Fix the cause, then restart the
+unit. `quadratique upgrade` checks the folder before it
 looks for a release, and stops there with the reason and "Nothing was changed".
 
 Some agent sandboxes forbid connections to the server's socket, hide the data folder, or make the
@@ -597,8 +676,7 @@ beside `workspace.db` (mode `0600`). It is not in the store, so restoring a back
 `workspace.db` brings back no revoked token. Restoring a copy of `credentials.json` brings back
 the tokens it lists, including ones you revoked after the copy was made: after you restore one,
 revoke every token it lists and create new ones. A `credentials.json` that is not a credentials
-file stops the server from starting, with a message that names it. The uninstall leaves
-`credentials.json` in the data folder, as it leaves the store.
+file stops the server from starting, with a message that names it.
 
 ## Move issues after a deploy
 
@@ -707,15 +785,10 @@ never over TCP, and it signals no process:
    left running, and `server` says which file it runs.
 3. A server started with `quadratique serve` is stopped too, and the answer (in `warnings`) says to
    restart it the way you started it: your supervisor or your terminal.
-4. When `quadratique.service` runs that server (its main process is the generation's process), the
-   upgrade stops the generation the same way, gives up `start.lock` (the unit's own start takes
-   it), waits until systemd sees the process leave, and starts the unit again: the unit runs
-   `serve --take-over` of the new binary. It then waits until the server on the socket is the
-   unit's main process and says it runs the installed file. The stop, the unit's start and that
-   wait share one deadline of 60 seconds. A command that starts a server between the stop and the
-   unit's start gets a server that the unit's take-over then replaces: the answer names each such
-   generation that the upgrade saw. If the unit changed on disk since systemd loaded it, or
-   `systemctl` fails, nothing is stopped and the answer says what to run.
+4. A server that a supervisor runs (a unit or a LaunchAgent, see "Keep the server up after a
+   reboot") is stopped the same way. If it was started with `quadratique serve`, restart the
+   supervisor's job; a unit that an earlier install wrote runs `serve --take-over` and starts again
+   at your next login, while the next command starts the new build meanwhile.
 5. A server from before the socket (release 0.1) is never stopped by `upgrade`. The answer says
    what serves and what stops it: `quadratique server stop` when that command has its proof (see
    "A server of release 0.1"), otherwise the steps to stop it yourself. A file that `upgrade` replaced never counts as
@@ -728,10 +801,7 @@ nothing. When an earlier run was stopped between the rename and the stop, the ne
 it: the lock file holds the device and inode of the file that run replaced, and the next run stops
 the server that says, on the socket, that it was started from the binary's path and from that file
 while the path now holds another. It reads that record only when no other account can change the
-install folder. If an earlier run stopped the service's server and was stopped before it started
-the unit again, no server runs and the unit is inactive. The next run then starts nothing, because
-you may have stopped the unit on purpose. When the unit is loaded, not active, and starts this
-binary, the answer says so and gives the command: `systemctl --user start quadratique.service`.
+install folder.
 `quadratique upgrade --check` says the installed and the latest version and changes nothing: it
 creates neither a missing data folder nor the install lock.
 
@@ -817,37 +887,33 @@ checkout of each project's repository, as `quadratique init --dry-run` does. It 
 `quadratique upgrade --skills` makes the same report, without the network.
 
 To build from an up-to-date checkout instead, run `moon run quadratique-install:install` from its
-root: it replaces the binary and restarts the service.
+root: it replaces the binary. Stop the server that runs the earlier build, and the next command starts the new one.
 
 ## Uninstall
 
-```sh
-moon run quadratique-install:uninstall
-```
+1. If you set up a unit or a LaunchAgent (see "Keep the server up after a reboot"), or an earlier
+   install wrote one (see "A unit that an earlier install wrote"), disable and remove it.
+2. Stop the server: `quadratique server stop`.
+3. Remove the binary: `rm ~/.local/bin/quadratique` (or `$XDG_BIN_HOME/quadratique`).
 
-This stops the server, checks that no server holds the home, then disables the service and
-deletes the unit and the binary. It does not touch the store. If a server of the home does not
-stop, or the binary is missing while a server holds the home, the uninstall fails, says why,
-and changes nothing.
+The store stays in the data folder (see "Backups"); remove that folder too to delete every issue.
 
 ## Backups
 
 The whole store is one file, `workspace.db`, in `~/.local/share/quadratique/`
 (`$XDG_DATA_HOME/quadratique/` when `XDG_DATA_HOME` is set, or the folder `QUADRATIQUE_HOME` names).
-The service uses the data folder that was set when you installed. Run the commands below in a
-shell with the same `XDG_DATA_HOME` as at install time and with no `QUADRATIQUE_HOME` set:
-otherwise they act on another store. To back the store up, stop the server, check that it
-stopped, copy the file that `server status` names, then start the service again:
+Run the commands below in a shell with the same `XDG_DATA_HOME` and `QUADRATIQUE_HOME` as your
+other commands: otherwise they act on another store. To back the store up, stop the server, check
+that it stopped, and copy the file that `server status` names:
 
 ```sh
 quadratique server stop
 quadratique server status      # must say "running": false; note the path under "database"
 cp "<the database path from server status>" /path/to/backups/workspace-$(date +%F).db
-systemctl --user start quadratique
 ```
 
-`quadratique server stop` stops the server whether the service or a command started it, and the
-service does not restart a server that stopped this way. While the server is stopped, any
+`quadratique server stop` stops the server whoever started it; a unit with `Restart=on-failure`
+does not restart a server that stopped this way. While the server is stopped, any
 `quadratique` command starts it again, so copy the file when no agent is working. There is no
 backup command.
 
@@ -867,7 +933,7 @@ The source has these parts:
 | `catalog` | The AcidCat catalog in Pkl, rendered to `quadratique.acidcat.json`, which the server and the web app both read |
 | `web` | The web app (Vue, Effect, XState) that the server serves |
 | `skill/quadratique` | The skill that `quadratique init` writes into a repository; the binary embeds it |
-| `install` | The install and uninstall scripts and the systemd user unit |
+| `install` | The build, package and install scripts |
 | `eval` | The evaluation: end-to-end runs and a harness that compares Quadratique with other trackers |
 
 Run every task through moon, for example `moon run quadratique-server:test`:
@@ -881,7 +947,7 @@ Run every task through moon, for example `moon run quadratique-server:test`:
 | `quadratique-catalog:check` | Fails when the JSON is not what the Pkl renders, or when `acid-cat check --strict` refuses it |
 | `quadratique-web:test`, `quadratique-web:e2e` | The web app's headless tests, and its journeys in Chromium against the real binary |
 | `quadratique-web:typecheck`, `quadratique-web:lint`, `quadratique-web:format-check` | Static checks of the web app |
-| `quadratique-install:test` | Installs on a temporary home with no systemd, and checks the service's cases and the uninstall |
+| `quadratique-install:test` | Installs on a temporary home: the binary serves with no source tree, a release installs with no Rust toolchain over a running older build, and `serve --take-over` meets the readiness check of an earlier upgrader |
 | `quadratique-eval:test` | The evaluation harness's own tests |
 | `quadratique-server:package-test` | The packaging preflight's cases, and how `build.rs` embeds the web app in the repository and in a packaged crate (see "The crates") |
 

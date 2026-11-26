@@ -5,7 +5,7 @@ tags: ["quadratique"]
 
 project:
   title: "Quadratique install"
-  description: "Installs the quadratique binary, with the web app inside it, and its systemd user service for the current user."
+  description: "Builds the quadratique binary, with the web app inside it, and puts it on the PATH of the current user."
 
 # The task scripts are POSIX shell: on Windows they run in Git's bash, not PowerShell.
 taskOptions:
@@ -28,7 +28,7 @@ fileGroups:
 
 tasks:
   install:
-    description: "Build the release binary with the web app inside it, install it as $XDG_BIN_HOME/quadratique (else ~/.local/bin/quadratique), and install, enable and restart the systemd user service quadratique.service."
+    description: "Build the release binary with the web app inside it, and copy it to $XDG_BIN_HOME/quadratique (else ~/.local/bin/quadratique). It starts nothing."
     script: |
       set -eu
       sh install.sh "$(sh build.sh ../web/dist ../target)"
@@ -36,14 +36,8 @@ tasks:
     options:
       cache: false
       runInCI: false
-  uninstall:
-    description: "Stop and remove the systemd user service quadratique.service, its unit and the installed binary. The store stays."
-    command: "sh uninstall.sh"
-    options:
-      cache: false
-      runInCI: false
   test:
-    description: "Install on a temporary home with no systemd: the binary serves the web app with no source tree, a release archive installs with no Rust toolchain, the service's ownership cases, and an uninstall that keeps the store."
+    description: "Install on a temporary home: the binary serves the web app with no source tree, a release archive installs with no Rust toolchain over a running older build, and the readiness check of an earlier upgrader passes against the new binary."
     command: "sh test.sh"
     deps: ["quadratique-web:build"]
     inputs: ["$CFLAGS", "@group(scripts)", "@group(rust)", "/apps/quadratique/web/dist/**/*", "/apps/quadratique/README.md", "/LICENSE"]

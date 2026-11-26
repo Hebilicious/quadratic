@@ -20,7 +20,7 @@ pub fn all() -> Vec<CliCommand<Context>> {
     vec![
         command(
             "serve",
-            "Run the server in the foreground, until SIGINT or SIGTERM. Commands and agents reach it on the socket in its data folder; other commands start it in the background when it is not running. Its web app listens on TCP once a browser was let in (quadratique ui): without --port, on the port this home kept when that port is free, otherwise on one the system chooses, which it keeps (server strict on: a port this home never served, kept nowhere). --port <port>: the web app's loopback port, 0 letting the system choose; it reads and keeps no port. --take-over: first stop the server that owns the home, of any build, while no command can start another; the user service runs this.",
+            "Run the server in the foreground, until SIGINT or SIGTERM. Commands and agents reach it on the socket in its data folder; other commands start it in the background when it is not running. Its web app listens on TCP once a browser was let in (quadratique ui): without --port, on the port this home kept when that port is free, otherwise on one the system chooses, which it keeps (server strict on: a port this home never served, kept nowhere). --port <port>: the web app's loopback port, 0 letting the system choose; it reads and keeps no port. --take-over: first stop the server that owns the home, of any build, while no command can start another; a supervisor that keeps the server up runs this.",
             |args, io| serve(args, io).boxed(),
         ),
         command(

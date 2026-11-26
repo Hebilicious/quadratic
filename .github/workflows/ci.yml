@@ -160,13 +160,11 @@ jobs:
         run: |
           moon run quadratique-web:build
           sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target/release-build
-      # Expected to fail, in this order: package.sh uses GNU tar's --sort and sha256sum (QUA-36); build.sh names the
-      # binary without .exe on Windows (QUA-36, QUA-38); install.sh writes a systemd user unit and test.sh fakes
-      # systemctl and reads /proc (QUA-37 on macOS, QUA-38 on Windows). Removing this continue-on-error is part of the
-      # acceptance of the last of those issues to land.
-      - name: Install test (expected to fail until QUA-36, QUA-37, QUA-38)
+      # Expected to fail on Windows only: build.sh names the binary without .exe there (QUA-36, QUA-38). On macOS the
+      # test skips the release archive, which package.sh makes with GNU tar and sha256sum (QUA-36).
+      - name: Install test (expected to fail on Windows until QUA-36, QUA-38)
         if: ${{ !cancelled() }}
-        continue-on-error: true
+        continue-on-error: ${{ runner.os == 'Windows' }}
         run: moon run quadratique-install:test
       # The tests that run commands in POSIX process groups say they are skipped on Windows until QUA-40.
       - name: Eval test

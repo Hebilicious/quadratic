@@ -372,7 +372,8 @@ fn a_server_from_before_the_socket_without_proof_gets_no_signal_and_the_person_r
             "{case}: {status}"
         );
         let what_to_run = [
-            "systemctl --user stop quadratique.service".to_owned(),
+            "if the user unit `quadratique.service` of an earlier install runs it, stop that unit"
+                .to_owned(),
             format!("ps -p {pid} -o args"),
             format!(
                 "only if it shows this data folder's Quadratique server, end it with `kill {pid}`"

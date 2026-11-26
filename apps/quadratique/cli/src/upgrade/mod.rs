@@ -36,7 +36,7 @@ use crate::commands::{self, print_json, report};
 use release::{Release, Source, Version};
 use route::Route;
 
-pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and stops the server of this home if it ran the replaced file: before the rename it reads, on the home's socket, the server's generation and the file it runs, and after it asks that generation to stop, so that the next command starts the new build. When quadratique.service ran that server, it then starts the unit again and waits until the new build serves; a server started with quadratique serve is stopped, and the person restarts it. A server that runs another file is left running, and a server from before the socket (release 0.1) gets what to stop. Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server: the home's server lists the projects when it runs; otherwise the command reads the store file once, read-only, and the store engine may leave its lock file (.workspace.db-lock) beside it.";
+pub const USAGE: &str = "upgrade [--check] [--allow-downgrade] | upgrade --skills: install the latest release of Quadratique over this binary. Finds the latest release with the GitHub API, downloads this platform's archive from github.com, checks it against the SHA-256 that the API gives for it, runs the new binary with --version in an empty environment, renames it over this one, and stops the server of this home if it ran the replaced file: before the rename it reads, on the home's socket, the server's generation and the file it runs, and after it asks that generation to stop, so that the next command starts the new build. A server started with quadratique serve is stopped too, and the person restarts it the way they started it. A server that runs another file is left running, and a server from before the socket (release 0.1) gets what to stop. Any failure before the rename leaves this binary in place. It refuses a binary inside a git working tree, an install folder that other accounts can write, a store that the release cannot open, and to run as root. When mise or cargo installed this binary, it replaces nothing and prints that manager's command. It never downgrades unless given --allow-downgrade. Then it reads the main checkout of each project's repository, as init --dry-run does, and lists the repositories whose skill is older than the new build, with the command to run in each, and the skill files a person changed, with the command that prints the new text to merge into them. It writes into no repository. --check: say the installed and the latest version and list the repositories, changing nothing. --skills: only list the repositories, for this build, without the network. Neither starts a server: the home's server lists the projects when it runs; otherwise the command reads the store file once, read-only, and the store engine may leave its lock file (.workspace.db-lock) beside it.";
 
 /// A release binary is about 23 MiB.
 const BINARY_LIMIT: u64 = 128 << 20;
@@ -142,7 +142,7 @@ async fn run(request: &Request) -> Result<Value, String> {
             ));
         }
         if let (None, Some(home)) = (route.manager(), &home) {
-            finish_an_earlier_upgrade(home, &binary, &running, request.check, &mut answer).await;
+            finish_an_earlier_upgrade(home, &binary, request.check, &mut answer).await;
         }
         answer["skills"] = skills::report().await;
         return Ok(answer);
@@ -156,7 +156,14 @@ async fn run(request: &Request) -> Result<Value, String> {
         if let Some(manager) = route.manager() {
             answer["managedBy"] = json!(manager);
             answer["binary"] = json!(binary);
-            answer["then"] = json!(after_the_manager(&route, &binary).await);
+            let mut then = vec!["quadratique upgrade --skills"];
+            if let Some(pid) = running_server(home.as_ref()).await {
+                answer["server"] = json!(format!(
+                    "a server of this home (pid {pid}) runs: after the manager's upgrade, it keeps running the earlier build until `quadratique server stop`, and the next command then starts the new one"
+                ));
+                then.insert(0, "quadratique server stop");
+            }
+            answer["then"] = json!(then);
         }
         answer["run"] = json!(route.command());
         answer["skills"] = skills::report().await;
@@ -211,7 +218,7 @@ async fn install_release(
     let leftovers = folder::remove_leftovers(folder, &lock);
     let staging = prepare(source, release, target, folder).await?;
     // No server may start between the last look and the stop: `start.lock` is held from before the look through the
-    // rename and the stop, and given up before a service's own start.
+    // rename and the stop.
     let start = background::reserve_start(home)
         .await
         .map_err(|error| kept(error.to_string()))?;
@@ -232,7 +239,7 @@ async fn install_release(
     if !leftovers.left.is_empty() {
         answer["leftBesideTheBinary"] = json!(leftovers.left);
     }
-    match server::bring_up(home, binary, &latest.to_string(), replaced, before, start).await {
+    match server::bring_up(home, replaced, before, start).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
@@ -257,18 +264,28 @@ async fn install_release(
     ))
 }
 
+/// The process number of a server that serves this home now, of any build; nothing when none answers.
+#[cfg(unix)]
+async fn running_server(home: Option<&Home>) -> Option<u32> {
+    match background::observe(home?).await.ok()? {
+        background::Observed::Serving { identity }
+        | background::Observed::Older(identity)
+        | background::Observed::Newer(identity) => Some(identity.pid),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+async fn running_server(_home: Option<&Home>) -> Option<u32> {
+    None
+}
+
 /// After a run that was stopped between the rename and the stop, the binary is current while the server of this home
 /// may still run the replaced file: stop it now. The record of the replaced file counts only in an install folder that
 /// no other account can change, and only for a server that says, over the socket, that it was started from this path
 /// and from that file. With `check`, nothing is created or stopped: the record is read without the lock.
 #[cfg(unix)]
-async fn finish_an_earlier_upgrade(
-    home: &Home,
-    binary: &Path,
-    running: &Version,
-    check: bool,
-    answer: &mut Value,
-) {
+async fn finish_an_earlier_upgrade(home: &Home, binary: &Path, check: bool, answer: &mut Value) {
     let Some(folder) = binary.parent() else {
         return;
     };
@@ -326,13 +343,6 @@ async fn finish_an_earlier_upgrade(
     };
     let identity = match &seen.before {
         server::Before::Socket(identity) => identity,
-        server::Before::Nobody => {
-            drop(start);
-            if let Some(stopped) = server::service_not_running(binary).await {
-                note(answer, stopped);
-            }
-            return;
-        }
         _ => return,
     };
     if !server::left_on_the_replaced_file(identity, binary, replaced) {
@@ -345,16 +355,7 @@ async fn finish_an_earlier_upgrade(
         ));
         return;
     };
-    match server::bring_up(
-        home,
-        binary,
-        &running.to_string(),
-        replaced,
-        seen.before,
-        start,
-    )
-    .await
-    {
+    match server::bring_up(home, replaced, seen.before, start).await {
         Ok(done) => answer["server"] = json!(done),
         Err(problem) => answer["warnings"] = json!([problem]),
     }
@@ -364,7 +365,6 @@ async fn finish_an_earlier_upgrade(
 async fn finish_an_earlier_upgrade(
     _home: &Home,
     _binary: &Path,
-    _running: &Version,
     _check: bool,
     _answer: &mut Value,
 ) {
@@ -432,30 +432,6 @@ async fn store_opens(home: &Home, latest: &Version, running: &Version) -> Result
         )),
         (before, _) => Ok(before),
     }
-}
-
-/// What to run after the manager's upgrade: a service that runs a copy that `install.sh` made is
-/// not upgraded by the manager.
-async fn after_the_manager(route: &Route, binary: &Path) -> Vec<String> {
-    let mut then = Vec::new();
-    #[cfg(unix)]
-    let service = server::service_binary().await;
-    #[cfg(not(unix))]
-    let service: Option<std::path::PathBuf> = None;
-    if let Some(service) = service.filter(|service| service != binary) {
-        then.push(match route {
-            Route::Mise { tool } => format!(
-                "sh \"$(mise where {tool})/install.sh\" \"$(mise which quadratique)\""
-            ),
-            _ => format!(
-                "The service quadratique.service runs {}, a copy that install.sh made: run the install.sh of the new release with {}",
-                service.display(),
-                binary.display()
-            ),
-        });
-    }
-    then.push("quadratique upgrade --skills".to_owned());
-    then
 }
 
 /// Downloads and checks the release's binary, and leaves it staged beside the binary, run once

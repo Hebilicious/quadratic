@@ -74,7 +74,7 @@ fn a_command_that_meets_a_server_from_before_the_socket_says_so_and_starts_nothi
     assert!(
         message.contains("from before the socket (release 0.1)")
             && message.contains("Nothing was started.")
-            && message.contains("systemctl --user stop quadratique.service"),
+            && message.contains("stop that unit"),
         "{message}"
     );
     assert!(
