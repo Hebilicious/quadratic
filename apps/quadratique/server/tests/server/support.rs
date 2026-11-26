@@ -34,6 +34,14 @@ pub fn private_home() -> TempDir {
         .expect("a temporary home")
 }
 
+/// Takes `listener` out of the listening state for every descriptor of it, then closes it: later connections are
+/// refused. A plain drop closes one descriptor, while a child that another test spawns holds a copy of each descriptor
+/// of this process between its `fork` and its `exec`, and so keeps the socket listening for that moment.
+pub fn stop_listening(listener: std::os::unix::net::UnixListener) {
+    rustix::net::shutdown(&listener, rustix::net::Shutdown::Both)
+        .expect("the socket stops listening");
+}
+
 pub async fn start() -> Running {
     start_looking_every(watcher::EVERY).await
 }

@@ -804,7 +804,10 @@ runs on every push to `main`:
    the version that `.release-please-manifest.json` says at the pushed commit, found by its exact
    tag, even when release-please failed after it made the draft. It builds a draft only when the
    tag points at the commit that was released. A published release with its four files needs
-   nothing; a published release without them fails this job and is not changed.
+   no build; a published release without them fails this job and is not changed. For a draft or
+   a complete release, the job also names the commit to publish the crates from: the commit that
+   the tag points at, which must be the commit that the release records as its target. A public
+   release whose tag was moved fails this job, and nothing is published.
 4. One job per platform checks out that commit by its SHA, checks that the tag points at it,
    builds the web app and the release binary with it inside on the oldest hosted Ubuntu (22.04),
    and keeps the archive and its SHA-256 file as workflow artifacts. `install/package.sh` makes
@@ -816,6 +819,27 @@ runs on every push to `main`:
    not one of the four, uploads the missing ones, checks the four digests, checks the tag again,
    and only then publishes the release. On a release that is already public it changes nothing:
    it succeeds when the four digests match and fails otherwise.
+6. Once the release is public, or at once for a release that was already complete, three jobs
+   publish the crates that crates.io lacks, `quadratique-server` then `quadratique`, so that
+   crates.io never holds back the release:
+   - "crates to publish" reads crates.io's index and names the crates that lack the release's
+     version. When both are there, the next two jobs do not run.
+   - "build the crates" checks out the tag's commit by its SHA, checks that both crates have the
+     release's version, runs `moon run quadratique-server:preflight` and
+     `cargo package --workspace`, which builds each crate from its package, and records the
+     SHA-256 of each package. It runs project code, so it holds no token.
+   - "publish the crates to crates.io" runs the checkout, rustup and cargo, and no project code:
+     no install script, no moon task, no build. It reads the index again, packages the missing
+     crates with `cargo package --no-verify` and the staged web app of the build job, and stops
+     unless each package has the SHA-256 that the build job recorded. Only then does it get a
+     crates.io token through Trusted Publishing (`rust-lang/crates-io-auth-action`), which lasts
+     30 minutes and is revoked when the job ends, and runs `cargo publish --no-verify`. cargo
+     uploads the server first and waits up to 60 seconds for the index to list it before it
+     uploads the command line. Last, the index must record the recorded SHA-256 for both crates.
+
+   A crate version that the index already lists, with the recorded SHA-256, is skipped. When the
+   index already lists both crates, nothing is built and nothing compares their bytes. No job
+   holds an App token and a crates.io token together, and no secret is stored for crates.io.
 
 The workflow writes with tokens of a GitHub App, not with `GITHUB_TOKEN`: GitHub starts no
 workflow for a tag that `GITHUB_TOKEN` pushes, and holds the checks of a pull request that it
@@ -824,24 +848,53 @@ requests; the two other jobs' tokens can write contents only (a token needs writ
 draft release). The workflow reads the App's client ID from the repository variable
 `RELEASE_APP_CLIENT_ID` and its private key from the secret `RELEASE_APP_PRIVATE_KEY`.
 
+crates.io accepts the publish job's token because each crate has a Trusted Publishing
+configuration on crates.io: repository owner `Hebilicious`, repository name `quadratique`,
+workflow file `release.yml`, environment `crates-io`. That job runs in the repository's
+environment `crates-io`, which accepts only runs on `main` and asks nobody for anything: no
+reviewer, no wait. It exists because crates.io does not check the branch and this workflow also
+runs on pull requests; GitHub refuses the environment to a pull request, so a pull request that
+edits the workflow gets no crates.io token.
+
 A pull request that changes the release workflow, its configuration, `.github/release-tests/` or
 `install/` builds the archives too, as workflow artifacts, and releases nothing. It also runs
 `node .github/release-tests/release-please.cjs`, which runs release-please as the pinned action
 bundles it on this configuration and checks that it opens `chore(release): release <version>` and
 that the merged pull request yields the draft release `v<version>`, and
-`bash .github/release-tests/steps.sh`, which runs the jobs' scripts against a fake `gh`. Both run
-locally too, with no token.
+`bash .github/release-tests/steps.sh`, which runs the jobs' scripts against a fake `gh`, a fake
+crates.io index and a fake `cargo`. Both run locally too, with no token.
 
 #### When a release stops half-way
 
-The release stays a draft until the last job has attached and checked the four files, so a
-failure never leaves a public release without its archives.
+The release stays a draft until its publish job has attached and checked the four files, so a
+failure never leaves a public release without its archives. The crates are published after the
+release, so a crates.io failure never holds back the release's files.
 
 - **A job failed** (a flaky runner, a network error, release-please after it made the draft): in
   the workflow run, use "Re-run failed jobs". The builds run again on the same commit, replace
-  their artifacts, and the last job replaces only the files that are wrong.
+  their artifacts, and the publish job replaces only the files that are wrong.
+- **A crates job failed:** use "Re-run failed jobs". The publish job reads crates.io's index
+  again and publishes only the crates that it does not list, so a run that published
+  `quadratique-server` and then failed publishes only `quadratique`. Before you run it again,
+  look at `https://crates.io/crates/quadratique-server/<version>` and
+  `https://crates.io/crates/quadratique/<version>`: a version that crates.io shows but the job's
+  log says is missing from the index is still on its way to the index; wait a minute. If the job
+  fails at the token step, check the crate's Trusted Publishing configuration on crates.io
+  (Settings, Trusted Publishing): it must name `Hebilicious`, `quadratique`, `release.yml` and
+  `crates-io`. Also check that the repository's environment `crates-io` still allows `main`. If
+  it stops because a package's SHA-256 is not the one the build job recorded, nothing was
+  published: run all the jobs of the workflow again, not only the failed one. The GitHub release
+  is already public with its files at this point; the crates jobs never change it.
 - **The run is too old to re-run:** push any commit to `main` (a `docs:` or `chore:` one releases
-  nothing). The workflow finds the draft of the manifest's version and finishes it.
+  nothing). This works only while `.release-please-manifest.json` on `main` still names the
+  stopped release: the workflow finishes the draft of the manifest's version, and publishes the
+  crates that crates.io lacks at that version. Once a later release pull request is merged, the
+  manifest names the later version, and a push works on that one only.
+- **An older release stopped after the manifest moved on:** for its GitHub release, use the "By
+  hand" steps below. For its crates, there is no way today: crates.io gives a token only to this
+  workflow on `main`, and the workflow publishes only the manifest's version. Its crates stay
+  unpublished unless the owner decides otherwise; the next release's crates are published as
+  usual.
 - **By hand**, if the workflow cannot run, in this order:
   1. On each platform: `git checkout refs/tags/v<version>`, `moon run quadratique-web:build`,
      then `sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target`
@@ -894,16 +947,10 @@ What a maintainer does for a release, and what happens on its own:
    publication of the release follow on their own; check that the run of the workflow
    `Release` is green and that the release lists four files.
 
-To publish a release to crates.io (by hand: no workflow does it yet):
-
-1. Check out the tag: `git checkout refs/tags/v<version>`, then `pnpm install --frozen-lockfile`.
-2. Stage the web app and check both crates: `moon run quadratique-server:preflight` (it stages
-   the web app first, then checks).
-3. From `apps/quadratique`, with a crates.io API token in `CARGO_REGISTRY_TOKEN`:
-   `cargo publish --workspace --allow-dirty`. Cargo publishes `quadratique-server` first, then
-   `quadratique`, which depends on it. (`--allow-dirty`: the staged `web-dist` is not in git.)
-4. Trusted publishing on crates.io (with `rust-lang/crates-io-auth-action` in a workflow) can
-   replace the token.
+The same run publishes both crates to crates.io (step 6 of "Releases"): no token from a person
+is needed. Check that its job "publish the crates to crates.io" is green and that crates.io shows
+the new version of `quadratique-server` and `quadratique`. Release 0.2.0 is the first release
+published this way; 0.1.0 was published by hand.
 
 ## License
 
