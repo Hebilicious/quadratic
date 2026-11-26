@@ -27,7 +27,9 @@ pnpm --filter quadratique-web exec playwright install chromium-headless-shell
 ```
 
 The tests also call `jq`, `curl`, `flock`, `systemctl --user` and `unshare --user`, so they need
-those commands and unprivileged user namespaces.
+those commands and unprivileged user namespaces. A test of a sandbox's user namespace also maps
+your account in one (`unshare --user --map-user`); where that is refused, it says it is skipped,
+unless `QUADRATIQUE_TEST_USER_NAMESPACES=required`, as CI sets it.
 
 On a minimal Linux host, that Chromium also needs system libraries. On Debian or Ubuntu,
 Playwright installs them (it asks for `sudo`):
@@ -482,7 +484,9 @@ The reason is the one the command met, for example "connecting to
 /home/you/.local/share/quadratique: Permission denied; a sandbox may be blocking it" (a sandbox
 that hides the folder, or another account whose home folder is closed to it) or "this process
 cannot write /home/you/.local/share/quadratique: Read-only file system; a sandbox may be blocking
-it". Every command that would reach the server, `quadratique mcp` included, exits with status 4
+it", or "this sandbox hides who owns /home, so this command cannot check that the data folder is
+safe to use from here" (a user namespace that does not map root, as Codex's sandbox runs commands
+in: the home policy still refuses the folder). Every command that would reach the server, `quadratique mcp` included, exits with status 4
 (`unavailable`) for each of them, and `quadratique server status` answers `"reachable": false` with
 the reason. `quadratique serve` is the server itself, not a caller: a data folder it cannot use is
 a failure of its start, with status 5. This is the answer of a command whose capability is also
@@ -504,12 +508,12 @@ Where an agent's shell runs decides whether the `quadratique` command works ther
 | Where the command runs | What happens |
 | --- | --- |
 | A Claude Code shell without a sandbox | Every command works: it reaches the server on its socket, as in your own terminal. |
-| Codex's sandbox, default policy | No command that needs the data folder works; `--help` and `--version` answer. The sandbox refuses to make a Unix socket (`Operation not permitted`), and before that, Quadratique refuses the data folder: the sandbox shows every folder of root, such as `/home`, as owned by the account 65534, so the command answers "another account can replace /home: it belongs to another account (uid 65534) …" and exits with status 5 (QUA-84). |
-| Codex's sandbox with `network_access = true` | The socket and the loopback interface both connect, but the command still meets the same refusal of the data folder, and exits with status 5 (QUA-84). |
+| Codex's sandbox, default policy | No command that needs the data folder works; `--help` and `--version` answer. The sandbox runs the command in a user namespace that does not map root, so every folder of root, such as `/home`, shows as owned by the kernel's overflow uid (65534), which may stand for root or for another account. Quadratique cannot check that the data folder is safe, still refuses it, and answers "Cannot reach the Quadratique server from here: this sandbox hides who owns /home …" with the MCP tool to call, and exits with status 4. Past that, the sandbox refuses to connect to a Unix socket (`Operation not permitted`). |
+| Codex's sandbox with `network_access = true` | The socket and the loopback interface both connect, but the command meets the same answer about the data folder first, and exits with status 4. |
 
 Codex starts its MCP servers outside the sandbox, so a Codex session can use Quadratique through
-`quadratique mcp`. A command whose sandbox blocks the socket, hides the data folder or makes it
-read-only answers "Cannot reach the Quadratique server from here", names the MCP tool to call
+`quadratique mcp`. A command whose sandbox blocks the socket, hides the data folder or who owns
+the folders above it, or makes it read-only answers "Cannot reach the Quadratique server from here", names the MCP tool to call
 instead, and tells the agent to ask you for the tools when the session has none. A command that
 has no MCP tool says that it works only on the command line, to run outside the sandbox.
 
@@ -542,8 +546,10 @@ lets every sandboxed command of every Codex session reach the network. Use the M
 
 The table was measured on 2026-11-26 on Linux 7.2 with Claude Code 2.1.332, and with codex-cli
 0.172.0 through `codex sandbox`, which runs a command under the sandbox policy that a session
-uses, with Quadratique 0.2.0 from the main branch and with this release; both builds gave the same
-outcome in each place. These facts were measured earlier with codex-cli 0.171.0 in a Codex
+uses. The Codex rows were measured with the build that brought the "this sandbox hides who owns"
+answer (QUA-84); Quadratique 0.2.0 and 0.3.0 refuse the same data folder there as if another
+account owned `/home` ("another account can replace /home: it belongs to another account (uid
+65534) …") and exit with status 5. These facts were measured earlier with codex-cli 0.171.0 in a Codex
 session and not again: the MCP tools working in a sandboxed session while the command was
 blocked, the project taken from the session's folder, the actor names with and without
 `AI_AGENT`, and what `codex mcp add` writes. A `.codex/config.toml` inside a project folder was
