@@ -1,0 +1,34 @@
+name: Set up the tools
+description: >-
+  Install proto and the tools that .prototools pins, restore the pnpm store and install the JavaScript dependencies
+  from the lockfile, and, unless told not to, restore the Rust build cache of apps/quadratique.
+
+inputs:
+  rust-cache:
+    description: "Restore and save the Rust build cache; a job that compiles nothing says false."
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # Installs proto, then the tools that .prototools pins, and caches them.
+    - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      with:
+        auto-install: true
+
+    - id: pnpm
+      shell: bash
+      run: echo "store=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.pnpm.outputs.store }}
+        key: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools', 'pnpm-lock.yaml') }}
+        restore-keys: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools') }}-
+    - shell: bash
+      run: pnpm install --frozen-lockfile
+
+    # The cache's key names the job, so each job keeps the target folders that it builds.
+    - if: inputs.rust-cache == 'true'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        workspaces: apps/quadratique

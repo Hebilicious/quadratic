@@ -12,53 +12,59 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Every check runs on every change. The jobs split them so that they run side by side: a runner has four cores, and one
+# job that ran them all waited minutes for a core.
 jobs:
-  check:
-    name: full check
+  # Formatting, lints that compile nothing, types and the catalog: a broken push answers in about a minute.
+  fast:
+    name: formatting, web lint and types, catalog
     runs-on: ubuntu-latest
-    # Only stops a hang: a full check takes far less.
+    # Only stops a hang: these checks take far less.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # Moon compares a pull request with `main`, so it needs the history.
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      # The store engine is compiled from C and links zlib; the tests call jq, curl and flock.
-      - name: Install the system packages
+      - uses: ./.github/actions/setup
+        with:
+          rust-cache: "false"
+
+      - name: Formatting, web lint and types, catalog
+        run: >-
+          moon run
+          quadratique-cli:fmt-check quadratique-server:fmt-check
+          quadratique-web:format-check quadratique-web:lint quadratique-web:typecheck
+          quadratique-catalog:check
+
+  rust:
+    name: Rust tests and lints on Linux
+    runs-on: ubuntu-latest
+    # Only stops a hang: these checks take far less.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Moon compares a pull request with `main`, so it needs the history.
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The store engine is compiled from C and links zlib; the tests call jq, curl and flock. The runner's image has
+      # them, so apt runs only when one is missing: a slow mirror once made this step take four minutes.
+      - name: Install the system packages that the image lacks
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends build-essential zlib1g-dev jq curl util-linux
+          packages="build-essential zlib1g-dev jq curl util-linux"
+          missing=$(for package in $packages; do dpkg-query -W -f='${db:Status-Status}' "$package" 2> /dev/null | grep -qx installed || echo "$package"; done)
+          if [ -n "$missing" ]; then
+            echo "installing: $missing"
+            sudo apt-get update -qq
+            # shellcheck disable=SC2086
+            sudo apt-get install -y -qq --no-install-recommends $missing
+          fi
 
-      # Installs proto, then the tools that .prototools pins, and caches them.
-      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-        with:
-          auto-install: true
-
-      - id: pnpm
-        run: echo "store=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.pnpm.outputs.store }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools', 'pnpm-lock.yaml') }}
-          restore-keys: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools') }}-
-      - run: pnpm install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: apps/quadratique
-
-      - id: playwright
-        run: echo "version=$(pnpm --filter quadratique-web exec playwright --version)" >> "$GITHUB_OUTPUT"
-      - id: browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
-      - if: steps.browsers.outputs.cache-hit != 'true'
-        run: pnpm --filter quadratique-web exec playwright install --with-deps chromium-headless-shell
-      - if: steps.browsers.outputs.cache-hit == 'true'
-        run: pnpm --filter quadratique-web exec playwright install-deps chromium-headless-shell
+      - uses: ./.github/actions/setup
 
       # Ubuntu's AppArmor lets an unprivileged process make a user namespace but not map its account in it, which the
       # tests of a sandbox's user namespace need (unshare --map-user); the variable makes them fail instead of skip.
@@ -68,35 +74,85 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      - name: Run the full check
+      - name: Rust tests and lints
         env:
           QUADRATIQUE_TEST_USER_NAMESPACES: required
-        run: >-
-          moon run
-          quadratique-cli:test quadratique-cli:lint quadratique-cli:fmt-check
-          quadratique-server:test quadratique-server:lint quadratique-server:fmt-check quadratique-server:package-test
-          quadratique-install:test
-          quadratique-eval:test
-          quadratique-catalog:check
-          quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test quadratique-web:e2e
+        run: moon run quadratique-cli:lint quadratique-server:lint quadratique-cli:test quadratique-server:test
 
       # The runner's sudo needs no password, and /tmp lets the account nobody reach a test home's folder.
       - name: Another account against the server
         run: moon run quadratique-server:test-as-nobody
 
+  builds:
+    name: package, install, web tests and journeys on Linux
+    runs-on: ubuntu-latest
+    # Only stops a hang: these checks take far less.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Moon compares a pull request with `main`, so it needs the history.
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The store engine is compiled from C and links zlib; the tests call jq, curl and flock. The runner's image has
+      # them, so apt runs only when one is missing: a slow mirror once made this step take four minutes.
+      - name: Install the system packages that the image lacks
+        run: |
+          packages="build-essential zlib1g-dev jq curl util-linux"
+          missing=$(for package in $packages; do dpkg-query -W -f='${db:Status-Status}' "$package" 2> /dev/null | grep -qx installed || echo "$package"; done)
+          if [ -n "$missing" ]; then
+            echo "installing: $missing"
+            sudo apt-get update -qq
+            # shellcheck disable=SC2086
+            sudo apt-get install -y -qq --no-install-recommends $missing
+          fi
+
+      - uses: ./.github/actions/setup
+
+      - id: playwright
+        run: echo "version=$(pnpm --filter quadratique-web exec playwright --version)" >> "$GITHUB_OUTPUT"
+      - id: browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm --filter quadratique-web exec playwright install chromium-headless-shell
+      # The image has every library that the browser links; `playwright install-deps` adds only fonts that the journeys
+      # do not need, from apt, at every run. It runs only when the browser lacks a library.
+      - name: Install the libraries that the browser lacks
+        run: |
+          browser=$(find ~/.cache/ms-playwright -type f -name chrome-headless-shell -perm -u+x | head -n 1)
+          [ -n "$browser" ] || { echo "no chrome-headless-shell in ~/.cache/ms-playwright" >&2; exit 1; }
+          missing=$(ldd "$browser" | grep 'not found' || true)
+          if [ -n "$missing" ]; then
+            echo "$browser lacks:"
+            echo "$missing"
+            pnpm --filter quadratique-web exec playwright install-deps chromium-headless-shell
+          fi
+
+      - name: Package, install, web tests and journeys
+        run: >-
+          moon run
+          quadratique-web:test quadratique-web:e2e
+          quadratique-install:test quadratique-server:package-test
+          quadratique-eval:test
+
   # The same checks on macOS and Windows, one step per area, so that each platform reports every area that fails and
-  # not only the first. The server serves on macOS as on Linux; on Windows it refuses to start until it has a socket
-  # for one account (QUA-61), and the installer is Linux-only until the install stages of QUA-6. The steps that fail
-  # for those reasons say so and carry `continue-on-error` on that system only, so the job stays green on them and
-  # turns red on any other failure. Remove each one when its issue lands.
-  portability:
-    name: checks on ${{ matrix.os }}
+  # not only the first. Each platform splits them in two jobs that run side by side. The server serves on macOS as on
+  # Linux; on Windows it refuses to start until it has a socket for one account (QUA-61), and the installer is
+  # Linux-only until the install stages of QUA-6. The steps that fail for those reasons say so and carry
+  # `continue-on-error` on that system only, so the job stays green on them and turns red on any other failure. Remove
+  # each one when its issue lands.
+  portability-rust:
+    name: Rust tests and lints on ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Only stops a hang: a full check takes far less.
+    # Only stops a hang: these checks take far less.
     timeout-minutes: 60
     defaults:
       run:
@@ -108,28 +164,15 @@ jobs:
           # No later step pushes, so the built-in token is not kept in the checkout.
           persist-credentials: false
 
-      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-        with:
-          auto-install: true
+      - uses: ./.github/actions/setup
 
-      - id: pnpm
-        run: echo "store=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.pnpm.outputs.store }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools', 'pnpm-lock.yaml') }}
-          restore-keys: pnpm-store-${{ runner.os }}-${{ hashFiles('.prototools') }}-
-      - run: pnpm install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: apps/quadratique
-
-      - name: Install the browser of the journeys
-        run: pnpm --filter quadratique-web exec playwright install chromium-headless-shell
+      - name: Lints and formatting
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-cli:lint quadratique-cli:fmt-check quadratique-server:lint quadratique-server:fmt-check
 
       - name: Build the binary
         id: build
+        if: ${{ !cancelled() }}
         run: moon run quadratique-cli:build
 
       - name: Upload the binary
@@ -148,40 +191,66 @@ jobs:
       - name: Command line tests
         if: ${{ !cancelled() }}
         run: moon run quadratique-cli:test
-      - name: Lints and formatting
-        if: ${{ !cancelled() }}
-        run: moon run quadratique-cli:lint quadratique-cli:fmt-check quadratique-server:lint quadratique-server:fmt-check
       - name: Package test
         if: ${{ !cancelled() }}
         run: moon run quadratique-server:package-test
-      # The release build with the web app inside it, as the installer and the release archive make it.
-      - name: Release build with the web app
-        if: ${{ !cancelled() }}
-        run: |
-          moon run quadratique-web:build
-          sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target/release-build
-      # Expected to fail on Windows only: build.sh names the binary without .exe there (QUA-36, QUA-38). On macOS the
-      # test skips the release archive, which package.sh makes with GNU tar and sha256sum (QUA-36).
-      - name: Install test (expected to fail on Windows until QUA-36, QUA-38)
-        if: ${{ !cancelled() }}
-        continue-on-error: ${{ runner.os == 'Windows' }}
-        run: moon run quadratique-install:test
-      # The tests that run commands in POSIX process groups say they are skipped on Windows until QUA-40.
-      - name: Eval test
-        if: ${{ !cancelled() }}
-        run: moon run quadratique-eval:test
+      # The runner's sudo needs no password, and /tmp lets the account nobody reach a test home's folder.
+      - name: Another account against the server's socket
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        run: moon run quadratique-server:test-as-nobody
+
+  portability-builds:
+    name: release build, install, web and journeys on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # Only stops a hang: these checks take far less.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # No later step pushes, so the built-in token is not kept in the checkout.
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
       - name: Catalog check
         if: ${{ !cancelled() }}
         run: moon run quadratique-catalog:check
       - name: Web checks
         if: ${{ !cancelled() }}
         run: moon run quadratique-web:typecheck quadratique-web:lint quadratique-web:format-check quadratique-web:test
+      # The tests that run commands in POSIX process groups say they are skipped on Windows until QUA-40.
+      - name: Eval test
+        if: ${{ !cancelled() }}
+        run: moon run quadratique-eval:test
+
+      # The release build with the web app inside it, as the installer and the release archive make it. It builds into
+      # the install test's target folder, so that the install test's own builds reuse its crates.
+      - name: Release build with the web app
+        if: ${{ !cancelled() }}
+        run: |
+          moon run quadratique-web:build
+          sh apps/quadratique/install/build.sh apps/quadratique/web/dist apps/quadratique/target/install-test
+      # Not on Windows until QUA-36 and QUA-38: build.sh names the binary without .exe there, and the test fails after
+      # its two release builds, so it would only spend two minutes to tell nothing. The step above still builds the
+      # release there. On macOS the test skips the release archive, which package.sh makes with GNU tar and sha256sum
+      # (QUA-36).
+      - name: Install test (not on Windows until QUA-36, QUA-38)
+        if: ${{ !cancelled() && runner.os != 'Windows' }}
+        run: moon run quadratique-install:test
+
+      - name: Install the browser of the journeys
+        if: ${{ !cancelled() }}
+        run: pnpm --filter quadratique-web exec playwright install chromium-headless-shell
       # Expected to fail on Windows only: the journeys start a server, which refuses to start there until QUA-61.
       - name: Web journeys (expected to fail on Windows until QUA-61)
         if: ${{ !cancelled() }}
         continue-on-error: ${{ runner.os == 'Windows' }}
         run: moon run quadratique-web:e2e
-      # The runner's sudo needs no password, and /tmp lets the account nobody reach a test home's folder.
-      - name: Another account against the server's socket
-        if: ${{ !cancelled() && runner.os == 'macOS' }}
-        run: moon run quadratique-server:test-as-nobody
