@@ -31,13 +31,13 @@ tasks:
       - "!/apps/quadratique/target/debug/quadratique.d"
       - "!/apps/quadratique/target/debug/quadratique.pdb"
   test:
-    description: "The command line's tests, built in their own target folder: cargo test links another quadratique binary than cargo build, and replacing target/debug/quadratique while a test runs it breaks the test."
-    command: "cargo test -p quadratique --target-dir ../target/cli-test"
+    description: "The command line's tests, built with the cli-test profile into target/cli-test: cargo test links another quadratique binary than cargo build, and replacing target/debug/quadratique while a test runs it breaks the test."
+    command: "cargo test -p quadratique --profile cli-test"
     inputs: ["$CFLAGS", "@group(sources)", "@group(server)", "@group(workspace)", "tests/**/*", "/apps/quadratique/server/tests/fixtures/findings/review.json"]
     tags: ["candidate"]
   test-as-nobody:
     description: "Needs `sudo -n` as the account nobody, and /tmp, which nobody can traverse: runs the ignored tests in which the account nobody runs a command against a server of this account. Not part of `test`; `quadratique-server:test-as-nobody` runs it."
-    command: "cargo test -p quadratique --target-dir ../target/cli-test --test cli -- --ignored --nocapture another_account"
+    command: "cargo test -p quadratique --profile cli-test --test cli -- --ignored --nocapture another_account"
     inputs: ["$CFLAGS", "@group(sources)", "@group(server)", "@group(workspace)", "tests/**/*"]
     options:
       cache: false
