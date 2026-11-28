@@ -54,3 +54,10 @@ all = { level = "warn", priority = -1 }
 
 [profile.dev.package.doltlite]
 opt-level = 3
+
+# The command line's tests (`moon run quadratique-cli:test`) build with this profile, which is the dev profile under
+# another name: cargo test links another quadratique binary than cargo build, and this profile puts it in
+# target/cli-test/, away from the target/debug/quadratique that cargo build replaces, which a running test must not see.
+# Being inside target/, it is also removed with the rest of the build when target/ is.
+[profile.cli-test]
+inherits = "dev"
